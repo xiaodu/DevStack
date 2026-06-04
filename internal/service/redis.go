@@ -1,0 +1,72 @@
+package service
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"time"
+
+	"github.com/xiaodu/DevStack/internal/config"
+	"github.com/xiaodu/DevStack/internal/core"
+	"github.com/xiaodu/DevStack/internal/process"
+)
+
+type RedisHandler struct{}
+
+func (h *RedisHandler) Start(s *ServiceInstance, cfg *config.Config, pm *process.Manager) error {
+	installDir := cfg.Get().InstallDir
+	redisDir := filepath.Join(installDir, "redis", s.Info.Version)
+	redisServer := filepath.Join(redisDir, "redis-server.exe")
+
+	if !fileExists(redisServer) {
+		redisServer = filepath.Join(redisDir, "src", "redis-server.exe")
+	}
+	if !fileExists(redisServer) {
+		return fmt.Errorf("Redis 可执行文件未找到: %s", redisServer)
+	}
+
+	redisConf := filepath.Join(redisDir, "redis.conf")
+	if !fileExists(redisConf) {
+		conf := fmt.Sprintf(`port %d
+bind 127.0.0.1
+daemonize no
+loglevel notice
+logfile ""
+dir "%s"
+`, s.Info.Port, redisDir)
+		os.WriteFile(redisConf, []byte(conf), 0644)
+	}
+
+	s.Info.Status = core.StatusStarting
+	args := []string{redisConf}
+	pid, err := pm.Start("redis", redisServer, args, nil, redisDir)
+	if err != nil {
+		s.Info.Status = core.StatusError
+		s.Info.Error = err.Error()
+		return err
+	}
+
+	s.process = &execWrapper{
+		pid:     pid,
+		cmd:     redisServer,
+		started: time.Now(),
+	}
+	s.Info.Status = core.StatusRunning
+	s.Info.PID = pid
+	return nil
+}
+
+func (h *RedisHandler) Stop(s *ServiceInstance, pm *process.Manager) error {
+	if s.process == nil || s.process.pid <= 0 {
+		return nil
+	}
+	s.Info.Status = core.StatusStopping
+	if err := pm.Stop(s.process.pid); err != nil {
+		s.Info.Status = core.StatusError
+		return err
+	}
+	s.process = nil
+	s.Info.Status = core.StatusStopped
+	s.Info.PID = 0
+	return nil
+}
