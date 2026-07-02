@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -21,6 +22,7 @@ type ProcessInfo struct {
 }
 
 type Manager struct {
+	mu        sync.Mutex
 	processes map[int]*exec.Cmd
 }
 
@@ -33,30 +35,36 @@ func NewManager() *Manager {
 func (m *Manager) Start(name, executable string, args []string, env []string, workdir string) (int, error) {
 	cmd := exec.Command(executable, args...)
 	cmd.Dir = workdir
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stdout = nil
+	cmd.Stderr = nil
 	if len(env) > 0 {
 		cmd.Env = append(os.Environ(), env...)
 	}
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: false}
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 
 	if err := cmd.Start(); err != nil {
 		return 0, fmt.Errorf("启动 %s 失败: %w", name, err)
 	}
 
 	pid := cmd.Process.Pid
+	m.mu.Lock()
 	m.processes[pid] = cmd
+	m.mu.Unlock()
 
 	go func() {
 		cmd.Wait()
+		m.mu.Lock()
 		delete(m.processes, pid)
+		m.mu.Unlock()
 	}()
 
 	return pid, nil
 }
 
 func (m *Manager) Stop(pid int) error {
+	m.mu.Lock()
 	cmd, ok := m.processes[pid]
+	m.mu.Unlock()
 	if !ok {
 		proc, err := os.FindProcess(pid)
 		if err != nil {
@@ -71,15 +79,15 @@ func (m *Manager) IsRunning(pid int) bool {
 	if pid <= 0 {
 		return false
 	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	return proc.Signal(os.Signal(syscall.Signal(0))) == nil
+	m.mu.Lock()
+	_, ok := m.processes[pid]
+	m.mu.Unlock()
+	return ok
 }
 
 func FindPIDByPort(port int) int {
 	cmd := exec.Command("netstat", "-ano")
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	out, err := cmd.Output()
 	if err != nil {
 		return 0

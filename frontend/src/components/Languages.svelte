@@ -15,7 +15,7 @@
   async function load() {
     try {
       const all = await api.getServices()
-      services = all.filter(s => s.type === 'language' || ['php','node','python'].includes(s.id))
+      services = all.filter(s => s.category === 'language' && s.installed)
       if (!selectedId && services.length > 0) {
         selectLang(services[0].id)
       }
@@ -27,6 +27,28 @@
   }
 
   function selectLang(id) { selectedId = id }
+
+  async function saveConfig(svc) {
+    const vals = {}
+    if (svc.id === 'php') {
+      const maxExec = document.getElementById('php-max-exec')
+      const memLimit = document.getElementById('php-mem-limit')
+      const postMax = document.getElementById('php-post-max')
+      const uploadMax = document.getElementById('php-upload-max')
+      const timezone = document.getElementById('php-timezone')
+      if (maxExec) vals['max_execution_time'] = maxExec.value
+      if (memLimit) vals['memory_limit'] = memLimit.value
+      if (postMax) vals['post_max_size'] = postMax.value
+      if (uploadMax) vals['upload_max_filesize'] = uploadMax.value
+      if (timezone) vals['date.timezone'] = timezone.value
+    }
+    try {
+      await api.saveServiceConfig(svc.id, vals)
+      alert('保存成功')
+    } catch (e) {
+      alert('保存失败: ' + (e.message || e))
+    }
+  }
 
   function getLang(id) { return services.find(s => s.id === id) }
 
@@ -67,7 +89,7 @@
             <div class="lang-info">
               <span class="lang-name">{svc.name} {svc.version}</span>
             </div>
-            <span class="lang-status {svc.status}"></span>
+            <span class="lang-status running"></span>
           </button>
         {/each}
       {/each}
@@ -93,7 +115,7 @@
           <div class="config-row">
             <label class="form-label">
               <span>最大执行时间 (秒)</span>
-              <input class="form-input" type="number" value="300" />
+              <input id="php-max-exec" class="form-input" type="number" value="300" />
             </label>
             <label class="form-label">
               <span>最大输入时间 (秒)</span>
@@ -104,7 +126,7 @@
           <div class="config-row">
             <label class="form-label">
               <span>内存限制</span>
-              <select class="form-input">
+              <select id="php-mem-limit" class="form-input">
                 <option>64M</option>
                 <option>128M</option>
                 <option selected>256M</option>
@@ -114,7 +136,7 @@
             </label>
             <label class="form-label">
               <span>最大 POST 大小</span>
-              <select class="form-input">
+              <select id="php-post-max" class="form-input">
                 <option>8M</option>
                 <option>16M</option>
                 <option selected>128M</option>
@@ -126,7 +148,7 @@
           <div class="config-row">
             <label class="form-label">
               <span>最大上传文件大小</span>
-              <select class="form-input">
+              <select id="php-upload-max" class="form-input">
                 <option>2M</option>
                 <option>8M</option>
                 <option>16M</option>
@@ -139,15 +161,15 @@
             </label>
           </div>
 
-          <label class="form-label">
-            <span>时区</span>
-            <select class="form-input">
-              <option>UTC</option>
-              <option selected>Asia/Shanghai</option>
-              <option>America/New_York</option>
-              <option>Europe/London</option>
-            </select>
-          </label>
+            <label class="form-label">
+              <span>时区</span>
+              <select id="php-timezone" class="form-input">
+                <option>UTC</option>
+                <option selected>Asia/Shanghai</option>
+                <option>America/New_York</option>
+                <option>Europe/London</option>
+              </select>
+            </label>
 
           <div class="toggle-row">
             <label class="toggle-label">
@@ -187,7 +209,7 @@
       </div>
 
       <div class="actions">
-        <button class="btn btn-primary" on:click={() => alert('保存功能开发中')}>保存设置</button>
+        <button class="btn btn-primary" on:click={() => saveConfig(current)}>保存设置</button>
       </div>
     {:else}
       <div class="empty-state">
@@ -223,13 +245,14 @@
   .lang-list { flex: 1; padding: 8px; overflow-y: auto; }
 
   .group-label {
-    font-size: 11px;
-    font-weight: 600;
-    color: var(--text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    padding: 12px 12px 6px;
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--text-primary);
+    padding: 16px 12px 8px;
+    border-bottom: 1px solid var(--border);
+    margin: 8px 0 4px;
   }
+  .group-label:first-of-type { margin-top: 0; padding-top: 12px; }
 
   .lang-item {
     display: flex;

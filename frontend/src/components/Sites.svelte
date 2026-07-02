@@ -74,6 +74,14 @@
     s.domain.toLowerCase().includes(searchQuery.toLowerCase())
   )
 
+  async function browseDirectory() {
+    const path = await api.openDirectory(editing?.documentRoot || '')
+    if (path && editing) {
+      editing.documentRoot = path
+      editing = editing
+    }
+  }
+
   onMount(load)
 </script>
 
@@ -188,7 +196,7 @@
           <span>网站根目录</span>
           <div class="input-row">
             <input class="form-input" bind:value={editing.documentRoot} placeholder="E:\projects\my-site" />
-            <button class="btn btn-outline btn-sm">浏览</button>
+            <button class="btn btn-outline btn-sm" on:click={browseDirectory}>浏览</button>
           </div>
         </label>
 

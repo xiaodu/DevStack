@@ -19,9 +19,14 @@
     }
   }
 
+  function applyTheme(theme) {
+    document.documentElement.setAttribute('data-theme', theme || 'light')
+  }
+
   async function save() {
     try {
       await api.saveSettings(settings)
+      applyTheme(settings.theme)
       saved = true
       setTimeout(() => saved = false, 2000)
     } catch (e) {

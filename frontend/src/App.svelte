@@ -11,18 +11,25 @@
   import Settings from './components/Settings.svelte'
   import SetupWizard from './components/SetupWizard.svelte'
   import { api } from './lib/api.js'
+  import { refreshSignal, toasts, addToast, globalLoading } from './lib/stores.js'
 
   let currentView = 'dashboard'
   let showWizard = false
   let appReady = false
+  let topBusy = false
 
   function navigate(view) {
     currentView = view
   }
 
+  function applyTheme(theme) {
+    document.documentElement.setAttribute('data-theme', theme || 'light')
+  }
+
   onMount(async () => {
     try {
       const settings = await api.getSettings()
+      applyTheme(settings.theme)
       if (!settings.installDir) {
         showWizard = true
       }
@@ -37,6 +44,65 @@
     showWizard = false
   }
 
+  async function startAll() {
+    if (topBusy) return
+    topBusy = true
+    globalLoading.set(true)
+    try {
+      const svcs = await api.getServices()
+      const ids = svcs.filter(s => s.installed && s.id !== 'php' && s.id !== 'node' && s.id !== 'python').map(s => s.id)
+      let ok = 0, fail = 0
+      for (const id of ids) {
+        try { await api.startService(id); ok++ }
+        catch (e) { fail++ }
+      }
+      if (fail === 0) addToast(`${ok} 个服务已启动`, 'success')
+      else addToast(`${ok} 个成功，${fail} 个失败`, fail > 0 ? 'error' : 'success')
+    } catch (e) {
+      addToast('操作失败', 'error')
+    }
+    refreshSignal.update(n => n + 1)
+    globalLoading.set(false)
+    topBusy = false
+  }
+
+  async function stopAll() {
+    if (topBusy) return
+    topBusy = true
+    globalLoading.set(true)
+    try {
+      const svcs = await api.getServices()
+      const ids = svcs.filter(s => s.installed && s.id !== 'php' && s.id !== 'node' && s.id !== 'python').map(s => s.id)
+      let ok = 0, fail = 0
+      for (const id of ids) {
+        try { await api.stopService(id); ok++ }
+        catch (e) { fail++ }
+      }
+      if (fail === 0) addToast(`${ok} 个服务已停止`, 'success')
+      else addToast(`${ok} 个成功，${fail} 个失败`, fail > 0 ? 'error' : 'success')
+    } catch (e) {
+      addToast('操作失败', 'error')
+    }
+    refreshSignal.update(n => n + 1)
+    globalLoading.set(false)
+    topBusy = false
+  }
+
+  async function restartNginx() {
+    if (topBusy) return
+    topBusy = true
+    globalLoading.set(true)
+    try {
+      await api.restartService('nginx')
+      addToast('Nginx 已重启', 'success')
+    } catch (e) {
+      addToast('重启失败: ' + (e.message || e), 'error')
+    }
+    refreshSignal.update(n => n + 1)
+    globalLoading.set(false)
+    topBusy = false
+  }
+
   $: pageTitle = {
     dashboard: '仪表盘',
     sites: '网站',
@@ -49,58 +115,69 @@
   }[currentView] || ''
 </script>
 
-{#if !appReady}
-  <div class="splash">
-    <div class="splash-spinner"></div>
-    <p>加载中...</p>
+<div class="splash" class:app-ready={appReady}>
+  <div class="splash-spinner"></div>
+  <p>加载中...</p>
+</div>
+
+<div class="app-container" class:app-ready={appReady}>
+  <Sidebar {currentView} on:navigate={(e) => navigate(e.detail)} />
+  <div class="main-area">
+    <header class="top-bar">
+      <div class="page-info">
+        {pageTitle}
+        <div class="load-bar" class:active={$globalLoading}></div>
+      </div>
+      <div class="top-actions">
+        <button class="top-btn green" title="启动 Nginx + MySQL + Redis" on:click={startAll} disabled={topBusy}>▶</button>
+        <button class="top-btn orange" title="重启 Nginx" on:click={restartNginx} disabled={topBusy}>⟳</button>
+        <button class="top-btn red" title="停止 Nginx + MySQL + Redis" on:click={stopAll} disabled={topBusy}>■</button>
+      </div>
+    </header>
+    <main class="main-content">
+      <div class="view-stack">
+        <div class="view-pane" class:active={currentView === 'dashboard'}><Dashboard /></div>
+        <div class="view-pane" class:active={currentView === 'sites'}><Sites /></div>
+        <div class="view-pane" class:active={currentView === 'database'}><Database /></div>
+        <div class="view-pane" class:active={currentView === 'languages'}><Languages /></div>
+        <div class="view-pane" class:active={currentView === 'webserver'}><WebServer /></div>
+        <div class="view-pane" class:active={currentView === 'packages'}><Packages /></div>
+        <div class="view-pane" class:active={currentView === 'logs'}><Logs /></div>
+        <div class="view-pane" class:active={currentView === 'settings'}><Settings /></div>
+      </div>
+    </main>
   </div>
-{:else if showWizard}
+</div>
+
+<div class="wizard-layer" class:hidden={!showWizard}>
   <SetupWizard on:complete={wizardComplete} />
-{:else}
-  <div class="app-container">
-    <Sidebar {currentView} on:navigate={(e) => navigate(e.detail)} />
-    <div class="main-area">
-      <header class="top-bar">
-        <div class="page-info">{pageTitle}</div>
-        <div class="top-actions">
-          <button class="top-btn green" title="启动全部" on:click={async () => { try { await api.startService('nginx'); await api.startService('mysql'); await api.startService('redis'); } catch(e) {} }}>▶</button>
-          <button class="top-btn orange" title="重启" on:click={async () => { try { await api.restartService('nginx'); } catch(e) {} }}>⟳</button>
-          <button class="top-btn red" title="停止全部" on:click={async () => { try { await api.stopService('nginx'); await api.stopService('mysql'); await api.stopService('redis'); } catch(e) {} }}>■</button>
-        </div>
-      </header>
-      <main class="main-content">
-        {#if currentView === 'dashboard'}
-          <Dashboard />
-        {:else if currentView === 'sites'}
-          <Sites />
-        {:else if currentView === 'database'}
-          <Database />
-        {:else if currentView === 'languages'}
-          <Languages />
-        {:else if currentView === 'webserver'}
-          <WebServer />
-        {:else if currentView === 'packages'}
-          <Packages />
-        {:else if currentView === 'logs'}
-          <Logs />
-        {:else if currentView === 'settings'}
-          <Settings />
-        {/if}
-      </main>
-    </div>
-  </div>
-{/if}
+</div>
+
+<div class="toast-container">
+  {#each $toasts as t (t.id)}
+    <div class="toast toast-{t.type}">{t.msg}</div>
+  {/each}
+</div>
 
 <style>
   .splash {
-    height: 100vh;
+    position: fixed;
+    inset: 0;
+    z-index: 100;
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
     gap: 16px;
+    background: var(--bg-primary);
     color: var(--text-muted);
+    transition: opacity 0.3s;
   }
+  .splash.app-ready {
+    opacity: 0;
+    pointer-events: none;
+  }
+
   .splash-spinner {
     width: 32px; height: 32px;
     border: 3px solid var(--border);
@@ -114,6 +191,11 @@
     display: flex;
     height: 100vh;
     width: 100vw;
+    opacity: 0;
+    transition: opacity 0.3s;
+  }
+  .app-container.app-ready {
+    opacity: 1;
   }
 
   .main-area {
@@ -137,6 +219,29 @@
     font-size: 16px;
     font-weight: 600;
     color: var(--text-primary);
+    position: relative;
+  }
+
+  .load-bar {
+    position: absolute;
+    bottom: -10px;
+    left: 0;
+    height: 2px;
+    width: 0;
+    background: var(--accent);
+    border-radius: 1px;
+    transition: width 0.15s, opacity 0.15s;
+    opacity: 0;
+  }
+  .load-bar.active {
+    width: 100%;
+    opacity: 1;
+    animation: load-slide 1.2s ease-in-out infinite;
+  }
+  @keyframes load-slide {
+    0% { width: 0; margin-left: 0; }
+    50% { width: 70%; margin-left: 15%; }
+    100% { width: 0; margin-left: 100%; }
   }
 
   .top-actions { display: flex; gap: 8px; }
@@ -147,9 +252,10 @@
     display: flex; align-items: center; justify-content: center;
     font-size: 14px;
     color: #fff;
-    transition: transform 0.1s;
   }
-  .top-btn:hover { transform: scale(1.1); }
+  .top-btn:hover { filter: brightness(1.15); }
+  .top-btn:active { filter: brightness(0.9); }
+  .top-btn:disabled { opacity: 0.4; cursor: default; filter: none; }
   .top-btn.green { background: var(--green); }
   .top-btn.orange { background: var(--orange); }
   .top-btn.red { background: var(--red); }
@@ -157,7 +263,49 @@
   .main-content {
     flex: 1;
     overflow-y: auto;
+    scrollbar-gutter: stable;
     padding: 24px 32px;
     background: var(--bg-primary);
+  }
+
+  .view-stack { position: relative; }
+  .view-pane { display: none; }
+  .view-pane.active { display: block; }
+
+  .wizard-layer {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    background: var(--bg-primary);
+  }
+  .wizard-layer.hidden { display: none; }
+
+  .toast-container {
+    position: fixed;
+    top: 60px;
+    right: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    z-index: 9999;
+    pointer-events: none;
+  }
+
+  .toast {
+    padding: 10px 18px;
+    border-radius: var(--radius);
+    font-size: 13px;
+    color: #fff;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+    animation: toast-in 0.25s ease-out;
+    pointer-events: auto;
+  }
+  .toast-success { background: var(--green); }
+  .toast-error { background: var(--red); }
+  .toast-info { background: var(--accent); }
+
+  @keyframes toast-in {
+    from { opacity: 0; transform: translateX(40px); }
+    to { opacity: 1; transform: translateX(0); }
   }
 </style>

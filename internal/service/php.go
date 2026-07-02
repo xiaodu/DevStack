@@ -13,6 +13,47 @@ import (
 
 type PHPHandler struct{}
 
+func (h *PHPHandler) Configure(s *ServiceInstance, cfg *config.Config) error {
+	installDir := cfg.Get().InstallDir
+	phpDir := filepath.Join(installDir, "php", s.Info.Version)
+
+	phpIni := filepath.Join(phpDir, "php.ini")
+	if fileExists(phpIni) {
+		return nil
+	}
+
+	prod := filepath.Join(phpDir, "php.ini-production")
+	dev := filepath.Join(phpDir, "php.ini-development")
+	if fileExists(prod) {
+		data, err := os.ReadFile(prod)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(phpIni, data, 0644)
+	}
+	if fileExists(dev) {
+		data, err := os.ReadFile(dev)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(phpIni, data, 0644)
+	}
+
+	ini := `[PHP]
+engine = On
+error_reporting = E_ALL
+display_errors = On
+log_errors = On
+error_log = "php_errors.log"
+extension_dir = "ext"
+cgi.fix_pathinfo = 1
+cgi.force_redirect = 0
+fastcgi.impersonate = 1
+date.timezone = Asia/Shanghai
+`
+	return os.WriteFile(phpIni, []byte(ini), 0644)
+}
+
 func (h *PHPHandler) Start(s *ServiceInstance, cfg *config.Config, pm *process.Manager) error {
 	installDir := cfg.Get().InstallDir
 	phpDir := filepath.Join(installDir, "php", s.Info.Version)
@@ -63,6 +104,23 @@ date.timezone = Asia/Shanghai
 	s.Info.Status = core.StatusRunning
 	s.Info.PID = pid
 	return nil
+}
+
+func (h *PHPHandler) SaveConfig(s *ServiceInstance, cfg *config.Config, values map[string]string) error {
+	installDir := cfg.Get().InstallDir
+	phpIni := filepath.Join(installDir, "php", s.Info.Version, "php.ini")
+	if !fileExists(phpIni) {
+		return h.Configure(s, cfg)
+	}
+	data, err := os.ReadFile(phpIni)
+	if err != nil {
+		return err
+	}
+	content := string(data)
+	for k, v := range values {
+		content = updateIniValue(content, k, v)
+	}
+	return os.WriteFile(phpIni, []byte(content), 0644)
 }
 
 func (h *PHPHandler) Stop(s *ServiceInstance, pm *process.Manager) error {

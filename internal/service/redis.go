@@ -13,6 +13,25 @@ import (
 
 type RedisHandler struct{}
 
+func (h *RedisHandler) Configure(s *ServiceInstance, cfg *config.Config) error {
+	installDir := cfg.Get().InstallDir
+	redisDir := filepath.Join(installDir, "redis", s.Info.Version)
+
+	redisConf := filepath.Join(redisDir, "redis.conf")
+	if fileExists(redisConf) {
+		return nil
+	}
+
+	conf := fmt.Sprintf(`port %d
+bind 127.0.0.1
+daemonize no
+loglevel notice
+logfile ""
+dir "%s"
+`, s.Info.Port, redisDir)
+	return os.WriteFile(redisConf, []byte(conf), 0644)
+}
+
 func (h *RedisHandler) Start(s *ServiceInstance, cfg *config.Config, pm *process.Manager) error {
 	installDir := cfg.Get().InstallDir
 	redisDir := filepath.Join(installDir, "redis", s.Info.Version)
@@ -54,6 +73,23 @@ dir "%s"
 	s.Info.Status = core.StatusRunning
 	s.Info.PID = pid
 	return nil
+}
+
+func (h *RedisHandler) SaveConfig(s *ServiceInstance, cfg *config.Config, values map[string]string) error {
+	installDir := cfg.Get().InstallDir
+	confPath := filepath.Join(installDir, "redis", s.Info.Version, "redis.conf")
+	if !fileExists(confPath) {
+		return h.Configure(s, cfg)
+	}
+	data, err := os.ReadFile(confPath)
+	if err != nil {
+		return err
+	}
+	content := string(data)
+	for k, v := range values {
+		content = updateConfValue(content, k, v)
+	}
+	return os.WriteFile(confPath, []byte(content), 0644)
 }
 
 func (h *RedisHandler) Stop(s *ServiceInstance, pm *process.Manager) error {

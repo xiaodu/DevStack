@@ -2,99 +2,85 @@
   import { onMount } from 'svelte'
   import { api } from '../lib/api.js'
 
-  let categories = [
-    { id: 'services', label: '基础服务', icon: '⚙' },
-    { id: 'webserver', label: 'Web 服务器', icon: '🌐' },
-    { id: 'tools', label: '工具', icon: '🔧' },
-    { id: 'languages', label: '语言', icon: '💻' },
-  ]
-
-  let selectedCategory = 'tools'
-
-  let allPackages = [
-    { id: 'phpmyadmin', name: 'phpMyAdmin', version: '5.2.3', category: 'tools', installed: false, type: 'tool' },
-    { id: 'adminer', name: 'Adminer', version: '5.4.2', category: 'tools', installed: false, type: 'tool' },
-    { id: 'git', name: 'Git', version: '2.54.0', category: 'tools', installed: false, type: 'tool' },
-    { id: 'composer', name: 'Composer 2.2 LTS', version: '2.2.27', category: 'tools', installed: false, type: 'tool' },
-    { id: 'composer2', name: 'Composer', version: '2.9.7', category: 'tools', installed: false, type: 'tool' },
-    { id: 'nginx', name: 'Nginx', version: '1.26.0', category: 'webserver', installed: false, type: 'service' },
-    { id: 'caddy', name: 'Caddy', version: '2.9.1', category: 'webserver', installed: false, type: 'service' },
-    { id: 'mysql', name: 'MySQL', version: '8.4', category: 'services', installed: false, type: 'service' },
-    { id: 'mariadb', name: 'MariaDB', version: '11.4', category: 'services', installed: false, type: 'service' },
-    { id: 'postgresql', name: 'PostgreSQL', version: '16', category: 'services', installed: false, type: 'service' },
-    { id: 'redis', name: 'Redis', version: '7.4.0', category: 'services', installed: false, type: 'service' },
-    { id: 'mongodb', name: 'MongoDB', version: '7.0', category: 'services', installed: false, type: 'service' },
-    { id: 'memcached', name: 'Memcached', version: '1.6.32', category: 'services', installed: false, type: 'service' },
-    { id: 'php', name: 'PHP', version: '8.4', category: 'languages', installed: false, type: 'language' },
-    { id: 'php83', name: 'PHP', version: '8.3', category: 'languages', installed: false, type: 'language' },
-    { id: 'php82', name: 'PHP', version: '8.2', category: 'languages', installed: false, type: 'language' },
-    { id: 'node', name: 'Node.js', version: '22', category: 'languages', installed: false, type: 'language' },
-    { id: 'node20', name: 'Node.js', version: '20', category: 'languages', installed: false, type: 'language' },
-    { id: 'node18', name: 'Node.js', version: '18', category: 'languages', installed: false, type: 'language' },
-    { id: 'bun', name: 'Bun', version: '1.3', category: 'languages', installed: false, type: 'language' },
-    { id: 'deno', name: 'Deno', version: '2.1', category: 'languages', installed: false, type: 'language' },
-    { id: 'python', name: 'Python', version: '3.13', category: 'languages', installed: false, type: 'language' },
-    { id: 'python312', name: 'Python', version: '3.12', category: 'languages', installed: false, type: 'language' },
-    { id: 'go', name: 'Go', version: '1.24', category: 'languages', installed: false, type: 'language' },
-    { id: 'java', name: 'OpenJDK', version: '21', category: 'languages', installed: false, type: 'language' },
-    { id: 'ruby', name: 'Ruby', version: '3.4', category: 'languages', installed: false, type: 'language' },
-  ]
-
+  let packages = []
+  let selected = 'all'
   let installing = {}
+  let uninstalling = {}
+  let loading = true
 
+  const categories = [
+    { id: 'all', label: '全部', icon: '📦' },
+    { id: 'webserver', label: 'Web 服务器', icon: '🌐' },
+    { id: 'database', label: '数据库', icon: '🗄️' },
+    { id: 'language', label: '语言', icon: '💻' },
+    { id: 'service', label: '基础服务', icon: '⚙' },
+  ]
+
+  const serviceNames = {
+    nginx: 'Nginx', mysql: 'MySQL', redis: 'Redis',
+    php: 'PHP', node: 'Node.js', python: 'Python',
+  }
   async function load() {
+    loading = true
+    packages = []
     try {
       const services = await api.getServices()
       for (const svc of services) {
-        const pkg = allPackages.find(p => p.id === svc.id)
-        if (pkg) {
-          pkg.installed = true
-          pkg.running = svc.status === 'running'
-          pkg.pid = svc.pid || null
+        const releases = await api.getAvailableVersions(svc.id) || []
+        for (const rel of releases) {
+          const installed = await api.checkVersionInstalled(svc.id, rel.version)
+          packages.push({
+            id: svc.id,
+            name: serviceNames[svc.id] || svc.name,
+            version: rel.version,
+            category: svc.category,
+            installed,
+            isCurrent: svc.version === rel.version && svc.installed,
+          })
         }
       }
-      allPackages = [...allPackages]
+      packages = [...packages]
     } catch (e) {
       console.error(e)
+    } finally {
+      loading = false
     }
   }
 
   async function install(pkg) {
-    installing[pkg.id] = true
-    allPackages = [...allPackages]
+    const key = `${pkg.id}-${pkg.version}`
+    installing[key] = true
+    packages = [...packages]
     try {
       await api.downloadService(pkg.id, pkg.version)
-      pkg.installed = true
+      await load()
     } catch (e) {
       alert(`安装失败: ${e.message || e}`)
     } finally {
-      installing[pkg.id] = false
-      allPackages = [...allPackages]
+      installing[key] = false
+      packages = [...packages]
     }
   }
 
   async function uninstall(pkg) {
     if (!confirm(`确定卸载 ${pkg.name} ${pkg.version}？`)) return
-    pkg.installed = false
-    allPackages = [...allPackages]
-  }
-
-  async function toggleService(pkg) {
+    const key = `${pkg.id}-${pkg.version}`
+    uninstalling[key] = true
+    packages = [...packages]
     try {
-      if (pkg.running) {
-        await api.stopService(pkg.id)
-        pkg.running = false
-      } else {
-        await api.startService(pkg.id)
-        pkg.running = true
-      }
-      allPackages = [...allPackages]
+      await api.uninstallVersion(pkg.id, pkg.version)
+      await load()
     } catch (e) {
-      alert(e.message || e)
+      alert(`卸载失败: ${e.message || e}`)
+    } finally {
+      uninstalling[key] = false
+      packages = [...packages]
     }
   }
 
-  $: filteredPackages = allPackages.filter(p => p.category === selectedCategory)
+  $: filtered = selected === 'all'
+    ? packages
+    : packages.filter(p => p.category === selected)
 
   onMount(load)
 </script>
@@ -108,8 +94,8 @@
       {#each categories as cat}
         <button
           class="cat-item"
-          class:active={selectedCategory === cat.id}
-          on:click={() => selectedCategory = cat.id}
+          class:active={selected === cat.id}
+          on:click={() => selected = cat.id}
         >
           <span class="cat-icon">{cat.icon}</span>
           <span>{cat.label}</span>
@@ -120,65 +106,67 @@
 
   <div class="pkg-right">
     <div class="detail-header">
-      <h2>{categories.find(c => c.id === selectedCategory)?.label || ''}</h2>
+      <h2>{categories.find(c => c.id === selected)?.label || ''}</h2>
     </div>
 
-    <table class="pkg-table">
-      <thead>
-        <tr>
-          <th>包名称</th>
-          <th>版本</th>
-          <th>状态</th>
-          <th>PID</th>
-          <th>控制</th>
-        </tr>
-      </thead>
-      <tbody>
-        {#each filteredPackages as pkg}
+    {#if loading}
+      <div class="loading">加载中...</div>
+    {:else if filtered.length === 0}
+      <div class="empty-row">暂无软件包</div>
+    {:else}
+      <table class="pkg-table">
+        <thead>
           <tr>
-            <td class="pkg-name">{pkg.name}</td>
-            <td class="pkg-ver">{pkg.version}</td>
-            <td>
-              {#if pkg.installed}
-                <span class="badge badge-success">Installed</span>
-              {:else if installing[pkg.id]}
-                <span class="badge badge-warning">安装中...</span>
-              {:else}
-                <span class="badge badge-muted">Not Installed</span>
-              {/if}
-            </td>
-            <td class="pkg-pid">{pkg.pid || '-'}</td>
-            <td class="pkg-actions">
-              {#if pkg.installed}
-                {#if pkg.type === 'service' || pkg.type === 'language'}
-                  <button
-                    class="ctrl-btn {pkg.running ? 'stop' : 'start'}"
-                    on:click={() => toggleService(pkg)}
-                    title={pkg.running ? '停止' : '启动'}
-                  >
-                    {pkg.running ? '⏹' : '▶'}
+            <th>包名称</th>
+            <th>版本</th>
+            <th>状态</th>
+            <th>控制</th>
+          </tr>
+        </thead>
+        <tbody>
+          {#each filtered as pkg}
+            {@const key = `${pkg.id}-${pkg.version}`}
+            <tr class:current={pkg.isCurrent}>
+              <td class="pkg-name">{pkg.name}</td>
+              <td class="pkg-ver">
+                {pkg.version}
+                {#if pkg.isCurrent}
+                  <span class="current-tag">当前使用</span>
+                {/if}
+              </td>
+              <td>
+                {#if pkg.installed}
+                  <span class="badge badge-success">已安装</span>
+                {:else if installing[key]}
+                  <span class="badge badge-warning">安装中...</span>
+                {:else if uninstalling[key]}
+                  <span class="badge badge-warning">卸载中...</span>
+                {:else}
+                  <span class="badge badge-muted">未安装</span>
+                {/if}
+              </td>
+              <td class="pkg-actions">
+                {#if pkg.installed}
+                  {#if uninstalling[key]}
+                    <span class="spinner-sm"></span>
+                  {:else}
+                    <button class="ctrl-btn uninstall" on:click={() => uninstall(pkg)} title="卸载">
+                      🗑
+                    </button>
+                  {/if}
+                {:else if installing[key]}
+                  <span class="spinner-sm"></span>
+                {:else}
+                  <button class="ctrl-btn install" on:click={() => install(pkg)} title="安装">
+                    ⬇
                   </button>
                 {/if}
-                <button class="ctrl-btn uninstall" on:click={() => uninstall(pkg)} title="卸载">
-                  🗑
-                </button>
-              {:else if installing[pkg.id]}
-                <span class="spinner-sm"></span>
-              {:else}
-                <button class="ctrl-btn install" on:click={() => install(pkg)} title="安装">
-                  ⬇
-                </button>
-              {/if}
-            </td>
-          </tr>
-        {/each}
-        {#if filteredPackages.length === 0}
-          <tr>
-            <td colspan="5" class="empty-row">暂无软件包</td>
-          </tr>
-        {/if}
-      </tbody>
-    </table>
+              </td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    {/if}
   </div>
 </div>
 
@@ -234,7 +222,7 @@
     padding: 16px 24px;
     border-bottom: 1px solid var(--border);
   }
-  .detail-header h2 { font-size: 18px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+  .detail-header h2 { font-size: 18px; font-weight: 600; }
 
   .pkg-table {
     width: 100%;
@@ -256,11 +244,18 @@
     vertical-align: middle;
   }
   .pkg-table tr:hover td { background: var(--bg-card-hover); }
-  .pkg-table tr:last-child td { border-bottom: none; }
 
   .pkg-name { font-weight: 500; }
-  .pkg-ver { font-family: var(--font-mono); color: var(--text-secondary); }
-  .pkg-pid { font-family: var(--font-mono); font-size: 12px; color: var(--text-muted); }
+  .pkg-ver { font-family: var(--font-mono); color: var(--text-secondary); display: flex; align-items: center; gap: 8px; }
+
+  .current-tag {
+    font-size: 10px;
+    background: var(--accent-light);
+    color: var(--accent);
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-family: var(--font);
+  }
 
   .badge {
     display: inline-flex;
@@ -290,9 +285,7 @@
     border: none;
   }
   .ctrl-btn:hover { transform: scale(1.1); }
-  .ctrl-btn.start { background: var(--green-bg); color: var(--green); }
-  .ctrl-btn.stop { background: var(--yellow-bg); color: var(--yellow); }
-  .ctrl-btn.install { background: #dbeafe; color: #2563eb; }
+  .ctrl-btn.install { background: #dbeafe; color: var(--accent); }
   .ctrl-btn.uninstall { background: var(--red-bg); color: var(--red); }
 
   .spinner-sm {
@@ -304,6 +297,7 @@
   }
   @keyframes spin { to { transform: rotate(360deg); } }
 
+  .loading { color: var(--text-muted); padding: 40px; text-align: center; }
   .empty-row {
     text-align: center;
     color: var(--text-muted);

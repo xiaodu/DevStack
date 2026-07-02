@@ -9,7 +9,7 @@
   async function load() {
     try {
       const all = await api.getServices()
-      services = all.filter(s => s.type === 'webserver' || s.id === 'nginx')
+      services = all.filter(s => s.category === 'webserver' && s.installed)
       if (services.length > 0) selectedId = services[0].id
     } catch (e) {
       console.error(e)
@@ -19,6 +19,18 @@
   }
 
   function getSvc(id) { return services.find(s => s.id === id) }
+
+  async function saveConfig(svc) {
+    const vals = {}
+    const port = document.getElementById('nginx-http-port')
+    if (port) vals['listen'] = port.value
+    try {
+      await api.saveServiceConfig(svc.id, vals)
+      alert('保存成功')
+    } catch (e) {
+      alert('保存失败: ' + (e.message || e))
+    }
+  }
 
   async function toggle(id) {
     try {
@@ -78,14 +90,14 @@
 
       <div class="config-grid">
         <div class="config-row">
-          <label class="form-label">
-            <span>HTTP 端口</span>
-            <input class="form-input" type="number" value="80" />
-          </label>
-          <label class="form-label">
-            <span>HTTPS 端口</span>
-            <input class="form-input" type="number" value="443" />
-          </label>
+            <label class="form-label">
+              <span>HTTP 端口</span>
+              <input id="nginx-http-port" class="form-input" type="number" value="80" />
+            </label>
+            <label class="form-label">
+              <span>HTTPS 端口</span>
+              <input class="form-input" type="number" value="443" />
+            </label>
         </div>
 
         <label class="form-label">
@@ -130,7 +142,7 @@
       </div>
 
       <div class="actions">
-        <button class="btn btn-primary" on:click={() => alert('保存功能开发中')}>保存设置</button>
+        <button class="btn btn-primary" on:click={() => saveConfig(current)}>保存设置</button>
       </div>
     {:else}
       <div class="empty-state">

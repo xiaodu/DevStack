@@ -14,7 +14,7 @@
   async function load() {
     try {
       const all = await api.getServices()
-      services = all.filter(s => s.type === 'database' || s.id === 'mysql' || s.id === 'redis')
+      services = all.filter(s => s.category === 'database' && s.installed)
       if (!selectedId && services.length > 0) {
         selectDb(services[0].id)
       }
@@ -26,6 +26,27 @@
   }
 
   function selectDb(id) { selectedId = id }
+
+  async function saveConfig(svc) {
+    const vals = {}
+    if (svc.id === 'mysql') {
+      const bindIp = document.getElementById('mysql-bind')
+      const port = document.getElementById('mysql-port')
+      if (bindIp) vals['bind-address'] = bindIp.value
+      if (port) vals['port'] = port.value
+    } else if (svc.id === 'redis') {
+      const bindIp = document.getElementById('redis-bind')
+      const port = document.getElementById('redis-port')
+      if (bindIp) vals['bind'] = bindIp.value
+      if (port) vals['port'] = port.value
+    }
+    try {
+      await api.saveServiceConfig(svc.id, vals)
+      alert('保存成功')
+    } catch (e) {
+      alert('保存失败: ' + (e.message || e))
+    }
+  }
 
   function getDb(id) { return services.find(s => s.id === id) }
 
@@ -55,7 +76,7 @@
     </div>
     <div class="db-list">
       {#each dbTypes as dbType}
-        {#each services.filter(s => s.id === dbType.id || s.type === dbType.id) as svc}
+        {#each services.filter(s => s.id === dbType.id) as svc}
           <button
             class="db-item"
             class:active={selectedId === svc.id}
@@ -105,11 +126,11 @@
           <div class="config-row">
             <label class="form-label">
               <span>绑定 IP</span>
-              <input class="form-input" value="127.0.0.1" />
+              <input id="mysql-bind" class="form-input" value="127.0.0.1" />
             </label>
             <label class="form-label">
               <span>端口</span>
-              <input class="form-input" type="number" value="3306" />
+              <input id="mysql-port" class="form-input" type="number" value="3306" />
             </label>
           </div>
 
@@ -158,11 +179,11 @@
           <div class="config-row">
             <label class="form-label">
               <span>绑定 IP</span>
-              <input class="form-input" value="127.0.0.1" />
+              <input id="redis-bind" class="form-input" value="127.0.0.1" />
             </label>
             <label class="form-label">
               <span>端口</span>
-              <input class="form-input" type="number" value="6379" />
+              <input id="redis-port" class="form-input" type="number" value="6379" />
             </label>
           </div>
 
@@ -200,7 +221,7 @@
       </div>
 
       <div class="actions">
-        <button class="btn btn-primary" on:click={() => alert('保存功能开发中')}>保存设置</button>
+        <button class="btn btn-primary" on:click={() => saveConfig(current)}>保存设置</button>
       </div>
     {:else}
       <div class="empty-state">

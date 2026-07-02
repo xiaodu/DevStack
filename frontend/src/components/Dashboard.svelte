@@ -1,22 +1,34 @@
 <script>
   import { onMount } from 'svelte'
   import { api } from '../lib/api.js'
+  import { refreshSignal, globalLoading } from '../lib/stores.js'
 
   let services = []
   let sites = []
   let systemInfo = {}
-  let loading = true
+  let hasLoaded = false
+
+  const cardMeta = {
+    nginx:  { cls: 'icon-nginx',  color: '#009639' },
+    mysql:  { cls: 'icon-mysql',  color: '#4479A1' },
+    redis:  { cls: 'icon-redis',  color: '#DC382D' },
+    php:    { cls: 'icon-php',    color: '#777BB4' },
+    node:   { cls: 'icon-Nodejs', color: '#339933' },
+    python: { cls: 'icon-python', color: '#3776AB' },
+  }
 
   async function load() {
+    globalLoading.set(true)
     try {
       const [s, si, info] = await Promise.all([api.getServices(), api.getSites(), api.getSystemInfo()])
       services = s
       sites = si
       systemInfo = info
+      hasLoaded = true
     } catch (e) {
       console.error(e)
     } finally {
-      loading = false
+      globalLoading.set(false)
     }
   }
 
@@ -30,188 +42,281 @@
       }
       await load()
     } catch (e) {
-      alert(e.message || e)
+      console.error(e)
     }
   }
 
-  function statusColor(s) {
-    if (s === 'running') return 'green'
-    if (s === 'stopped') return 'muted'
-    if (s === 'starting' || s === 'stopping') return 'yellow'
-    return 'red'
+  function statusLabel(s) {
+    if (s === 'running') return '运行中'
+    if (s === 'stopped') return '已停止'
+    if (s === 'starting') return '启动中'
+    if (s === 'stopping') return '停止中'
+    return '错误'
   }
 
-  onMount(load)
+  const unsub = refreshSignal.subscribe(() => load())
+  onMount(() => { load(); return unsub })
 </script>
 
-{#if loading}
-  <div class="loading">加载中...</div>
-{:else}
-  <div class="dashboard">
-    <div class="top-section">
-      <div class="service-cards">
-        {#each services as svc}
-          <button class="service-card" on:click={() => toggle(svc.id)}>
-            <div class="svc-header">
-              <span class="svc-name">{svc.name}</span>
-              {#if svc.version}
-                <span class="svc-ver">v{svc.version}</span>
-              {/if}
-            </div>
-            <div class="svc-body">
-              <div class="svc-icon {statusColor(svc.status)}">
-                {#if svc.status === 'running'}
-                  ✓
-                {:else if svc.status === 'stopped'}
-                  ■
-                {:else if svc.status === 'starting' || svc.status === 'stopping'}
-                  ⏳
-                {:else}
-                  ✕
+<div class="dashboard">
+  <div class="service-cards">
+    {#each (hasLoaded ? services : [null,null,null,null,null,null]) as _, i}
+      {@const svc = hasLoaded ? services[i] : null}
+      {@const meta = svc ? (cardMeta[svc.id] || { cls: 'icon-nginx', color: 'var(--accent)' }) : { cls: '', color: 'var(--border)' }}
+      <button
+        class="service-card"
+        class:running={svc?.status === 'running'}
+        class:placeholder={!svc}
+        style={svc ? '--card-color: ' + meta.color + ';' : ''}
+        on:click={() => svc && toggle(svc.id)}
+        disabled={!svc || !svc.installed}
+      >
+        <div class="svc-accent" style="background: {meta.color};"></div>
+        <div class="svc-body">
+          <div class="svc-icon">
+            {#if svc}
+              <span class="iconfont {meta.cls}" style="color: {meta.color};"></span>
+            {:else}
+              <span class="icon-placeholder"></span>
+            {/if}
+          </div>
+          <div class="svc-info">
+            {#if svc}
+              <div class="svc-top">
+                <div class="svc-name">{svc.name}</div>
+                {#if svc.installed}
+                  <span class="svc-ver">v{svc.version}</span>
                 {/if}
               </div>
-              {#if svc.port}
-                <span class="svc-port">:{svc.port}</span>
-              {/if}
-            </div>
-          </button>
-        {/each}
-      </div>
+              <div class="svc-meta">
+                {#if svc.installed}
+                  <span class="svc-dot" class:running={svc.status === 'running'}></span>
+                  <span class="svc-status">{statusLabel(svc.status)}</span>
+                {:else}
+                  <span class="svc-dot"></span>
+                  <span class="svc-status">未安装</span>
+                {/if}
+              </div>
+            {:else}
+              <div class="svc-top"><div class="placeholder-line w-60"></div></div>
+              <div class="svc-meta"><div class="placeholder-line w-40"></div></div>
+            {/if}
+          </div>
+        </div>
+      </button>
+    {/each}
+  </div>
 
-      <div class="sys-panel">
-        <div class="sys-item">
-          <span class="sys-label">平台</span>
-          <span class="sys-val">{systemInfo.platform || '-'} / {systemInfo.arch || '-'}</span>
-        </div>
-        <div class="sys-item">
-          <span class="sys-label">Go 版本</span>
-          <span class="sys-val">{systemInfo.goVersion || '-'}</span>
-        </div>
-        <div class="sys-item">
-          <span class="sys-label">应用版本</span>
-          <span class="sys-val">{systemInfo.appVersion || '-'}</span>
-        </div>
-      </div>
+  <div class="site-section card">
+    <div class="section-header">
+      <h3>网站列表</h3>
+      <span class="badge badge-info">{sites.length} 个站点</span>
     </div>
-
-    <div class="site-section card">
-      <div class="section-header">
-        <h3>网站列表</h3>
-        <span class="badge badge-info">{sites.length} 个站点</span>
+    {#if !hasLoaded}
+      <div class="empty-state"><p style="color:var(--text-muted)">加载中...</p></div>
+    {:else if sites.length === 0}
+      <div class="empty-state">
+        <div class="icon">🌐</div>
+        <p>暂无网站</p>
+        <p style="font-size:12px;margin-top:4px;">前往「网站」页面添加您的第一个站点</p>
       </div>
-      {#if sites.length === 0}
-        <div class="empty-state">
-          <div class="icon">🌐</div>
-          <p>暂无网站</p>
-          <p style="font-size:12px;margin-top:4px;">前往「网站」页面添加您的第一个站点</p>
-        </div>
-      {:else}
-        <table class="site-table">
-          <thead>
+    {:else}
+      <table class="site-table">
+        <thead>
+          <tr>
+            <th>网站名称</th>
+            <th>域名</th>
+            <th>根目录</th>
+            <th>状态</th>
+          </tr>
+        </thead>
+        <tbody>
+          {#each sites as site}
             <tr>
-              <th>网站名称</th>
-              <th>域名</th>
-              <th>根目录</th>
-              <th>状态</th>
+              <td>{site.name}</td>
+              <td><code>{site.domain}</code></td>
+              <td class="path">{site.root || site.documentRoot || '-'}</td>
+              <td>
+                <span class="badge {site.enabled ? 'badge-success' : 'badge-danger'}">
+                  {site.enabled ? '已启用' : '已禁用'}
+                </span>
+              </td>
             </tr>
-          </thead>
-          <tbody>
-            {#each sites as site}
-              <tr>
-                <td>{site.name}</td>
-                <td><code>{site.domain}</code></td>
-                <td class="path">{site.root || site.documentRoot || '-'}</td>
-                <td>
-                  <span class="badge {site.enabled ? 'badge-success' : 'badge-danger'}">
-                    {site.enabled ? '已启用' : '已禁用'}
-                  </span>
-                </td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
-      {/if}
+          {/each}
+        </tbody>
+      </table>
+    {/if}
+  </div>
+
+  <div class="info-section card">
+    <div class="section-header">
+      <h3>系统信息</h3>
+    </div>
+    <div class="info-grid">
+      <div class="info-col">
+        <div class="info-item">
+          <span class="info-label">平台</span>
+          <span class="info-val">{systemInfo.platform || '-'} / {systemInfo.arch || '-'}</span>
+        </div>
+        <div class="info-item">
+          <span class="info-label">Go 版本</span>
+          <span class="info-val">{systemInfo.goVersion || '-'}</span>
+        </div>
+        <div class="info-item">
+          <span class="info-label">应用版本</span>
+          <span class="info-val">{systemInfo.appVersion || '-'}</span>
+        </div>
+      </div>
+      <div class="info-col">
+        {#if !hasLoaded}
+          {#each [1,2,3] as _}
+            <div class="info-item"><span class="info-label">-</span><span class="info-val">-</span></div>
+          {/each}
+        {:else}
+          {#each services as svc}
+            {#if svc.installed}
+              <div class="info-item">
+                <span class="info-label" style="color: {cardMeta[svc.id]?.color || 'var(--text-primary)'};">{svc.name}</span>
+                <span class="info-val">
+                  {#if svc.status === 'running'}
+                    PID: {svc.pid || '-'}　{svc.uptime || ''}
+                  {:else}
+                    {statusLabel(svc.status)}
+                  {/if}
+                </span>
+              </div>
+            {/if}
+          {/each}
+        {/if}
+      </div>
     </div>
   </div>
-{/if}
+</div>
 
 <style>
   .dashboard { display: flex; flex-direction: column; gap: 20px; }
 
-  .top-section {
-    display: grid;
-    grid-template-columns: 1fr 260px;
-    gap: 16px;
-    align-items: start;
-  }
-
   .service-cards {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    grid-template-columns: repeat(3, 1fr);
     gap: 12px;
+    min-height: 120px;
   }
 
   .service-card {
-    background: linear-gradient(135deg, #1e40af 0%, #2563eb 100%);
+    position: relative;
+    background: var(--bg-card);
     border-radius: var(--radius);
-    padding: 16px;
-    color: #fff;
+    border: 2px solid var(--border);
     text-align: left;
-    transition: transform 0.12s, box-shadow 0.12s;
     cursor: pointer;
-    border: none;
+    padding: 0;
+    overflow: hidden;
+    outline: none;
+    -webkit-tap-highlight-color: transparent;
+    width: 100%;
+    box-sizing: border-box;
   }
   .service-card:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 4px 12px rgba(37,99,235,0.3);
+    box-shadow: var(--shadow-lg);
+  }
+  .service-card:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  .service-card.running {
+    border-color: var(--green);
+    box-shadow: 0 0 0 1px var(--green), var(--shadow-sm);
+  }
+  .service-card:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+  .service-card:disabled:hover {
+    box-shadow: var(--shadow-sm);
+  }
+  .service-card:disabled.running {
+    border-color: var(--border);
+    box-shadow: var(--shadow-sm);
+  }
+  .service-card.placeholder {
+    border-color: var(--border);
+    border-style: dashed;
   }
 
-  .svc-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 14px;
+  .svc-accent {
+    height: 4px;
+    width: 100%;
   }
-  .svc-name { font-size: 14px; font-weight: 600; }
-  .svc-ver { font-size: 11px; opacity: 0.7; }
 
   .svc-body {
     display: flex;
     align-items: center;
-    justify-content: space-between;
+    gap: 14px;
+    padding: 18px 18px 16px;
   }
 
   .svc-icon {
-    width: 40px;
-    height: 40px;
-    border-radius: 50%;
+    flex-shrink: 0;
+    width: 44px;
+    height: 44px;
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 18px;
-    font-weight: 700;
+    border-radius: 12px;
+    background: var(--bg-inset);
   }
-  .svc-icon.green { background: #16a34a; }
-  .svc-icon.muted { background: rgba(255,255,255,0.2); }
-  .svc-icon.yellow { background: #d97706; }
-  .svc-icon.red { background: #dc2626; }
+  .svc-icon .iconfont { font-size: 28px; }
+  .icon-placeholder { width: 28px; height: 28px; border-radius: 6px; background: var(--border); }
 
-  .svc-port { font-size: 12px; opacity: 0.6; font-family: var(--font-mono); }
+  .svc-info { flex: 1; min-width: 0; }
 
-  .sys-panel {
-    background: var(--bg-card);
-    border-radius: var(--radius);
-    border: 1px solid var(--border);
-    padding: 16px;
+  .svc-top {
     display: flex;
-    flex-direction: column;
-    gap: 12px;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    margin-bottom: 4px;
   }
-  .sys-item { display: flex; flex-direction: column; gap: 2px; }
-  .sys-label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; }
-  .sys-val { font-size: 13px; color: var(--text-primary); font-family: var(--font-mono); }
+
+  .svc-name { font-size: 15px; font-weight: 600; color: var(--text-primary); }
+
+  .svc-ver {
+    flex-shrink: 0;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--text-secondary);
+    background: var(--bg-inset);
+    padding: 1px 6px;
+    border-radius: 4px;
+  }
+
+  .svc-meta { display: flex; align-items: center; gap: 4px; }
+
+  .svc-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--text-muted);
+    flex-shrink: 0;
+  }
+  .svc-dot.running {
+    background: var(--green);
+    box-shadow: 0 0 6px rgba(5,150,105,0.4);
+  }
+
+  .svc-status { font-size: 11px; color: var(--text-muted); }
+
+  .placeholder-line {
+    height: 10px;
+    border-radius: 4px;
+    background: var(--border);
+  }
+  .w-60 { width: 60%; }
+  .w-40 { width: 40%; }
 
   .site-section { padding: 0; overflow: hidden; }
+
   .section-header {
     display: flex;
     justify-content: space-between;
@@ -241,5 +346,27 @@
   .site-table .path { color: var(--text-muted); font-size: 12px; font-family: var(--font-mono); }
   .site-table code { background: var(--bg-input); padding: 2px 6px; border-radius: 4px; font-size: 12px; }
 
-  .loading { color: var(--text-muted); padding: 40px; text-align: center; }
+  .info-section { padding: 0; overflow: hidden; }
+
+  .info-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0;
+  }
+  .info-col {
+    padding: 16px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .info-col:first-child { border-right: 1px solid var(--border); }
+
+  .info-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .info-label { font-size: 12px; color: var(--text-muted); white-space: nowrap; }
+  .info-val { font-size: 13px; color: var(--text-primary); font-family: var(--font-mono); text-align: right; }
 </style>

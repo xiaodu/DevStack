@@ -73,10 +73,10 @@
   }
 
   const serviceIcons = {
-    nginx: '🌐',
-    mysql: '🗄️',
-    redis: '⚡',
-    php: '🐘',
+    nginx: 'icon-nginx',
+    mysql: 'icon-mysql',
+    redis: 'icon-redis',
+    php: 'icon-php',
   }
 
   onMount(load)
@@ -94,7 +94,7 @@
         <div class="svc-item" class:expanded={expandedService === svc.type}>
           <div class="svc-main">
             <div class="svc-left">
-              <span class="svc-icon">{serviceIcons[svc.id] || '📦'}</span>
+              <span class="svc-icon"><span class="iconfont {serviceIcons[svc.id] || 'icon-nginx'}"></span></span>
               <div class="svc-info">
                 <div class="svc-name">{svc.name}</div>
                 <div class="svc-meta">

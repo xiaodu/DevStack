@@ -31,3 +31,6 @@ frontend/wailsjs/go/
 
 # Config
 *.log
+
+# Temp
+font_*/

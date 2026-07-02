@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	gos "os"
 	"path/filepath"
 	goruntime "runtime"
@@ -33,7 +34,7 @@ func NewApp() *App {
 	cfg := config.NewConfig(dataDir)
 	procMgr := process.NewManager()
 	svcMgr := service.NewManager(cfg, procMgr)
-	siteMgr := site.NewManager(dataDir)
+	siteMgr := site.NewManager(dataDir, cfg.Get().InstallDir, "1.26.0", 9000)
 	logWatcher := log.NewLogWatcher()
 	dlMgr := download.NewManager(dataDir)
 
@@ -54,7 +55,7 @@ func (a *App) startup(ctx context.Context) {
 
 func getDefaultDataDir() string {
 	home, _ := gos.UserHomeDir()
-	return filepath.Join(home, ".servbay")
+	return filepath.Join(home, ".devstack")
 }
 
 // ==================== Service APIs ====================
@@ -77,6 +78,26 @@ func (a *App) RestartService(id string) error {
 
 func (a *App) SetServiceVersion(id, version string) error {
 	return a.svcMgr.SetVersion(id, version)
+}
+
+func (a *App) UninstallService(id string) error {
+	return a.svcMgr.Uninstall(id)
+}
+
+func (a *App) CheckVersionInstalled(serviceType, version string) bool {
+	return a.svcMgr.CheckVersionInstalled(serviceType, version)
+}
+
+func (a *App) UninstallVersion(serviceType, version string) error {
+	return a.svcMgr.UninstallVersion(serviceType, version)
+}
+
+func (a *App) ConfigureService(serviceType string) error {
+	return a.svcMgr.Configure(serviceType)
+}
+
+func (a *App) SaveServiceConfig(serviceType string, values map[string]string) error {
+	return a.svcMgr.SaveConfig(serviceType, values)
 }
 
 // ==================== Site APIs ====================
@@ -119,9 +140,36 @@ func (a *App) GetAvailableVersions(serviceType string) ([]download.ReleaseInfo, 
 
 func (a *App) DownloadService(serviceType, version, url string) error {
 	installDir := a.cfg.Get().InstallDir
+	if installDir == "" {
+		return fmt.Errorf("安装目录未设置，请先完成初始化设置")
+	}
+
+	var urls []string
+	if url != "" {
+		urls = append(urls, url)
+	}
+	releases, _ := a.dlMgr.GetAvailableVersions(serviceType)
+	for _, r := range releases {
+		if r.Version == version {
+			if r.MirrorURL != "" {
+				urls = append(urls, r.MirrorURL)
+			}
+			if url == "" && r.URL != "" {
+				urls = append(urls, r.URL)
+			}
+			break
+		}
+	}
+	if len(urls) == 0 {
+		return fmt.Errorf("未找到 %s %s 的下载地址", serviceType, version)
+	}
+
 	destDir := joinPath(installDir, serviceType, version)
-	destPath := joinPath(destDir, version+".zip")
-	return a.dlMgr.Download(url, destPath, nil)
+	if err := a.dlMgr.TryDownloadAndExtract(urls, destDir, nil); err != nil {
+		return err
+	}
+	a.svcMgr.MarkInstalled(serviceType, version)
+	return a.svcMgr.Configure(serviceType)
 }
 
 // ==================== System APIs ====================
@@ -143,11 +191,15 @@ func (a *App) GetLogs(serviceID string) ([]log.LogEntry, error) {
 	return a.logWatcher.ReadRecent(logPath, 100)
 }
 
-func (a *App) OpenDirectory(path string) error {
-	_, err := wailsruntime.OpenDirectoryDialog(a.ctx, wailsruntime.OpenDialogOptions{
-		Title: "选择目录",
+func (a *App) OpenDirectory(defaultPath string) (string, error) {
+	path, err := wailsruntime.OpenDirectoryDialog(a.ctx, wailsruntime.OpenDialogOptions{
+		Title:                "选择目录",
+		DefaultDirectory:     defaultPath,
 	})
-	return err
+	if err != nil {
+		return "", err
+	}
+	return path, nil
 }
 
 func (a *App) ShowMessage(title, message string) {

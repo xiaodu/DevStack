@@ -22,10 +22,18 @@ const (
 	TypePython ServiceType = "python"
 )
 
+const (
+	CategoryWebServer = "webserver"
+	CategoryDatabase  = "database"
+	CategoryService   = "service"
+	CategoryLanguage  = "language"
+)
+
 type ServiceInfo struct {
 	ID        string        `json:"id"`
 	Name      string        `json:"name"`
 	Type      ServiceType   `json:"type"`
+	Category  string        `json:"category"`
 	Version   string        `json:"version"`
 	Status    ServiceStatus `json:"status"`
 	Port      int           `json:"port"`
@@ -37,17 +45,21 @@ type ServiceInfo struct {
 }
 
 type Site struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	Domain     string `json:"domain"`
-	Root       string `json:"root"`
-	PHPEnabled bool   `json:"phpEnabled"`
-	PHPVersion string `json:"phpVersion,omitempty"`
-	Port       int    `json:"port"`
-	SSL        bool   `json:"ssl"`
-	Enabled    bool   `json:"enabled"`
-	CreatedAt  string `json:"createdAt"`
-	Notes      string `json:"notes,omitempty"`
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Domain       string `json:"domain"`
+	DocumentRoot string `json:"documentRoot"`
+	PHPEnabled   bool   `json:"phpEnabled"`
+	PHPVersion   string `json:"phpVersion,omitempty"`
+	Port         int    `json:"port"`
+	HTTPSPort    int    `json:"httpsPort,omitempty"`
+	Protocol     string `json:"protocol,omitempty"`
+	Type         string `json:"type,omitempty"`
+	Rewrite      string `json:"rewrite,omitempty"`
+	SSL          bool   `json:"ssl"`
+	Enabled      bool   `json:"enabled"`
+	CreatedAt    string `json:"createdAt"`
+	Notes        string `json:"notes,omitempty"`
 }
 
 type AppSettings struct {

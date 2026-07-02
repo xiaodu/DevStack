@@ -5,18 +5,29 @@
   const dispatch = createEventDispatcher()
 
   const navItems = [
-    { id: 'dashboard', label: '仪表盘', icon: '◻' },
-    { id: 'sites', label: '网站', icon: '🌐' },
-    { id: 'database', label: '数据库', icon: '🗄' },
-    { id: 'languages', label: '语言', icon: '<>' },
-    { id: 'webserver', label: 'Web 服务器', icon: '☰' },
-    { id: 'logs', label: '日志', icon: '📄' },
+    { id: 'dashboard', label: '仪表盘', cls: 'icon-web_home' },
+    { id: 'sites', label: '网站', cls: '' },
+    { id: 'database', label: '数据库', cls: '' },
+    { id: 'languages', label: '语言', cls: '' },
+    { id: 'webserver', label: 'Web 服务器', cls: 'icon-webfuwuqi' },
+    { id: 'logs', label: '日志', cls: '' },
   ]
 
   const bottomItems = [
-    { id: 'packages', label: '软件包', icon: '📦' },
-    { id: 'settings', label: '设置', icon: '⚙' },
+    { id: 'packages', label: '软件包', cls: 'icon-OSruanjianbao' },
+    { id: 'settings', label: '设置', cls: '' },
   ]
+
+  const fallbackIcons = {
+    dashboard: '◻',
+    sites: '🌐',
+    database: '🗄',
+    languages: '<>',
+    webserver: '☰',
+    logs: '📄',
+    packages: '📦',
+    settings: '⚙',
+  }
 </script>
 
 <aside class="sidebar">
@@ -35,7 +46,13 @@
         class:active={currentView === item.id}
         on:click={() => dispatch('navigate', item.id)}
       >
-        <span class="nav-icon">{item.icon}</span>
+        <span class="nav-icon">
+          {#if item.cls}
+            <span class="iconfont {item.cls}"></span>
+          {:else}
+            {fallbackIcons[item.id]}
+          {/if}
+        </span>
         <span class="nav-label">{item.label}</span>
       </button>
     {/each}
@@ -48,7 +65,13 @@
         class:active={currentView === item.id}
         on:click={() => dispatch('navigate', item.id)}
       >
-        <span class="nav-icon">{item.icon}</span>
+        <span class="nav-icon">
+          {#if item.cls}
+            <span class="iconfont {item.cls}"></span>
+          {:else}
+            {fallbackIcons[item.id]}
+          {/if}
+        </span>
         <span class="nav-label">{item.label}</span>
       </button>
     {/each}

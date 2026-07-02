@@ -12,6 +12,10 @@ import (
 
 type PythonHandler struct{}
 
+func (h *PythonHandler) Configure(s *ServiceInstance, cfg *config.Config) error {
+	return nil
+}
+
 func (h *PythonHandler) Start(s *ServiceInstance, cfg *config.Config, pm *process.Manager) error {
 	installDir := cfg.Get().InstallDir
 	pyDir := filepath.Join(installDir, "python", s.Info.Version)
@@ -21,8 +25,13 @@ func (h *PythonHandler) Start(s *ServiceInstance, cfg *config.Config, pm *proces
 		return fmt.Errorf("Python 可执行文件未找到: %s", pyExe)
 	}
 
+	port := s.Info.Port
+	if port == 0 {
+		port = 3001
+	}
+
 	s.Info.Status = core.StatusStarting
-	pid, err := pm.Start("python", pyExe, []string{"--version"}, nil, pyDir)
+	pid, err := pm.Start("python", pyExe, []string{"-m", "http.server", fmt.Sprintf("%d", port), "--bind", "127.0.0.1"}, nil, pyDir)
 	if err != nil {
 		s.Info.Status = core.StatusError
 		s.Info.Error = err.Error()
@@ -32,6 +41,13 @@ func (h *PythonHandler) Start(s *ServiceInstance, cfg *config.Config, pm *proces
 	s.process = &execWrapper{pid: pid, cmd: pyExe, started: time.Now()}
 	s.Info.Status = core.StatusRunning
 	s.Info.PID = pid
+	if s.Info.Port == 0 {
+		s.Info.Port = port
+	}
+	return nil
+}
+
+func (h *PythonHandler) SaveConfig(s *ServiceInstance, cfg *config.Config, values map[string]string) error {
 	return nil
 }
 
@@ -50,6 +66,4 @@ func (h *PythonHandler) Stop(s *ServiceInstance, pm *process.Manager) error {
 	return nil
 }
 
-func init() {
-	handlers["python"] = &PythonHandler{}
-}
+

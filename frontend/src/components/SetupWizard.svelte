@@ -2,19 +2,35 @@
   import { createEventDispatcher } from 'svelte'
   import { api } from '../lib/api.js'
 
+  import { onMount } from 'svelte'
+
   const dispatch = createEventDispatcher()
 
   let step = 0
-  let installDir = 'E:\\DevStack'
+  let installDir = ''
   let selectedRole = 'web'
   let packages = [
-    { id: 'nginx', name: 'Nginx', checked: true, versions: ['1.26.0'], selected: '1.26.0' },
-    { id: 'mysql', name: 'MySQL', checked: true, versions: ['8.4', '8.0'], selected: '8.4' },
-    { id: 'redis', name: 'Redis', checked: true, versions: ['7.4.0', '7.2.0'], selected: '7.4.0' },
-    { id: 'php', name: 'PHP', checked: true, versions: ['8.4', '8.3', '8.2'], selected: '8.4' },
-    { id: 'node', name: 'Node.js', checked: false, versions: ['22', '20', '18'], selected: '20' },
-    { id: 'python', name: 'Python', checked: false, versions: ['3.13', '3.12', '3.11'], selected: '3.12' },
+    { id: 'nginx', name: 'Nginx', checked: true, versions: [], selected: '' },
+    { id: 'mysql', name: 'MySQL', checked: true, versions: [], selected: '' },
+    { id: 'redis', name: 'Redis', checked: true, versions: [], selected: '' },
+    { id: 'php', name: 'PHP', checked: true, versions: [], selected: '' },
+    { id: 'node', name: 'Node.js', checked: false, versions: [], selected: '' },
+    { id: 'python', name: 'Python', checked: false, versions: [], selected: '' },
   ]
+
+  onMount(async () => {
+    const settings = await api.getSettings()
+    if (settings.installDir) {
+      installDir = settings.installDir
+    }
+    for (const pkg of packages) {
+      const releases = await api.getAvailableVersions(pkg.id)
+      if (releases && releases.length > 0) {
+        pkg.versions = releases.map(r => r.version)
+        pkg.selected = releases[releases.length - 1].version
+      }
+    }
+  })
 
   const roles = [
     { id: 'web', label: 'Web 开发者', icon: '🌐' },
@@ -48,6 +64,9 @@
   async function startInstall() {
     step = 2
     installing = true
+    const settings = await api.getSettings()
+    settings.installDir = installDir
+    await api.saveSettings(settings)
     const toInstall = packages.filter(p => p.checked)
 
     for (let i = 0; i < toInstall.length; i++) {
@@ -209,7 +228,7 @@
   }
 
   .wizard-banner {
-    background: linear-gradient(135deg, #0f172a 0%, #1e3a5f 40%, #0d9488 100%);
+    background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 40%, #4f46e5 100%);
     padding: 32px 48px;
   }
   .banner-content {

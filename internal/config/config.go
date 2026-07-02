@@ -20,7 +20,7 @@ func NewConfig(dataDir string) *Config {
 		filePath: filepath.Join(dataDir, "settings.json"),
 	}
 	cfg.Settings = core.AppSettings{
-		InstallDir:     filepath.Join(dataDir, "apps"),
+		InstallDir:     "",
 		DataDir:        dataDir,
 		StartOnBoot:    false,
 		MinimizeToTray: true,
