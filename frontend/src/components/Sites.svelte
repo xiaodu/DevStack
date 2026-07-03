@@ -1,6 +1,7 @@
 <script>
   import { onMount } from 'svelte'
   import { api } from '../lib/api.js'
+  import { addToast } from '../lib/stores.js'
 
   let sites = []
   let selectedId = null
@@ -8,16 +9,39 @@
   let loading = true
   let searchQuery = ''
 
+  let phpVersions = []
+
   async function load() {
     try {
       sites = await api.getSites()
       if (!selectedId && sites.length > 0) {
         selectSite(sites[0].id)
       }
+      await loadPHPVersions()
     } catch (e) {
       console.error(e)
     } finally {
       loading = false
+    }
+  }
+
+  async function loadPHPVersions() {
+    try {
+      const registry = await api.getPHPRegistry()
+      if (registry && registry.length > 0) {
+        phpVersions = registry.map(v => ({ version: v.version, port: v.port }))
+        return
+      }
+    } catch (e) {
+      console.error('getPHPRegistry failed:', e)
+    }
+
+    try {
+      const installed = await api.getInstalledVersions('php')
+      phpVersions = (installed || []).map(v => ({ version: v, port: 0 }))
+    } catch (e) {
+      console.error('getInstalledVersions failed:', e)
+      phpVersions = []
     }
   }
 
@@ -35,15 +59,21 @@
   async function save() {
     if (!editing) return
     try {
+      let savedId = editing.id
       if (editing.id && editing.id !== '__new__') {
         await api.updateSite(editing)
       } else {
         const { id, ...rest } = editing
-        await api.createSite(rest)
+        const created = await api.createSite(rest)
+        if (created && created.id) savedId = created.id
       }
       await load()
+      if (savedId && savedId !== '__new__') {
+        selectSite(savedId)
+      }
+      addToast('保存成功')
     } catch (e) {
-      alert(e.message || e)
+      addToast('保存失败: ' + (e.message || e), 'error')
     }
   }
 
@@ -56,7 +86,7 @@
       editing = null
       await load()
     } catch (e) {
-      alert(e.message || e)
+      addToast(e.message || e, 'error')
     }
   }
 
@@ -65,7 +95,7 @@
       await api.toggleSite(id)
       await load()
     } catch (e) {
-      alert(e.message || e)
+      addToast(e.message || e, 'error')
     }
   }
 
@@ -176,9 +206,9 @@
             <span>PHP 版本</span>
             <select class="form-input" bind:value={editing.phpVersion}>
               <option value="">不使用</option>
-              <option value="8.2">PHP 8.2</option>
-              <option value="8.3">PHP 8.3</option>
-              <option value="8.4">PHP 8.4</option>
+              {#each phpVersions as pv}
+                <option value={pv.version}>PHP {pv.version} (端口 {pv.port})</option>
+              {/each}
             </select>
           </label>
           <label class="form-label">

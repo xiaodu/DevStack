@@ -110,7 +110,70 @@ func (h *MySQLHandler) SaveConfig(s *ServiceInstance, cfg *config.Config, values
 	for k, v := range values {
 		content = updateIniValue(content, k, v)
 	}
-	return os.WriteFile(myIni, []byte(content), 0644)
+	if err := os.WriteFile(myIni, []byte(content), 0644); err != nil {
+		return err
+	}
+
+	if password, ok := values["password"]; ok && password != "" {
+		if err := h.setPassword(s, cfg, password); err != nil {
+			return fmt.Errorf("配置已保存，但设置密码失败: %w", err)
+		}
+	}
+	return nil
+}
+
+func (h *MySQLHandler) setPassword(s *ServiceInstance, cfg *config.Config, newPassword string) error {
+	installDir := cfg.Get().InstallDir
+	mysqlDir := filepath.Join(installDir, "mysql", s.Info.Version)
+	mysqlBin := filepath.Join(mysqlDir, "bin", "mysql.exe")
+
+	if !fileExists(mysqlBin) {
+		return fmt.Errorf("mysql 客户端未找到: %s", mysqlBin)
+	}
+
+	port := s.Info.Port
+	if port == 0 {
+		port = 3306
+	}
+
+	pid := process.FindPIDByPort(port)
+	if pid <= 0 {
+		return fmt.Errorf("MySQL 未运行，请先启动 MySQL 后再设置密码")
+	}
+
+	sql := buildSetPasswordSQL(s.Info.Version, newPassword)
+	args := []string{
+		fmt.Sprintf("--port=%d", port),
+		"-u", "root",
+		"-e", sql,
+	}
+
+	cmd := exec.Command(mysqlBin, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("设置密码失败 (请确保 MySQL 已启动且 root 当前无密码): %w\n%s", err, string(out))
+	}
+	return nil
+}
+
+func buildSetPasswordSQL(version, password string) string {
+	if isMySQL8OrAbove(version) {
+		return fmt.Sprintf("ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '%s';", password)
+	}
+	return fmt.Sprintf("SET PASSWORD FOR 'root'@'localhost' = PASSWORD('%s');", password)
+}
+
+func isMySQL8OrAbove(version string) bool {
+	major := 0
+	for i := 0; i < len(version); i++ {
+		if version[i] >= '0' && version[i] <= '9' {
+			major = major*10 + int(version[i]-'0')
+		} else {
+			break
+		}
+	}
+	return major >= 8
 }
 
 func (h *MySQLHandler) Stop(s *ServiceInstance, pm *process.Manager) error {

@@ -20,6 +20,7 @@ type Manager struct {
 	installDir string
 	nginxVer  string
 	phpPort   int
+	phpPorts  map[string]int
 }
 
 func NewManager(dataDir, installDir, nginxVer string, phpPort int) *Manager {
@@ -29,6 +30,7 @@ func NewManager(dataDir, installDir, nginxVer string, phpPort int) *Manager {
 		installDir: installDir,
 		nginxVer:   nginxVer,
 		phpPort:    phpPort,
+		phpPorts:   make(map[string]int),
 	}
 	m.load()
 	return m
@@ -248,7 +250,10 @@ func (m *Manager) buildVhostConfig(s core.Site) string {
 	}
 
 	if isPHP {
-		phpPort := m.phpPort
+		phpPort := m.GetPHPVersionPort(s.PHPVersion)
+		if phpPort == 0 {
+			phpPort = m.phpPort
+		}
 		if phpPort == 0 {
 			phpPort = 9000
 		}
@@ -346,4 +351,15 @@ func (m *Manager) save() error {
 	}
 	os.MkdirAll(filepath.Dir(m.filePath), 0755)
 	return os.WriteFile(m.filePath, data, 0644)
+}
+
+func (m *Manager) SetPHPVersionPort(version string, port int) {
+	m.phpPorts[version] = port
+}
+
+func (m *Manager) GetPHPVersionPort(version string) int {
+	if port, ok := m.phpPorts[version]; ok {
+		return port
+	}
+	return 9000
 }

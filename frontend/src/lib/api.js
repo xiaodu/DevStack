@@ -1,8 +1,10 @@
 import {GetServices, StartService, StopService, RestartService, SetServiceVersion, UninstallService, CheckVersionInstalled, UninstallVersion} from '../../wailsjs/go/main/App.js'
 import {GetSites, CreateSite, UpdateSite, DeleteSite, ToggleSite} from '../../wailsjs/go/main/App.js'
 import {GetSettings, SaveSettings} from '../../wailsjs/go/main/App.js'
-import {GetAvailableVersions, DownloadService, SaveServiceConfig} from '../../wailsjs/go/main/App.js'
+import {GetAvailableVersions, DownloadService, SaveServiceConfig, GetInstalledVersions} from '../../wailsjs/go/main/App.js'
 import {GetSystemInfo, GetLogs, OpenDirectory} from '../../wailsjs/go/main/App.js'
+import {GetRecentOps} from '../../wailsjs/go/main/App.js'
+import {CheckMySQLRootAuth, GetPHPRegistry, RefreshPHPRegistry, GetPHPExtensions, SavePHPExtensions} from '../../wailsjs/go/main/App.js'
 
 export const api = {
   // Services
@@ -28,13 +30,24 @@ export const api = {
 
   // Downloads
   getAvailableVersions: (t) => GetAvailableVersions(t),
+  getInstalledVersions: (t) => GetInstalledVersions(t),
   downloadService: (t, v, url) => DownloadService(t, v, url),
 
   // Config
   saveServiceConfig: (t, vals) => SaveServiceConfig(t, vals),
 
+  // MySQL
+  checkMySQLRootAuth: () => CheckMySQLRootAuth(),
+
+  // PHP
+  getPHPRegistry: () => GetPHPRegistry(),
+  refreshPHPRegistry: () => RefreshPHPRegistry(),
+  getPHPExtensions: (ver) => GetPHPExtensions(ver),
+  savePHPExtensions: (ver, exts) => SavePHPExtensions(ver, exts),
+
   // System
   getSystemInfo: () => GetSystemInfo(),
   getLogs: (id) => GetLogs(id),
   openDirectory: (defaultPath) => OpenDirectory(defaultPath || ''),
+  getRecentOps: (n) => GetRecentOps(n || 50),
 }

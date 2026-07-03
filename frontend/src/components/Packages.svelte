@@ -1,6 +1,7 @@
 <script>
   import { onMount } from 'svelte'
   import { api } from '../lib/api.js'
+  import { addToast } from '../lib/stores.js'
 
   let packages = []
   let selected = 'all'
@@ -54,8 +55,9 @@
     try {
       await api.downloadService(pkg.id, pkg.version)
       await load()
+      addToast(`${pkg.name} ${pkg.version} 安装成功`)
     } catch (e) {
-      alert(`安装失败: ${e.message || e}`)
+      addToast(`安装失败: ${e.message || e}`, 'error')
     } finally {
       installing[key] = false
       packages = [...packages]
@@ -70,8 +72,9 @@
     try {
       await api.uninstallVersion(pkg.id, pkg.version)
       await load()
+      addToast(`${pkg.name} ${pkg.version} 卸载成功`)
     } catch (e) {
-      alert(`卸载失败: ${e.message || e}`)
+      addToast(`卸载失败: ${e.message || e}`, 'error')
     } finally {
       uninstalling[key] = false
       packages = [...packages]

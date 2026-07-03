@@ -1,6 +1,7 @@
 <script>
   import { onMount } from 'svelte'
   import { api } from '../lib/api.js'
+  import { addToast } from '../lib/stores.js'
 
   let services = []
   let selectedId = 'nginx'
@@ -26,9 +27,9 @@
     if (port) vals['listen'] = port.value
     try {
       await api.saveServiceConfig(svc.id, vals)
-      alert('保存成功')
+      addToast('保存成功')
     } catch (e) {
-      alert('保存失败: ' + (e.message || e))
+      addToast('保存失败: ' + (e.message || e), 'error')
     }
   }
 
@@ -42,11 +43,11 @@
       }
       await load()
     } catch (e) {
-      alert(e.message || e)
+      addToast(e.message || e, 'error')
     }
   }
 
-  $: current = selectedId ? getSvc(selectedId) : null
+  $: current = selectedId ? services.find(s => s.id === selectedId) : null
 
   onMount(load)
 </script>

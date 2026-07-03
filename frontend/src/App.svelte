@@ -50,7 +50,12 @@
     globalLoading.set(true)
     try {
       const svcs = await api.getServices()
-      const ids = svcs.filter(s => s.installed && s.id !== 'php' && s.id !== 'node' && s.id !== 'python').map(s => s.id)
+      // DAG start order: nginx (depends on nothing) → php (nginx needs it) → mysql, redis
+      const order = { nginx: 0, php: 1, mysql: 2, redis: 2 }
+      const ids = svcs
+        .filter(s => s.installed && order[s.id] !== undefined)
+        .sort((a, b) => order[a.id] - order[b.id])
+        .map(s => s.id)
       let ok = 0, fail = 0
       for (const id of ids) {
         try { await api.startService(id); ok++ }
@@ -72,7 +77,12 @@
     globalLoading.set(true)
     try {
       const svcs = await api.getServices()
-      const ids = svcs.filter(s => s.installed && s.id !== 'php' && s.id !== 'node' && s.id !== 'python').map(s => s.id)
+      // Stop in reverse order: mysql, redis → php → nginx
+      const order = { nginx: 0, php: 1, mysql: 2, redis: 2 }
+      const ids = svcs
+        .filter(s => s.installed && order[s.id] !== undefined)
+        .sort((a, b) => order[b.id] - order[a.id])
+        .map(s => s.id)
       let ok = 0, fail = 0
       for (const id of ids) {
         try { await api.stopService(id); ok++ }
@@ -126,12 +136,12 @@
     <header class="top-bar">
       <div class="page-info">
         {pageTitle}
-        <div class="load-bar" class:active={$globalLoading}></div>
       </div>
+      <div class="load-bar" class:active={$globalLoading}></div>
       <div class="top-actions">
-        <button class="top-btn green" title="启动 Nginx + MySQL + Redis" on:click={startAll} disabled={topBusy}>▶</button>
+        <button class="top-btn green" title="启动全部服务 (Nginx → PHP → MySQL + Redis)" on:click={startAll} disabled={topBusy}>▶</button>
         <button class="top-btn orange" title="重启 Nginx" on:click={restartNginx} disabled={topBusy}>⟳</button>
-        <button class="top-btn red" title="停止 Nginx + MySQL + Redis" on:click={stopAll} disabled={topBusy}>■</button>
+        <button class="top-btn red" title="停止全部服务 (逆向顺序)" on:click={stopAll} disabled={topBusy}>■</button>
       </div>
     </header>
     <main class="main-content">
@@ -206,6 +216,7 @@
   }
 
   .top-bar {
+    position: relative;
     display: flex;
     justify-content: space-between;
     align-items: center;
@@ -219,24 +230,23 @@
     font-size: 16px;
     font-weight: 600;
     color: var(--text-primary);
-    position: relative;
   }
 
   .load-bar {
     position: absolute;
-    bottom: -10px;
+    bottom: 0;
     left: 0;
-    height: 2px;
+    height: 1.5px;
     width: 0;
     background: var(--accent);
-    border-radius: 1px;
     transition: width 0.15s, opacity 0.15s;
     opacity: 0;
+    pointer-events: none;
   }
   .load-bar.active {
     width: 100%;
     opacity: 1;
-    animation: load-slide 1.2s ease-in-out infinite;
+    animation: load-slide 1s ease-in-out infinite;
   }
   @keyframes load-slide {
     0% { width: 0; margin-left: 0; }
@@ -262,7 +272,7 @@
 
   .main-content {
     flex: 1;
-    overflow-y: auto;
+    overflow: hidden;
     scrollbar-gutter: stable;
     padding: 24px 32px;
     background: var(--bg-primary);

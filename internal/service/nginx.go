@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/xiaodu/DevStack/internal/config"
 	"github.com/xiaodu/DevStack/internal/core"
@@ -30,13 +31,31 @@ func (h *NginxHandler) Start(s *ServiceInstance, cfg *config.Config, pm *process
 		return err
 	}
 
+	// Nginx master may exit after spawning workers on Windows.
+	// Poll port until it's actually listening (up to ~3s) to confirm success.
+	actualPid := pid
+	for i := 0; i < 6; i++ {
+		time.Sleep(500 * time.Millisecond)
+		if p := process.FindPIDByPort(s.Info.Port); p > 0 {
+			actualPid = p
+			break
+		}
+	}
+
+	// If neither master process nor worker port is alive, nginx failed to start.
+	if !pm.IsRunning(pid) && process.FindPIDByPort(s.Info.Port) == 0 {
+		pm.Stop(pid) // clean up zombie if any
+		s.Info.Status = core.StatusError
+		return fmt.Errorf("Nginx 启动失败：3 秒内端口 %d 无响应，请检查配置或端口是否被占用", s.Info.Port)
+	}
+
 	s.process = &execWrapper{
-		pid:     pid,
+		pid:     actualPid,
 		cmd:     nginxExe,
 		started: now(),
 	}
 	s.Info.Status = core.StatusRunning
-	s.Info.PID = pid
+	s.Info.PID = actualPid
 	return nil
 }
 
@@ -48,9 +67,6 @@ func (h *NginxHandler) Configure(s *ServiceInstance, cfg *config.Config) error {
 	os.MkdirAll(confDir, 0755)
 
 	confPath := filepath.Join(confDir, "nginx.conf")
-	if fileExists(confPath) {
-		return nil
-	}
 
 	wwwRoot := filepath.ToSlash(filepath.Join(installDir, "www"))
 	os.MkdirAll(filepath.Join(installDir, "www"), 0755)
@@ -74,15 +90,24 @@ http {
 		server_name localhost;
 		location / {
 			root %s;
-			index index.html index.htm;
+			index index.html index.htm index.php;
+			try_files $uri $uri/ =404;
 		}
 		error_page 500 502 503 504 /50x.html;
 		location = /50x.html {
 			root %s;
 		}
+		location ~ \.php$ {
+			root %s;
+			fastcgi_pass 127.0.0.1:9000;
+			fastcgi_index index.php;
+			fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+			include fastcgi_params;
+		}
 	}
+	include sites-enabled/*.conf;
 }
-`, s.Info.Port, wwwRoot, wwwRoot)
+`, s.Info.Port, wwwRoot, wwwRoot, wwwRoot)
 	return os.WriteFile(confPath, []byte(content), 0644)
 }
 

@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -71,7 +72,7 @@ func (m *Manager) registerDefaults() {
 		Info: core.ServiceInfo{
 			ID: "php", Name: "PHP", Type: core.TypePHP,
 			Category: core.CategoryLanguage,
-			Version: "8.3.8", Port: 9000, Status: core.StatusStopped,
+			Version: "8.3.32", Port: 9000, Status: core.StatusStopped,
 		},
 	}
 	m.services["node"] = &ServiceInstance{
@@ -114,7 +115,7 @@ func (m *Manager) registerDefaults() {
 	}
 }
 
-var serviceOrder = []string{"nginx", "mysql", "redis", "php", "node", "python"}
+var serviceOrder = []string{"nginx", "php", "mysql", "redis", "node", "python"}
 
 func (m *Manager) List() []core.ServiceInfo {
 	m.mu.RLock()
@@ -140,6 +141,9 @@ func (m *Manager) List() []core.ServiceInfo {
 			if pid > 0 {
 				running = true
 				info.PID = pid
+				if s.process == nil || s.process.pid != pid {
+					s.process = &execWrapper{pid: pid, cmd: "", started: time.Now()}
+				}
 			}
 		}
 
@@ -207,7 +211,6 @@ func (m *Manager) Stop(id string) error {
 		return core.ErrServiceNotFound
 	}
 
-	// If we have an execWrapper, delegate to the handler
 	if s.process != nil && s.process.pid > 0 {
 		handler, ok := handlers[id]
 		if !ok {
@@ -216,7 +219,6 @@ func (m *Manager) Stop(id string) error {
 		return handler.Stop(s, m.procMgr)
 	}
 
-	// No execWrapper — try to stop by port (e.g. started externally or before app restart)
 	pid := process.FindPIDByPort(s.Info.Port)
 	if pid > 0 {
 		s.Info.Status = core.StatusStopping
@@ -310,6 +312,30 @@ func (m *Manager) SaveConfig(id string, values map[string]string) error {
 	return handler.SaveConfig(s, m.cfg, values)
 }
 
+func (m *Manager) GetPHPExtensions(version string) ([]PHPExtensionInfo, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	s := &ServiceInstance{
+		Info: core.ServiceInfo{
+			ID: "php", Type: core.TypePHP, Version: version,
+		},
+	}
+	handler := &PHPHandler{}
+	return handler.GetExtensions(s, m.cfg)
+}
+
+func (m *Manager) SavePHPExtensions(version string, extensionNames []string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s := &ServiceInstance{
+		Info: core.ServiceInfo{
+			ID: "php", Type: core.TypePHP, Version: version,
+		},
+	}
+	handler := &PHPHandler{}
+	return handler.SaveExtensions(s, m.cfg, extensionNames)
+}
+
 func (m *Manager) Configure(id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -322,6 +348,56 @@ func (m *Manager) Configure(id string) error {
 		return nil
 	}
 	return handler.Configure(s, m.cfg)
+}
+
+func (m *Manager) CheckMySQLRootAuth() (bool, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	s, ok := m.services["mysql"]
+	if !ok {
+		return false, fmt.Errorf("MySQL 服务未注册")
+	}
+
+	if !s.Info.Installed {
+		return false, fmt.Errorf("MySQL 未安装")
+	}
+
+	installDir := m.cfg.Get().InstallDir
+	mysqlDir := filepath.Join(installDir, "mysql", s.Info.Version)
+	mysqlBin := filepath.Join(mysqlDir, "bin", "mysql.exe")
+
+	if _, err := os.Stat(mysqlBin); err != nil {
+		return false, fmt.Errorf("mysql 客户端未找到")
+	}
+
+	port := s.Info.Port
+	if port == 0 {
+		port = 3306
+	}
+
+	pid := process.FindPIDByPort(port)
+	if pid <= 0 {
+		return false, fmt.Errorf("MySQL 未运行，请先启动")
+	}
+
+	args := []string{
+		fmt.Sprintf("--port=%d", port),
+		"-u", "root",
+		"-e", "SELECT 1;",
+	}
+
+	cmd := exec.Command(mysqlBin, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		output := string(out)
+		if strings.Contains(output, "Access denied") {
+			return true, nil
+		}
+		return false, fmt.Errorf("检查失败: %s", output)
+	}
+	return false, nil
 }
 
 func (m *Manager) CheckVersionInstalled(serviceType, version string) bool {
@@ -363,6 +439,28 @@ func (m *Manager) UninstallVersion(serviceType, version string) error {
 func dirExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && info.IsDir()
+}
+
+func (m *Manager) GetInstalledVersions(serviceType string) []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	installDir := m.cfg.Get().InstallDir
+	if installDir == "" {
+		return nil
+	}
+	svcDir := filepath.Join(installDir, serviceType)
+	entries, err := os.ReadDir(svcDir)
+	if err != nil {
+		return nil
+	}
+	var versions []string
+	for _, e := range entries {
+		if e.IsDir() && dirExists(filepath.Join(svcDir, e.Name())) {
+			versions = append(versions, e.Name())
+		}
+	}
+	return versions
 }
 
 func fileExists(path string) bool {

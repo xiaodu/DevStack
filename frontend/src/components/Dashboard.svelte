@@ -1,7 +1,7 @@
 <script>
   import { onMount } from 'svelte'
   import { api } from '../lib/api.js'
-  import { refreshSignal, globalLoading } from '../lib/stores.js'
+  import { refreshSignal, globalLoading, addToast } from '../lib/stores.js'
 
   let services = []
   let sites = []
@@ -17,13 +17,18 @@
     python: { cls: 'icon-python', color: '#3776AB' },
   }
 
+  let ops = []
+
   async function load() {
     globalLoading.set(true)
     try {
-      const [s, si, info] = await Promise.all([api.getServices(), api.getSites(), api.getSystemInfo()])
+      const [s, si, info, opEntries] = await Promise.all([
+        api.getServices(), api.getSites(), api.getSystemInfo(), api.getRecentOps(100),
+      ])
       services = s
       sites = si
       systemInfo = info
+      ops = opEntries || []
       hasLoaded = true
     } catch (e) {
       console.error(e)
@@ -40,10 +45,10 @@
       } else {
         await api.startService(id)
       }
-      await load()
     } catch (e) {
-      console.error(e)
+      addToast(e.message || e, 'error')
     }
+    await load()
   }
 
   function statusLabel(s) {
@@ -116,7 +121,6 @@
       <div class="empty-state"><p style="color:var(--text-muted)">加载中...</p></div>
     {:else if sites.length === 0}
       <div class="empty-state">
-        <div class="icon">🌐</div>
         <p>暂无网站</p>
         <p style="font-size:12px;margin-top:4px;">前往「网站」页面添加您的第一个站点</p>
       </div>
@@ -148,44 +152,74 @@
     {/if}
   </div>
 
-  <div class="info-section card">
-    <div class="section-header">
-      <h3>系统信息</h3>
-    </div>
-    <div class="info-grid">
-      <div class="info-col">
-        <div class="info-item">
-          <span class="info-label">平台</span>
-          <span class="info-val">{systemInfo.platform || '-'} / {systemInfo.arch || '-'}</span>
+  <div class="bottom-panel">
+    <div class="info-section card">
+      <div class="section-header">
+        <h3>系统信息</h3>
+      </div>
+      <div class="info-grid">
+        <div class="info-col">
+          <div class="info-item">
+            <span class="info-label">平台</span>
+            <span class="info-val">{systemInfo.platform || '-'} / {systemInfo.arch || '-'}</span>
+          </div>
+          <div class="info-item">
+            <span class="info-label">Go 版本</span>
+            <span class="info-val">{systemInfo.goVersion || '-'}</span>
+          </div>
+          <div class="info-item">
+            <span class="info-label">应用版本</span>
+            <span class="info-val">{systemInfo.appVersion || '-'}</span>
+          </div>
         </div>
-        <div class="info-item">
-          <span class="info-label">Go 版本</span>
-          <span class="info-val">{systemInfo.goVersion || '-'}</span>
-        </div>
-        <div class="info-item">
-          <span class="info-label">应用版本</span>
-          <span class="info-val">{systemInfo.appVersion || '-'}</span>
+        <div class="info-col">
+          {#if !hasLoaded}
+            {#each [1,2,3] as _}
+              <div class="info-item"><span class="info-label">-</span><span class="info-val">-</span></div>
+            {/each}
+          {:else}
+            {#each services as svc}
+              {#if svc.installed}
+                <div class="info-item">
+                  <span class="info-label" style="color: {cardMeta[svc.id]?.color || 'var(--text-primary)'};">{svc.name}</span>
+                  <span class="info-val">
+                    {#if svc.status === 'running'}
+                      PID: {svc.pid || '-'}　{svc.uptime || ''}
+                    {:else}
+                      {statusLabel(svc.status)}
+                    {/if}
+                  </span>
+                </div>
+              {/if}
+            {/each}
+          {/if}
         </div>
       </div>
-      <div class="info-col">
+    </div>
+
+    <div class="ops-section card">
+      <div class="section-header">
+        <h3>操作日志</h3>
+        <span class="badge badge-info">{ops.length} 条</span>
+      </div>
+      <div class="ops-list">
         {#if !hasLoaded}
-          {#each [1,2,3] as _}
-            <div class="info-item"><span class="info-label">-</span><span class="info-val">-</span></div>
-          {/each}
+          <div class="empty-state"><p style="color:var(--text-muted);padding:20px">加载中...</p></div>
+        {:else if ops.length === 0}
+          <div class="empty-state">
+            <p>暂无操作记录</p>
+          </div>
         {:else}
-          {#each services as svc}
-            {#if svc.installed}
-              <div class="info-item">
-                <span class="info-label" style="color: {cardMeta[svc.id]?.color || 'var(--text-primary)'};">{svc.name}</span>
-                <span class="info-val">
-                  {#if svc.status === 'running'}
-                    PID: {svc.pid || '-'}　{svc.uptime || ''}
-                  {:else}
-                    {statusLabel(svc.status)}
-                  {/if}
-                </span>
-              </div>
-            {/if}
+          {#each ops as op}
+            <div class="op-item" class:op-error={op.status && op.status.startsWith('失败')}>
+              <span class="op-time">{op.time}</span>
+              <span class="op-action">{op.action}</span>
+              <span class="op-service">{op.service}</span>
+              <span class="op-detail">{op.detail}</span>
+              <span class="op-status" class:success={op.status === '成功'} class:fail={op.status && op.status.startsWith('失败')}>
+                {op.status}
+              </span>
+            </div>
           {/each}
         {/if}
       </div>
@@ -194,7 +228,21 @@
 </div>
 
 <style>
-  .dashboard { display: flex; flex-direction: column; gap: 20px; }
+  .dashboard { 
+    display: flex; 
+    flex-direction: column; 
+    gap: 20px;
+    height: 100%;
+    overflow: hidden;
+  }
+
+  .bottom-panel {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+    flex: 1;
+    min-height: 0;
+  }
 
   .service-cards {
     display: grid;
@@ -207,7 +255,7 @@
     position: relative;
     background: var(--bg-card);
     border-radius: var(--radius);
-    border: 2px solid var(--border);
+    border: 1px solid var(--border);
     text-align: left;
     cursor: pointer;
     padding: 0;
@@ -225,8 +273,8 @@
     outline-offset: 2px;
   }
   .service-card.running {
-    border-color: var(--green);
-    box-shadow: 0 0 0 1px var(--green), var(--shadow-sm);
+    border-color: var(--card-color);
+    box-shadow: 0 0 0 1px var(--card-color), var(--shadow-sm);
   }
   .service-card:disabled {
     opacity: 0.5;
@@ -245,7 +293,7 @@
   }
 
   .svc-accent {
-    height: 4px;
+    height: 3px;
     width: 100%;
   }
 
@@ -317,15 +365,6 @@
 
   .site-section { padding: 0; overflow: hidden; }
 
-  .section-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 16px 20px;
-    border-bottom: 1px solid var(--border);
-  }
-  .section-header h3 { font-size: 15px; font-weight: 600; }
-
   .site-table { width: 100%; border-collapse: collapse; }
   .site-table th {
     text-align: left;
@@ -345,6 +384,15 @@
   .site-table tr:hover td { background: var(--bg-card-hover); }
   .site-table .path { color: var(--text-muted); font-size: 12px; font-family: var(--font-mono); }
   .site-table code { background: var(--bg-input); padding: 2px 6px; border-radius: 4px; font-size: 12px; }
+
+  .section-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border);
+  }
+  .section-header h3 { font-size: 15px; font-weight: 600; }
 
   .info-section { padding: 0; overflow: hidden; }
 
@@ -369,4 +417,51 @@
   }
   .info-label { font-size: 12px; color: var(--text-muted); white-space: nowrap; }
   .info-val { font-size: 13px; color: var(--text-primary); font-family: var(--font-mono); text-align: right; }
+
+  .ops-section { 
+    padding: 0; 
+    overflow: hidden; 
+    display: flex; 
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+  }
+
+  .ops-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px 0;
+    min-height: 0;
+  }
+
+  .op-item {
+    display: grid;
+    grid-template-columns: 80px 60px 60px 1fr 52px;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 16px;
+    font-size: 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  .op-item:last-child { border-bottom: none; }
+  .op-item:hover { background: var(--bg-card-hover); }
+  .op-item.op-error { background: rgba(239,68,68,0.04); }
+
+  .op-time { font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); white-space: nowrap; }
+  .op-action { font-weight: 600; color: var(--text-primary); }
+  .op-service { color: var(--accent); font-family: var(--font-mono); font-size: 11px; }
+  .op-detail { color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .op-status { font-size: 11px; text-align: right; padding: 1px 6px; border-radius: 4px; background: var(--bg-inset); }
+  .op-status.success { color: var(--green); }
+  .op-status.fail { color: var(--red); }
+
+  .empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 32px 20px;
+    color: var(--text-muted);
+    font-size: 13px;
+  }
 </style>

@@ -1,9 +1,12 @@
 package service
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/xiaodu/DevStack/internal/config"
@@ -11,7 +14,107 @@ import (
 	"github.com/xiaodu/DevStack/internal/process"
 )
 
+type PHPExtensionInfo struct {
+	Name    string `json:"name"`
+	Enabled bool   `json:"enabled"`
+}
+
 type PHPHandler struct{}
+
+type PHPVersionInfo struct {
+	Version string `json:"version"`
+	Port    int    `json:"port"`
+}
+
+type PHPRegistry struct {
+	Versions []PHPVersionInfo `json:"versions"`
+}
+
+func getRegistryPath(cfg *config.Config) string {
+	return filepath.Join(cfg.Get().DataDir, "php_registry.json")
+}
+
+func LoadPHPRegistry(cfg *config.Config) *PHPRegistry {
+	reg := &PHPRegistry{Versions: make([]PHPVersionInfo, 0)}
+	data, err := os.ReadFile(getRegistryPath(cfg))
+	if err != nil {
+		return reg
+	}
+	json.Unmarshal(data, reg)
+	return reg
+}
+
+func SavePHPRegistry(cfg *config.Config, reg *PHPRegistry) error {
+	data, err := json.MarshalIndent(reg, "", "  ")
+	if err != nil {
+		return err
+	}
+	os.MkdirAll(filepath.Dir(getRegistryPath(cfg)), 0755)
+	return os.WriteFile(getRegistryPath(cfg), data, 0644)
+}
+
+func GetPHPVersionPort(cfg *config.Config, version string) int {
+	reg := LoadPHPRegistry(cfg)
+	for _, v := range reg.Versions {
+		if v.Version == version {
+			return v.Port
+		}
+	}
+	return 0
+}
+
+func RegisterPHPVersion(cfg *config.Config, version string, port int) {
+	reg := LoadPHPRegistry(cfg)
+	for i, v := range reg.Versions {
+		if v.Version == version {
+			reg.Versions[i].Port = port
+			SavePHPRegistry(cfg, reg)
+			return
+		}
+	}
+	reg.Versions = append(reg.Versions, PHPVersionInfo{Version: version, Port: port})
+	SavePHPRegistry(cfg, reg)
+}
+
+func AutoAssignPorts(cfg *config.Config, installDir string) {
+	phpDir := filepath.Join(installDir, "php")
+	entries, err := os.ReadDir(phpDir)
+	if err != nil {
+		return
+	}
+
+	reg := LoadPHPRegistry(cfg)
+	existingPorts := make(map[int]bool)
+	for _, v := range reg.Versions {
+		if v.Port > 0 {
+			existingPorts[v.Port] = true
+		}
+	}
+
+	basePort := 9001
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		ver := entry.Name()
+		found := false
+		for _, v := range reg.Versions {
+			if v.Version == ver {
+				found = true
+				break
+			}
+		}
+		if !found {
+			for existingPorts[basePort] {
+				basePort++
+			}
+			reg.Versions = append(reg.Versions, PHPVersionInfo{Version: ver, Port: basePort})
+			existingPorts[basePort] = true
+			basePort++
+		}
+	}
+	SavePHPRegistry(cfg, reg)
+}
 
 func (h *PHPHandler) Configure(s *ServiceInstance, cfg *config.Config) error {
 	installDir := cfg.Get().InstallDir
@@ -39,25 +142,51 @@ func (h *PHPHandler) Configure(s *ServiceInstance, cfg *config.Config) error {
 		return os.WriteFile(phpIni, data, 0644)
 	}
 
-	ini := `[PHP]
+	extDir := filepath.ToSlash(filepath.Join(phpDir, "ext"))
+	var ini string
+	if phpVersionAtLeast(s.Info.Version, 7, 2) {
+		ini = fmt.Sprintf(`[PHP]
 engine = On
 error_reporting = E_ALL
 display_errors = On
 log_errors = On
 error_log = "php_errors.log"
-extension_dir = "ext"
+extension_dir = "%s"
+extension = mysqli
+extension = mbstring
 cgi.fix_pathinfo = 1
 cgi.force_redirect = 0
 fastcgi.impersonate = 1
 date.timezone = Asia/Shanghai
-`
+`, extDir)
+	} else {
+		ini = fmt.Sprintf(`[PHP]
+engine = On
+error_reporting = E_ALL
+display_errors = On
+log_errors = On
+error_log = "php_errors.log"
+extension_dir = "%s"
+extension = php_mysqli.dll
+extension = php_mbstring.dll
+cgi.fix_pathinfo = 1
+cgi.force_redirect = 0
+fastcgi.impersonate = 1
+date.timezone = Asia/Shanghai
+`, extDir)
+	}
 	return os.WriteFile(phpIni, []byte(ini), 0644)
 }
 
 func (h *PHPHandler) Start(s *ServiceInstance, cfg *config.Config, pm *process.Manager) error {
 	installDir := cfg.Get().InstallDir
 	phpDir := filepath.Join(installDir, "php", s.Info.Version)
+
+	hasCGI := fileExists(filepath.Join(phpDir, "php-cgi.exe"))
 	phpExe := filepath.Join(phpDir, "php-cgi.exe")
+	if !hasCGI {
+		phpExe = filepath.Join(phpDir, "php.exe")
+	}
 
 	if !fileExists(phpExe) {
 		return fmt.Errorf("PHP 可执行文件未找到: %s", phpExe)
@@ -65,28 +194,55 @@ func (h *PHPHandler) Start(s *ServiceInstance, cfg *config.Config, pm *process.M
 
 	phpIni := filepath.Join(phpDir, "php.ini")
 	if !fileExists(phpIni) {
-		ini := `[PHP]
+		extDir := filepath.ToSlash(filepath.Join(phpDir, "ext"))
+		var ini string
+		if phpVersionAtLeast(s.Info.Version, 7, 2) {
+			ini = fmt.Sprintf(`[PHP]
 engine = On
 error_reporting = E_ALL
 display_errors = On
 display_startup_errors = On
 log_errors = On
 error_log = "php_errors.log"
-extension_dir = "ext"
+extension_dir = "%s"
+extension = mysqli
+extension = mbstring
 cgi.fix_pathinfo = 1
 cgi.force_redirect = 0
-cgi.fix_pathinfo = 1
 fastcgi.impersonate = 1
 fastcgi.logging = 1
 date.timezone = Asia/Shanghai
-`
+`, extDir)
+		} else {
+			ini = fmt.Sprintf(`[PHP]
+engine = On
+error_reporting = E_ALL
+display_errors = On
+display_startup_errors = On
+log_errors = On
+error_log = "php_errors.log"
+extension_dir = "%s"
+extension = php_mysqli.dll
+extension = php_mbstring.dll
+cgi.fix_pathinfo = 1
+cgi.force_redirect = 0
+fastcgi.impersonate = 1
+fastcgi.logging = 1
+date.timezone = Asia/Shanghai
+`, extDir)
+		}
 		os.WriteFile(phpIni, []byte(ini), 0644)
 	}
 
 	s.Info.Status = core.StatusStarting
-	args := []string{
-		"-b", fmt.Sprintf("127.0.0.1:%d", s.Info.Port),
-		"-c", phpIni,
+	var args []string
+	if hasCGI {
+		args = []string{
+			"-b", fmt.Sprintf("127.0.0.1:%d", s.Info.Port),
+			"-c", phpIni,
+		}
+	} else {
+		args = []string{"-v"}
 	}
 
 	pid, err := pm.Start("php", phpExe, args, nil, phpDir)
@@ -94,6 +250,20 @@ date.timezone = Asia/Shanghai
 		s.Info.Status = core.StatusError
 		s.Info.Error = err.Error()
 		return err
+	}
+
+	if !hasCGI {
+		pm.Stop(pid)
+		s.Info.Status = core.StatusError
+		s.Info.Error = "php-cgi.exe 未找到，当前只有 php.exe（CLI 模式），无法作为 FastCGI 启动"
+		return fmt.Errorf("php-cgi.exe 未找到，只有 php.exe (CLI)")
+	}
+
+	time.Sleep(800 * time.Millisecond)
+	if !pm.IsRunning(pid) {
+		s.Info.Status = core.StatusError
+		s.Info.Error = "PHP 进程启动后立即退出，请检查 VC 运行库是否完整"
+		return fmt.Errorf("PHP 进程已退出，可能缺少 VC 运行库或配置错误")
 	}
 
 	s.process = &execWrapper{
@@ -121,6 +291,150 @@ func (h *PHPHandler) SaveConfig(s *ServiceInstance, cfg *config.Config, values m
 		content = updateIniValue(content, k, v)
 	}
 	return os.WriteFile(phpIni, []byte(content), 0644)
+}
+
+func cleanExtName(raw string) string {
+	name := strings.TrimSuffix(strings.TrimSuffix(raw, ".dll"), ".so")
+	name = strings.TrimPrefix(name, "php_")
+	return name
+}
+
+func phpVersionAtLeast(version string, major, minor int) bool {
+	parts := strings.Split(version, ".")
+	if len(parts) < 2 {
+		return false
+	}
+	var vMajor, vMinor int
+	fmt.Sscanf(parts[0], "%d", &vMajor)
+	fmt.Sscanf(parts[1], "%d", &vMinor)
+	if vMajor > major {
+		return true
+	}
+	if vMajor == major && vMinor >= minor {
+		return true
+	}
+	return false
+}
+
+func (h *PHPHandler) GetExtensions(s *ServiceInstance, cfg *config.Config) ([]PHPExtensionInfo, error) {
+	phpDir := filepath.Join(cfg.Get().InstallDir, "php", s.Info.Version)
+	extDir := filepath.Join(phpDir, "ext")
+
+	enabledExts := make(map[string]bool)
+	phpIni := filepath.Join(phpDir, "php.ini")
+	if data, err := os.ReadFile(phpIni); err == nil {
+		re := regexp.MustCompile(`(?m)^\s*extension\s*=\s*(\S+)`)
+		for _, m := range re.FindAllStringSubmatch(string(data), -1) {
+			name := cleanExtName(m[1])
+			enabledExts[strings.ToLower(name)] = true
+		}
+	}
+
+	var extensions []PHPExtensionInfo
+	entries, err := os.ReadDir(extDir)
+	if err != nil {
+		return nil, err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".dll") && !strings.HasSuffix(name, ".so") {
+			continue
+		}
+		extName := cleanExtName(name)
+		extensions = append(extensions, PHPExtensionInfo{
+			Name:    extName,
+			Enabled: enabledExts[strings.ToLower(extName)],
+		})
+	}
+	return extensions, nil
+}
+
+func (h *PHPHandler) SaveExtensions(s *ServiceInstance, cfg *config.Config, extensionNames []string) error {
+	phpDir := filepath.Join(cfg.Get().InstallDir, "php", s.Info.Version)
+	extDir := filepath.Join(phpDir, "ext")
+	phpIni := filepath.Join(phpDir, "php.ini")
+
+	if !fileExists(phpIni) {
+		if err := h.Configure(s, cfg); err != nil {
+			return err
+		}
+	}
+
+	builtExtensions := make(map[string]string)
+	if entries, err := os.ReadDir(extDir); err == nil {
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			fname := entry.Name()
+			if strings.HasSuffix(fname, ".dll") || strings.HasSuffix(fname, ".so") {
+				extName := cleanExtName(fname)
+				builtExtensions[extName] = fname
+			}
+		}
+	}
+
+	for _, name := range extensionNames {
+		if _, ok := builtExtensions[name]; !ok {
+			withPrefix := "php_" + name
+			if _, ok2 := builtExtensions[withPrefix]; ok2 {
+				continue
+			}
+			return fmt.Errorf("扩展 %s 未在 ext/ 目录中找到对应的 .dll 文件", name)
+		}
+	}
+
+	data, err := os.ReadFile(phpIni)
+	if err != nil {
+		return err
+	}
+	content := string(data)
+
+	extRe := regexp.MustCompile(`(?m)^[ \t]*;?[ \t]*extension[ \t]*=[ \t]*\S+.*$`)
+	content = extRe.ReplaceAllString(content, "")
+
+	extDirRe := regexp.MustCompile(`(?m)^[ \t]*;?\s*extension_dir\s*=.*$`)
+	content = extDirRe.ReplaceAllString(content, "")
+	extDirLine := fmt.Sprintf(`extension_dir = "%s"`, filepath.ToSlash(extDir))
+
+	usePrefix := !phpVersionAtLeast(s.Info.Version, 7, 2)
+	content = strings.TrimSpace(content)
+	content += "\n" + extDirLine + "\n"
+	for _, name := range extensionNames {
+		extLine := name
+		if usePrefix {
+			if f, ok := builtExtensions[name]; ok {
+				extLine = f
+			}
+		}
+		content += "extension = " + extLine + "\n"
+	}
+
+	if err := os.WriteFile(phpIni, []byte(content), 0644); err != nil {
+		return err
+	}
+
+	written, err := os.ReadFile(phpIni)
+	if err != nil {
+		return err
+	}
+	writtenStr := string(written)
+	for _, name := range extensionNames {
+		checkName := name
+		if usePrefix {
+			if f, ok := builtExtensions[name]; ok {
+				checkName = f
+			}
+		}
+		if !strings.Contains(writtenStr, "extension = "+checkName) {
+			return fmt.Errorf("写入验证失败：php.ini 中未找到 extension = %s", checkName)
+		}
+	}
+
+	return nil
 }
 
 func (h *PHPHandler) Stop(s *ServiceInstance, pm *process.Manager) error {

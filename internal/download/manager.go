@@ -260,9 +260,10 @@ func (m *Manager) getFallbackVersions(serviceType string) []ReleaseInfo {
 			{Version: "7.4.33", URL: "https://downloads.php.net/~windows/releases/php-7.4.33-nts-Win32-vc15-x64.zip", MirrorURL: "https://mirrors.aliyun.com/php/php-7.4.33-nts-Win32-vc15-x64.zip", FileName: "php-7.4.33.zip"},
 			{Version: "8.0.30", URL: "https://downloads.php.net/~windows/releases/php-8.0.30-nts-Win32-vs16-x64.zip", MirrorURL: "https://mirrors.aliyun.com/php/php-8.0.30-nts-Win32-vs16-x64.zip", FileName: "php-8.0.30.zip"},
 			{Version: "8.1.34", URL: "https://downloads.php.net/~windows/releases/php-8.1.34-nts-Win32-vs16-x64.zip", MirrorURL: "https://mirrors.aliyun.com/php/php-8.1.34-nts-Win32-vs16-x64.zip", FileName: "php-8.1.34.zip"},
-			{Version: "8.2.31", URL: "https://downloads.php.net/~windows/releases/php-8.2.31-nts-Win32-vs16-x64.zip", MirrorURL: "https://mirrors.aliyun.com/php/php-8.2.31-nts-Win32-vs16-x64.zip", FileName: "php-8.2.31.zip"},
-			{Version: "8.3.31", URL: "https://downloads.php.net/~windows/releases/php-8.3.31-nts-Win32-vs16-x64.zip", MirrorURL: "https://mirrors.aliyun.com/php/php-8.3.31-nts-Win32-vs16-x64.zip", FileName: "php-8.3.31.zip"},
-			{Version: "8.4.22", URL: "https://downloads.php.net/~windows/releases/php-8.4.22-nts-Win32-vs17-x64.zip", MirrorURL: "https://mirrors.aliyun.com/php/php-8.4.22-nts-Win32-vs17-x64.zip", FileName: "php-8.4.22.zip"},
+			{Version: "8.2.32", URL: "https://downloads.php.net/~windows/releases/php-8.2.32-nts-Win32-vs16-x64.zip", MirrorURL: "https://mirrors.aliyun.com/php/php-8.2.32-nts-Win32-vs16-x64.zip", FileName: "php-8.2.32.zip"},
+			{Version: "8.3.32", URL: "https://downloads.php.net/~windows/releases/php-8.3.32-nts-Win32-vs16-x64.zip", MirrorURL: "https://mirrors.aliyun.com/php/php-8.3.32-nts-Win32-vs16-x64.zip", FileName: "php-8.3.32.zip"},
+			{Version: "8.4.23", URL: "https://downloads.php.net/~windows/releases/php-8.4.23-nts-Win32-vs17-x64.zip", MirrorURL: "https://mirrors.aliyun.com/php/php-8.4.23-nts-Win32-vs17-x64.zip", FileName: "php-8.4.23.zip"},
+			{Version: "8.5.8", URL: "https://downloads.php.net/~windows/releases/php-8.5.8-nts-Win32-vs17-x64.zip", MirrorURL: "https://mirrors.aliyun.com/php/php-8.5.8-nts-Win32-vs17-x64.zip", FileName: "php-8.5.8.zip"},
 		}
 	case "node":
 		return []ReleaseInfo{

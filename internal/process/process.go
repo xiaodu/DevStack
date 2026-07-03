@@ -82,7 +82,19 @@ func (m *Manager) IsRunning(pid int) bool {
 	m.mu.Lock()
 	_, ok := m.processes[pid]
 	m.mu.Unlock()
-	return ok
+	if ok {
+		return true
+	}
+	return IsProcessRunning(pid)
+}
+
+func IsProcessRunning(pid int) bool {
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	err = proc.Signal(syscall.Signal(0))
+	return err == nil
 }
 
 func FindPIDByPort(port int) int {

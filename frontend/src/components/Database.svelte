@@ -1,10 +1,13 @@
 <script>
   import { onMount } from 'svelte'
   import { api } from '../lib/api.js'
+  import { addToast } from '../lib/stores.js'
 
   let services = []
   let selectedId = null
   let loading = true
+  let mysqlRootHasPassword = null
+  let checkingAuth = false
 
   const dbTypes = [
     { id: 'mysql', label: 'MySQL', icon: '🐬' },
@@ -18,6 +21,7 @@
       if (!selectedId && services.length > 0) {
         selectDb(services[0].id)
       }
+      await checkMysqlAuth()
     } catch (e) {
       console.error(e)
     } finally {
@@ -25,15 +29,39 @@
     }
   }
 
-  function selectDb(id) { selectedId = id }
+  async function checkMysqlAuth() {
+    const mysql = services.find(s => s.id === 'mysql')
+    if (!mysql || mysql.status !== 'running') {
+      mysqlRootHasPassword = null
+      return
+    }
+    checkingAuth = true
+    try {
+      mysqlRootHasPassword = await api.checkMySQLRootAuth()
+    } catch (e) {
+      console.error(e)
+      mysqlRootHasPassword = null
+    } finally {
+      checkingAuth = false
+    }
+  }
+
+  function selectDb(id) {
+    selectedId = id
+    if (id === 'mysql') {
+      checkMysqlAuth()
+    }
+  }
 
   async function saveConfig(svc) {
     const vals = {}
     if (svc.id === 'mysql') {
       const bindIp = document.getElementById('mysql-bind')
       const port = document.getElementById('mysql-port')
+      const password = document.getElementById('mysql-password')
       if (bindIp) vals['bind-address'] = bindIp.value
       if (port) vals['port'] = port.value
+      if (password && password.value) vals['password'] = password.value
     } else if (svc.id === 'redis') {
       const bindIp = document.getElementById('redis-bind')
       const port = document.getElementById('redis-port')
@@ -42,9 +70,12 @@
     }
     try {
       await api.saveServiceConfig(svc.id, vals)
-      alert('保存成功')
+      addToast('保存成功')
+      if (svc.id === 'mysql') {
+        await checkMysqlAuth()
+      }
     } catch (e) {
-      alert('保存失败: ' + (e.message || e))
+      addToast('保存失败: ' + (e.message || e), 'error')
     }
   }
 
@@ -60,7 +91,7 @@
       }
       await load()
     } catch (e) {
-      alert(e.message || e)
+      addToast(e.message || e, 'error')
     }
   }
 
@@ -112,6 +143,20 @@
 
       <div class="config-grid">
         {#if current.id === 'mysql'}
+          <div class="auth-status">
+            {#if current.status !== 'running'}
+              <span class="status-text muted">MySQL 未运行</span>
+            {:else if checkingAuth}
+              <span class="status-text loading">检查中...</span>
+            {:else if mysqlRootHasPassword === true}
+              <span class="status-text has-password">root 已设置密码</span>
+            {:else if mysqlRootHasPassword === false}
+              <span class="status-text no-password">root 无密码（初始状态）</span>
+            {:else}
+              <span class="status-text muted">无法检测</span>
+            {/if}
+          </div>
+
           <div class="config-row">
             <label class="form-label">
               <span>账号</span>
@@ -119,7 +164,7 @@
             </label>
             <label class="form-label">
               <span>密码</span>
-              <input class="form-input" type="password" value="root" />
+              <input id="mysql-password" class="form-input" type="password" placeholder="留空则不修改" />
             </label>
           </div>
 
@@ -316,4 +361,21 @@
     padding-top: 16px;
     border-top: 1px solid var(--border);
   }
+
+  .auth-status {
+    padding: 10px 14px;
+    border-radius: var(--radius-sm);
+    background: var(--bg-inset);
+    margin-bottom: 8px;
+  }
+
+  .status-text {
+    font-size: 13px;
+    font-weight: 500;
+  }
+
+  .status-text.muted { color: var(--text-muted); }
+  .status-text.loading { color: var(--text-muted); }
+  .status-text.has-password { color: var(--green); }
+  .status-text.no-password { color: var(--orange); }
 </style>
