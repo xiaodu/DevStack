@@ -3,7 +3,9 @@ package service
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/xiaodu/DevStack/internal/config"
@@ -11,7 +13,9 @@ import (
 	"github.com/xiaodu/DevStack/internal/process"
 )
 
-type NginxHandler struct{}
+type NginxHandler struct {
+	BaseHandler
+}
 
 func (h *NginxHandler) Start(s *ServiceInstance, cfg *config.Config, pm *process.Manager) error {
 	installDir := cfg.Get().InstallDir
@@ -51,6 +55,7 @@ func (h *NginxHandler) Start(s *ServiceInstance, cfg *config.Config, pm *process
 
 	s.process = &execWrapper{
 		pid:     actualPid,
+		mpid:    pid,
 		cmd:     nginxExe,
 		started: now(),
 	}
@@ -85,6 +90,13 @@ http {
 	default_type application/octet-stream;
 	sendfile on;
 	keepalive_timeout 65;
+
+	fastcgi_buffer_size 128k;
+	fastcgi_buffers 4 256k;
+	fastcgi_busy_buffers_size 256k;
+	fastcgi_temp_file_write_size 256k;
+	fastcgi_intercept_errors on;
+
 	server {
 		listen %d;
 		server_name localhost;
@@ -133,13 +145,34 @@ func (h *NginxHandler) Stop(s *ServiceInstance, pm *process.Manager) error {
 		return nil
 	}
 	s.Info.Status = core.StatusStopping
-	if err := pm.Stop(s.process.pid); err != nil {
-		s.Info.Status = core.StatusError
-		return err
+
+	pid := s.process.pid
+
+	// Kill tracked processes first (for clean processManager map cleanup)
+	if s.process.mpid > 0 {
+		pm.Stop(s.process.mpid)
 	}
+	pm.Stop(pid)
+
+	// taskkill all nginx processes — most reliable on Windows
+	kill := exec.Command("taskkill", "/f", "/im", "nginx.exe")
+	kill.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	kill.Run()
+
+	// Wait for process death (up to 3s)
+	for i := 0; i < 6; i++ {
+		time.Sleep(500 * time.Millisecond)
+		if !pm.IsRunning(pid) {
+			break
+		}
+	}
+
 	s.process = nil
 	s.Info.Status = core.StatusStopped
 	s.Info.PID = 0
+	if pm.IsRunning(pid) {
+		return fmt.Errorf("Nginx 进程停止失败")
+	}
 	return nil
 }
 

@@ -77,12 +77,17 @@
     globalLoading.set(true)
     try {
       const svcs = await api.getServices()
-      // Stop in reverse order: mysql, redis → php → nginx
       const order = { nginx: 0, php: 1, mysql: 2, redis: 2 }
       const ids = svcs
-        .filter(s => s.installed && order[s.id] !== undefined)
+        .filter(s => s.installed && s.status === 'running' && order[s.id] !== undefined)
         .sort((a, b) => order[b.id] - order[a.id])
         .map(s => s.id)
+      if (ids.length === 0) {
+        addToast('没有正在运行的服务', 'info')
+        globalLoading.set(false)
+        topBusy = false
+        return
+      }
       let ok = 0, fail = 0
       for (const id of ids) {
         try { await api.stopService(id); ok++ }

@@ -12,7 +12,9 @@ import (
 	"github.com/xiaodu/DevStack/internal/process"
 )
 
-type MySQLHandler struct{}
+type MySQLHandler struct {
+	BaseHandler
+}
 
 func (h *MySQLHandler) Configure(s *ServiceInstance, cfg *config.Config) error {
 	installDir := cfg.Get().InstallDir
@@ -27,6 +29,15 @@ datadir=%s
 port=%d
 bind-address=127.0.0.1
 skip-networking=0
+
+innodb_buffer_pool_size = 256M
+innodb_log_file_size = 64M
+innodb_flush_log_at_trx_commit = 2
+max_connections = 50
+tmp_table_size = 64M
+max_heap_table_size = 64M
+thread_cache_size = 8
+table_open_cache = 400
 `, mysqlDir, dataDir, s.Info.Port)
 		if err := os.WriteFile(myIni, []byte(ini), 0644); err != nil {
 			return err
@@ -67,6 +78,15 @@ datadir=%s
 port=%d
 bind-address=127.0.0.1
 skip-networking=0
+
+innodb_buffer_pool_size = 256M
+innodb_log_file_size = 64M
+innodb_flush_log_at_trx_commit = 2
+max_connections = 50
+tmp_table_size = 64M
+max_heap_table_size = 64M
+thread_cache_size = 8
+table_open_cache = 400
 `, mysqlDir, dataDir, s.Info.Port)
 		os.WriteFile(myIni, []byte(ini), 0644)
 	}
@@ -181,6 +201,20 @@ func (h *MySQLHandler) Stop(s *ServiceInstance, pm *process.Manager) error {
 		return nil
 	}
 	s.Info.Status = core.StatusStopping
+
+	binDir := filepath.Dir(s.process.cmd)
+	mysqladmin := filepath.Join(binDir, "mysqladmin.exe")
+	if fileExists(mysqladmin) {
+		cmd := exec.Command(mysqladmin, "-u", "root", "shutdown")
+		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+		if err := cmd.Run(); err == nil {
+			s.process = nil
+			s.Info.Status = core.StatusStopped
+			s.Info.PID = 0
+			return nil
+		}
+	}
+
 	if err := pm.Stop(s.process.pid); err != nil {
 		s.Info.Status = core.StatusError
 		return err

@@ -3,7 +3,9 @@ package service
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/xiaodu/DevStack/internal/config"
@@ -11,7 +13,9 @@ import (
 	"github.com/xiaodu/DevStack/internal/process"
 )
 
-type RedisHandler struct{}
+type RedisHandler struct {
+	BaseHandler
+}
 
 func (h *RedisHandler) Configure(s *ServiceInstance, cfg *config.Config) error {
 	installDir := cfg.Get().InstallDir
@@ -97,6 +101,20 @@ func (h *RedisHandler) Stop(s *ServiceInstance, pm *process.Manager) error {
 		return nil
 	}
 	s.Info.Status = core.StatusStopping
+
+	binDir := filepath.Dir(s.process.cmd)
+	redisCli := filepath.Join(binDir, "redis-cli.exe")
+	if fileExists(redisCli) {
+		cmd := exec.Command(redisCli, "-p", fmt.Sprintf("%d", s.Info.Port), "SHUTDOWN")
+		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+		if err := cmd.Run(); err == nil {
+			s.process = nil
+			s.Info.Status = core.StatusStopped
+			s.Info.PID = 0
+			return nil
+		}
+	}
+
 	if err := pm.Stop(s.process.pid); err != nil {
 		s.Info.Status = core.StatusError
 		return err

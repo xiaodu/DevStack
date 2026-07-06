@@ -2,6 +2,7 @@ package service
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,12 +26,14 @@ type Manager struct {
 type ServiceInstance struct {
 	Info    core.ServiceInfo
 	process *execWrapper
+	stopped chan struct{}
 }
 
 type execWrapper struct {
-	pid int
-	cmd string
-	env []string
+	pid   int
+	mpid  int // master PID (for services like nginx with master/worker)
+	cmd   string
+	env   []string
 	started time.Time
 }
 
@@ -118,8 +121,11 @@ func (m *Manager) registerDefaults() {
 var serviceOrder = []string{"nginx", "php", "mysql", "redis", "node", "python"}
 
 func (m *Manager) List() []core.ServiceInfo {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	portPIDMap := process.FindAllPIDsByPort()
+
 	result := make([]core.ServiceInfo, 0, len(m.services))
 	for _, id := range serviceOrder {
 		s, ok := m.services[id]
@@ -129,20 +135,33 @@ func (m *Manager) List() []core.ServiceInfo {
 		info := s.Info
 
 		running := false
+
+		// Check 1: Tracked process with PID and port match
 		if s.process != nil && s.process.pid > 0 {
 			if m.procMgr.IsRunning(s.process.pid) {
-				running = true
-				info.PID = s.process.pid
-				info.Uptime = time.Since(s.process.started).Round(time.Second).String()
+				if portPID, ok := portPIDMap[info.Port]; ok && portPID == s.process.pid {
+					running = true
+					info.PID = s.process.pid
+					info.Uptime = time.Since(s.process.started).Round(time.Second).String()
+				} else {
+					s.process = nil
+				}
+			} else {
+				s.process = nil
 			}
 		}
+
+		// Check 2: Port-based detection + TCP health check
 		if !running {
-			pid := process.FindPIDByPort(info.Port)
-			if pid > 0 {
-				running = true
-				info.PID = pid
-				if s.process == nil || s.process.pid != pid {
-					s.process = &execWrapper{pid: pid, cmd: "", started: time.Now()}
+			if pid, ok := portPIDMap[info.Port]; ok {
+				conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", info.Port), 300*time.Millisecond)
+				if err == nil {
+					conn.Close()
+					running = true
+					info.PID = pid
+					if s.process == nil || s.process.pid != pid {
+						s.process = &execWrapper{pid: pid, cmd: "", started: time.Now()}
+					}
 				}
 			}
 		}
@@ -166,40 +185,69 @@ func (m *Manager) Get(id string) (core.ServiceInfo, error) {
 	if !ok {
 		return core.ServiceInfo{}, core.ErrServiceNotFound
 	}
-	if s.process != nil && s.process.pid > 0 && m.procMgr.IsRunning(s.process.pid) {
-		s.Info.Status = core.StatusRunning
-		s.Info.PID = s.process.pid
-	} else {
+
+	running := false
+	if s.process != nil && s.process.pid > 0 {
+		if m.procMgr.IsRunning(s.process.pid) {
+			portPID := process.FindPIDByPort(s.Info.Port)
+			if portPID == s.process.pid {
+				running = true
+				s.Info.PID = s.process.pid
+			}
+		}
+	}
+	if !running {
 		pid := process.FindPIDByPort(s.Info.Port)
 		if pid > 0 {
-			s.Info.Status = core.StatusRunning
-			s.Info.PID = pid
-		} else {
-			s.Info.Status = core.StatusStopped
-			s.Info.PID = 0
+			conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", s.Info.Port), 300*time.Millisecond)
+			if err == nil {
+				conn.Close()
+				running = true
+				s.Info.PID = pid
+			}
 		}
+	}
+
+	if running {
+		s.Info.Status = core.StatusRunning
+	} else {
+		s.Info.Status = core.StatusStopped
+		s.Info.PID = 0
 	}
 	return s.Info, nil
 }
 
 func (m *Manager) Start(id string) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	s, ok := m.services[id]
 	if !ok {
+		m.mu.Unlock()
 		return core.ErrServiceNotFound
 	}
 	if s.Info.Status == core.StatusRunning {
+		m.mu.Unlock()
 		return nil
 	}
 
 	handler, ok := handlers[id]
 	if !ok {
+		m.mu.Unlock()
 		return fmt.Errorf("不支持的的服务类型: %s", id)
 	}
 
-	return handler.Start(s, m.cfg, m.procMgr)
+	err := handler.Start(s, m.cfg, m.procMgr)
+	if err != nil {
+		m.mu.Unlock()
+		return err
+	}
+
+	s.stopped = make(chan struct{})
+	m.mu.Unlock()
+
+	go m.watchProcess(id)
+
+	return nil
 }
 
 func (m *Manager) Stop(id string) error {
@@ -209,6 +257,12 @@ func (m *Manager) Stop(id string) error {
 	s, ok := m.services[id]
 	if !ok {
 		return core.ErrServiceNotFound
+	}
+
+	// Signal watcher to stop (no-op if already stopped/not watching)
+	if s.stopped != nil {
+		close(s.stopped)
+		s.stopped = nil
 	}
 
 	if s.process != nil && s.process.pid > 0 {
@@ -233,6 +287,38 @@ func (m *Manager) Stop(id string) error {
 	return nil
 }
 
+func (m *Manager) watchProcess(id string) {
+	m.mu.RLock()
+	s, ok := m.services[id]
+	if !ok || s.process == nil || s.stopped == nil {
+		m.mu.RUnlock()
+		return
+	}
+	pid := s.process.pid
+	stopped := s.stopped
+	m.mu.RUnlock()
+
+	select {
+	case <-m.procMgr.WaitChan(pid):
+	case <-stopped:
+		return
+	}
+
+	m.mu.Lock()
+	s2 := m.services[id]
+	if s2 == nil || s2.stopped == nil || s2.Info.Status == core.StatusStopped || s2.Info.Status == core.StatusStopping {
+		m.mu.Unlock()
+		return
+	}
+	// Clean up stale process ref and restart
+	s2.process = nil
+	s2.Info.PID = 0
+	m.mu.Unlock()
+
+	time.Sleep(2 * time.Second)
+	m.Start(id)
+}
+
 func (m *Manager) Restart(id string) error {
 	if err := m.Stop(id); err != nil {
 		return err
@@ -250,6 +336,11 @@ func (m *Manager) Uninstall(id string) error {
 		return core.ErrServiceNotFound
 	}
 
+	if s.stopped != nil {
+		close(s.stopped)
+		s.stopped = nil
+	}
+
 	if s.Info.PID > 0 {
 		m.procMgr.Stop(s.Info.PID)
 		s.Info.PID = 0
@@ -259,7 +350,7 @@ func (m *Manager) Uninstall(id string) error {
 	installDir := m.cfg.Get().InstallDir
 	binPath := filepath.Join(installDir, id, s.Info.Version)
 	if dirExists(binPath) {
-		if err := removeAll(binPath); err != nil {
+		if err := removeAll(id, binPath); err != nil {
 			return fmt.Errorf("删除安装目录失败: %w", err)
 		}
 	}
@@ -419,6 +510,10 @@ func (m *Manager) UninstallVersion(serviceType, version string) error {
 
 	if s, ok := m.services[serviceType]; ok {
 		if s.Info.Version == version && s.Info.PID > 0 {
+			if s.stopped != nil {
+				close(s.stopped)
+				s.stopped = nil
+			}
 			m.procMgr.Stop(s.Info.PID)
 		}
 		if s.Info.Version == version {
@@ -431,7 +526,7 @@ func (m *Manager) UninstallVersion(serviceType, version string) error {
 
 	binPath := filepath.Join(installDir, serviceType, version)
 	if dirExists(binPath) {
-		return removeAll(binPath)
+		return removeAll(serviceType, binPath)
 	}
 	return nil
 }
@@ -468,10 +563,23 @@ func fileExists(path string) bool {
 	return err == nil
 }
 
-func removeAll(path string) error {
-	cmd := exec.Command("taskkill", "/f", "/im", "nginx.exe")
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	cmd.Run()
+var serviceExecutables = map[string][]string{
+	"nginx":  {"nginx.exe"},
+	"mysql":  {"mysqld.exe"},
+	"redis":  {"redis-server.exe"},
+	"php":    {"php-cgi.exe", "php.exe"},
+	"node":   {"node.exe"},
+	"python": {"python.exe"},
+}
+
+func removeAll(serviceType, path string) error {
+	if exes, ok := serviceExecutables[serviceType]; ok {
+		for _, exe := range exes {
+			cmd := exec.Command("taskkill", "/f", "/im", exe)
+			cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+			cmd.Run()
+		}
+	}
 
 	c := exec.Command("cmd", "/c", "attrib", "-r", "-s", "-h", filepath.Join(path, "*"), "/s")
 	c.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}

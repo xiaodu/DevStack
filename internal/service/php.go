@@ -19,7 +19,9 @@ type PHPExtensionInfo struct {
 	Enabled bool   `json:"enabled"`
 }
 
-type PHPHandler struct{}
+type PHPHandler struct {
+	BaseHandler
+}
 
 type PHPVersionInfo struct {
 	Version string `json:"version"`
@@ -142,39 +144,7 @@ func (h *PHPHandler) Configure(s *ServiceInstance, cfg *config.Config) error {
 		return os.WriteFile(phpIni, data, 0644)
 	}
 
-	extDir := filepath.ToSlash(filepath.Join(phpDir, "ext"))
-	var ini string
-	if phpVersionAtLeast(s.Info.Version, 7, 2) {
-		ini = fmt.Sprintf(`[PHP]
-engine = On
-error_reporting = E_ALL
-display_errors = On
-log_errors = On
-error_log = "php_errors.log"
-extension_dir = "%s"
-extension = mysqli
-extension = mbstring
-cgi.fix_pathinfo = 1
-cgi.force_redirect = 0
-fastcgi.impersonate = 1
-date.timezone = Asia/Shanghai
-`, extDir)
-	} else {
-		ini = fmt.Sprintf(`[PHP]
-engine = On
-error_reporting = E_ALL
-display_errors = On
-log_errors = On
-error_log = "php_errors.log"
-extension_dir = "%s"
-extension = php_mysqli.dll
-extension = php_mbstring.dll
-cgi.fix_pathinfo = 1
-cgi.force_redirect = 0
-fastcgi.impersonate = 1
-date.timezone = Asia/Shanghai
-`, extDir)
-	}
+	ini := generatePHPIniContent(phpDir, s.Info.Version)
 	return os.WriteFile(phpIni, []byte(ini), 0644)
 }
 
@@ -194,43 +164,7 @@ func (h *PHPHandler) Start(s *ServiceInstance, cfg *config.Config, pm *process.M
 
 	phpIni := filepath.Join(phpDir, "php.ini")
 	if !fileExists(phpIni) {
-		extDir := filepath.ToSlash(filepath.Join(phpDir, "ext"))
-		var ini string
-		if phpVersionAtLeast(s.Info.Version, 7, 2) {
-			ini = fmt.Sprintf(`[PHP]
-engine = On
-error_reporting = E_ALL
-display_errors = On
-display_startup_errors = On
-log_errors = On
-error_log = "php_errors.log"
-extension_dir = "%s"
-extension = mysqli
-extension = mbstring
-cgi.fix_pathinfo = 1
-cgi.force_redirect = 0
-fastcgi.impersonate = 1
-fastcgi.logging = 1
-date.timezone = Asia/Shanghai
-`, extDir)
-		} else {
-			ini = fmt.Sprintf(`[PHP]
-engine = On
-error_reporting = E_ALL
-display_errors = On
-display_startup_errors = On
-log_errors = On
-error_log = "php_errors.log"
-extension_dir = "%s"
-extension = php_mysqli.dll
-extension = php_mbstring.dll
-cgi.fix_pathinfo = 1
-cgi.force_redirect = 0
-fastcgi.impersonate = 1
-fastcgi.logging = 1
-date.timezone = Asia/Shanghai
-`, extDir)
-		}
+		ini := generatePHPIniContent(phpDir, s.Info.Version)
 		os.WriteFile(phpIni, []byte(ini), 0644)
 	}
 
@@ -245,7 +179,8 @@ date.timezone = Asia/Shanghai
 		args = []string{"-v"}
 	}
 
-	pid, err := pm.Start("php", phpExe, args, nil, phpDir)
+	phpEnv := []string{"PHP_FCGI_MAX_REQUESTS=10000"}
+	pid, err := pm.Start("php", phpExe, args, phpEnv, phpDir)
 	if err != nil {
 		s.Info.Status = core.StatusError
 		s.Info.Error = err.Error()
@@ -259,7 +194,12 @@ date.timezone = Asia/Shanghai
 		return fmt.Errorf("php-cgi.exe 未找到，只有 php.exe (CLI)")
 	}
 
-	time.Sleep(800 * time.Millisecond)
+	for i := 0; i < 6; i++ {
+		if pm.IsRunning(pid) {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
 	if !pm.IsRunning(pid) {
 		s.Info.Status = core.StatusError
 		s.Info.Error = "PHP 进程启动后立即退出，请检查 VC 运行库是否完整"
@@ -314,6 +254,55 @@ func phpVersionAtLeast(version string, major, minor int) bool {
 		return true
 	}
 	return false
+}
+
+func generatePHPIniContent(phpDir, version string) string {
+	extDir := filepath.ToSlash(filepath.Join(phpDir, "ext"))
+	usePrefix := !phpVersionAtLeast(version, 7, 2)
+
+	var buf strings.Builder
+	buf.WriteString("[PHP]\n")
+	buf.WriteString("engine = On\n\n")
+
+	buf.WriteString("error_reporting = E_ALL & ~E_NOTICE & ~E_DEPRECATED & ~E_STRICT\n")
+	buf.WriteString("display_errors = On\n")
+	buf.WriteString("display_startup_errors = On\n")
+	buf.WriteString("log_errors = On\n")
+	buf.WriteString("error_log = \"php_errors.log\"\n\n")
+
+	buf.WriteString("opcache.enable = 1\n")
+	buf.WriteString("opcache.memory_consumption = 128\n")
+	buf.WriteString("opcache.interned_strings_buffer = 8\n")
+	buf.WriteString("opcache.max_accelerated_files = 10000\n")
+	buf.WriteString("opcache.revalidate_freq = 2\n")
+	buf.WriteString("opcache.fast_shutdown = 1\n\n")
+
+	buf.WriteString("memory_limit = 256M\n")
+	buf.WriteString("max_execution_time = 300\n")
+	buf.WriteString("max_input_time = 300\n")
+	buf.WriteString("max_input_vars = 3000\n")
+	buf.WriteString("post_max_size = 64M\n")
+	buf.WriteString("upload_max_filesize = 64M\n\n")
+
+	fmt.Fprintf(&buf, "extension_dir = \"%s\"\n\n", extDir)
+
+	if usePrefix {
+		buf.WriteString("extension = php_mysqli.dll\n")
+		buf.WriteString("extension = php_mbstring.dll\n")
+	} else {
+		buf.WriteString("extension = mysqli\n")
+		buf.WriteString("extension = mbstring\n")
+	}
+	buf.WriteString("\n")
+
+	buf.WriteString("cgi.fix_pathinfo = 1\n")
+	buf.WriteString("cgi.force_redirect = 0\n")
+	buf.WriteString("fastcgi.impersonate = 1\n")
+	buf.WriteString("fastcgi.logging = 1\n\n")
+
+	buf.WriteString("date.timezone = Asia/Shanghai\n")
+
+	return buf.String()
 }
 
 func (h *PHPHandler) GetExtensions(s *ServiceInstance, cfg *config.Config) ([]PHPExtensionInfo, error) {
@@ -437,17 +426,4 @@ func (h *PHPHandler) SaveExtensions(s *ServiceInstance, cfg *config.Config, exte
 	return nil
 }
 
-func (h *PHPHandler) Stop(s *ServiceInstance, pm *process.Manager) error {
-	if s.process == nil || s.process.pid <= 0 {
-		return nil
-	}
-	s.Info.Status = core.StatusStopping
-	if err := pm.Stop(s.process.pid); err != nil {
-		s.Info.Status = core.StatusError
-		return err
-	}
-	s.process = nil
-	s.Info.Status = core.StatusStopped
-	s.Info.PID = 0
-	return nil
-}
+

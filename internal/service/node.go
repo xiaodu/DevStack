@@ -10,7 +10,9 @@ import (
 	"github.com/xiaodu/DevStack/internal/process"
 )
 
-type NodeHandler struct{}
+type NodeHandler struct {
+	BaseHandler
+}
 
 func (h *NodeHandler) Configure(s *ServiceInstance, cfg *config.Config) error {
 	return nil
@@ -52,21 +54,6 @@ func (h *NodeHandler) Start(s *ServiceInstance, cfg *config.Config, pm *process.
 }
 
 func (h *NodeHandler) SaveConfig(s *ServiceInstance, cfg *config.Config, values map[string]string) error {
-	return nil
-}
-
-func (h *NodeHandler) Stop(s *ServiceInstance, pm *process.Manager) error {
-	if s.process == nil || s.process.pid <= 0 {
-		return nil
-	}
-	s.Info.Status = core.StatusStopping
-	if err := pm.Stop(s.process.pid); err != nil {
-		s.Info.Status = core.StatusError
-		return err
-	}
-	s.process = nil
-	s.Info.Status = core.StatusStopped
-	s.Info.PID = 0
 	return nil
 }
 
