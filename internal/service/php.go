@@ -152,13 +152,13 @@ func (h *PHPHandler) Start(s *ServiceInstance, cfg *config.Config, pm *process.M
 	installDir := cfg.Get().InstallDir
 	phpDir := filepath.Join(installDir, "php", s.Info.Version)
 
-	hasCGI := fileExists(filepath.Join(phpDir, "php-cgi.exe"))
 	phpExe := filepath.Join(phpDir, "php-cgi.exe")
-	if !hasCGI {
-		phpExe = filepath.Join(phpDir, "php.exe")
-	}
-
 	if !fileExists(phpExe) {
+		if fileExists(filepath.Join(phpDir, "php.exe")) {
+			s.Info.Status = core.StatusError
+			s.Info.Error = "未找到 php-cgi.exe，当前只有 php.exe（CLI 模式），无法作为 FastCGI 启动"
+			return fmt.Errorf("php-cgi.exe 未找到，只有 php.exe (CLI)")
+		}
 		return fmt.Errorf("PHP 可执行文件未找到: %s", phpExe)
 	}
 
@@ -169,50 +169,60 @@ func (h *PHPHandler) Start(s *ServiceInstance, cfg *config.Config, pm *process.M
 	}
 
 	s.Info.Status = core.StatusStarting
-	var args []string
-	if hasCGI {
-		args = []string{
-			"-b", fmt.Sprintf("127.0.0.1:%d", s.Info.Port),
+	phpEnv := []string{"PHP_FCGI_MAX_REQUESTS=10000"}
+	var pids []int
+
+	for i := 0; i < phpWorkerCount; i++ {
+		port := s.Info.Port + i
+		args := []string{
+			"-b", fmt.Sprintf("127.0.0.1:%d", port),
 			"-c", phpIni,
 		}
-	} else {
-		args = []string{"-v"}
-	}
-
-	phpEnv := []string{"PHP_FCGI_MAX_REQUESTS=10000"}
-	pid, err := pm.Start("php", phpExe, args, phpEnv, phpDir)
-	if err != nil {
-		s.Info.Status = core.StatusError
-		s.Info.Error = err.Error()
-		return err
-	}
-
-	if !hasCGI {
-		pm.Stop(pid)
-		s.Info.Status = core.StatusError
-		s.Info.Error = "php-cgi.exe 未找到，当前只有 php.exe（CLI 模式），无法作为 FastCGI 启动"
-		return fmt.Errorf("php-cgi.exe 未找到，只有 php.exe (CLI)")
+		pid, err := pm.Start("php", phpExe, args, phpEnv, phpDir)
+		if err != nil {
+			for _, p := range pids {
+				pm.Stop(p)
+			}
+			s.Info.Status = core.StatusError
+			s.Info.Error = err.Error()
+			return err
+		}
+		pids = append(pids, pid)
 	}
 
 	for i := 0; i < 6; i++ {
-		if pm.IsRunning(pid) {
+		allRunning := true
+		for _, pid := range pids {
+			if !pm.IsRunning(pid) {
+				allRunning = false
+				break
+			}
+		}
+		if allRunning {
 			break
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	if !pm.IsRunning(pid) {
-		s.Info.Status = core.StatusError
-		s.Info.Error = "PHP 进程启动后立即退出，请检查 VC 运行库是否完整"
-		return fmt.Errorf("PHP 进程已退出，可能缺少 VC 运行库或配置错误")
+
+	for _, pid := range pids {
+		if !pm.IsRunning(pid) {
+			for _, p := range pids {
+				pm.Stop(p)
+			}
+			s.Info.Status = core.StatusError
+			s.Info.Error = "PHP 进程启动后立即退出，请检查 VC 运行库是否完整"
+			return fmt.Errorf("PHP 进程已退出，可能缺少 VC 运行库或配置错误")
+		}
 	}
 
 	s.process = &execWrapper{
-		pid:     pid,
-		cmd:     phpExe,
-		started: time.Now(),
+		pid:       pids[0],
+		extraPids: pids[1:],
+		cmd:       phpExe,
+		started:   time.Now(),
 	}
 	s.Info.Status = core.StatusRunning
-	s.Info.PID = pid
+	s.Info.PID = pids[0]
 	return nil
 }
 
@@ -303,6 +313,23 @@ func generatePHPIniContent(phpDir, version string) string {
 	buf.WriteString("date.timezone = Asia/Shanghai\n")
 
 	return buf.String()
+}
+
+func (h *PHPHandler) Stop(s *ServiceInstance, pm *process.Manager) error {
+	if s.process == nil || s.process.pid <= 0 {
+		return nil
+	}
+	s.Info.Status = core.StatusStopping
+
+	pids := append([]int{s.process.pid}, s.process.extraPids...)
+	for _, pid := range pids {
+		pm.Stop(pid)
+	}
+
+	s.process = nil
+	s.Info.Status = core.StatusStopped
+	s.Info.PID = 0
+	return nil
 }
 
 func (h *PHPHandler) GetExtensions(s *ServiceInstance, cfg *config.Config) ([]PHPExtensionInfo, error) {

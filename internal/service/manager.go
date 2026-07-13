@@ -30,11 +30,12 @@ type ServiceInstance struct {
 }
 
 type execWrapper struct {
-	pid   int
-	mpid  int // master PID (for services like nginx with master/worker)
-	cmd   string
-	env   []string
-	started time.Time
+	pid       int
+	mpid      int   // master PID (for services like nginx with master/worker)
+	extraPids []int // additional PIDs (e.g. multiple php-cgi workers)
+	cmd       string
+	env       []string
+	started   time.Time
 }
 
 func NewManager(cfg *config.Config, procMgr *process.Manager) *Manager {

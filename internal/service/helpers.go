@@ -1,13 +1,17 @@
 package service
 
 import (
+	"fmt"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/xiaodu/DevStack/internal/config"
 	"github.com/xiaodu/DevStack/internal/core"
 	"github.com/xiaodu/DevStack/internal/process"
 )
+
+const phpWorkerCount = 4
 
 type BaseHandler struct{}
 
@@ -60,4 +64,14 @@ func updateConfValue(content, key, value string) string {
 		return re.ReplaceAllString(content, key+" "+value)
 	}
 	return content + "\n" + key + " " + value
+}
+
+func generatePHPUpstreamConfig(basePort int) string {
+	var buf strings.Builder
+	buf.WriteString("upstream php_backend {\n")
+	for i := 0; i < phpWorkerCount; i++ {
+		fmt.Fprintf(&buf, "\tserver 127.0.0.1:%d;\n", basePort+i)
+	}
+	buf.WriteString("}")
+	return buf.String()
 }

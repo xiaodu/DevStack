@@ -81,6 +81,7 @@ func (h *NginxHandler) Configure(s *ServiceInstance, cfg *config.Config) error {
 		os.WriteFile(indexPath, []byte(defaultIndexHTML), 0644)
 	}
 
+	phpUpstream := generatePHPUpstreamConfig(9000)
 	content := fmt.Sprintf(`worker_processes 1;
 events {
 	worker_connections 1024;
@@ -97,6 +98,8 @@ http {
 	fastcgi_temp_file_write_size 256k;
 	fastcgi_intercept_errors on;
 
+	%s
+
 	server {
 		listen %d;
 		server_name localhost;
@@ -111,7 +114,7 @@ http {
 		}
 		location ~ \.php$ {
 			root %s;
-			fastcgi_pass 127.0.0.1:9000;
+			fastcgi_pass php_backend;
 			fastcgi_index index.php;
 			fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
 			include fastcgi_params;
@@ -119,7 +122,7 @@ http {
 	}
 	include sites-enabled/*.conf;
 }
-`, s.Info.Port, wwwRoot, wwwRoot, wwwRoot)
+`, phpUpstream, s.Info.Port, wwwRoot, wwwRoot, wwwRoot)
 	return os.WriteFile(confPath, []byte(content), 0644)
 }
 
