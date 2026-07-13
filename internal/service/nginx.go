@@ -105,7 +105,7 @@ http {
 		server_name localhost;
 		location / {
 			root %s;
-			index index.html index.htm index.php;
+			index index.php index.html index.htm;
 			try_files $uri $uri/ =404;
 		}
 		error_page 500 502 503 504 /50x.html;
