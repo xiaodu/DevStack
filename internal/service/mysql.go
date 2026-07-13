@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/xiaodu/DevStack/internal/config"
 	"github.com/xiaodu/DevStack/internal/core"
@@ -201,24 +202,34 @@ func (h *MySQLHandler) Stop(s *ServiceInstance, pm *process.Manager) error {
 		return nil
 	}
 	s.Info.Status = core.StatusStopping
+	pid := s.process.pid
 
 	binDir := filepath.Dir(s.process.cmd)
 	mysqladmin := filepath.Join(binDir, "mysqladmin.exe")
 	if fileExists(mysqladmin) {
 		cmd := exec.Command(mysqladmin, "-u", "root", "shutdown")
 		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-		if err := cmd.Run(); err == nil {
+		cmd.Run()
+	}
+
+	for i := 0; i < 6; i++ {
+		if !pm.IsRunning(pid) {
 			s.process = nil
 			s.Info.Status = core.StatusStopped
 			s.Info.PID = 0
 			return nil
 		}
+		time.Sleep(500 * time.Millisecond)
 	}
 
-	if err := pm.Stop(s.process.pid); err != nil {
-		s.Info.Status = core.StatusError
-		return err
+	pm.Stop(pid)
+	for i := 0; i < 6; i++ {
+		if !pm.IsRunning(pid) {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
 	}
+
 	s.process = nil
 	s.Info.Status = core.StatusStopped
 	s.Info.PID = 0

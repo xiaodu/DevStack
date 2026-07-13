@@ -121,6 +121,15 @@ func (m *Manager) registerDefaults() {
 
 var serviceOrder = []string{"nginx", "php", "mysql", "redis", "node", "python"}
 
+func isPortAlive(port, pid int) bool {
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 300*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return process.IsProcessRunning(pid)
+}
+
 func (m *Manager) List() []core.ServiceInfo {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -135,43 +144,46 @@ func (m *Manager) List() []core.ServiceInfo {
 		}
 		info := s.Info
 
-		running := false
+		switch info.Status {
+		case core.StatusStarting, core.StatusStopping:
+			// Keep transitional states as-is
 
-		// Check 1: Tracked process with PID and port match
-		if s.process != nil && s.process.pid > 0 {
-			if m.procMgr.IsRunning(s.process.pid) {
-				if portPID, ok := portPIDMap[info.Port]; ok && portPID == s.process.pid {
-					running = true
-					info.PID = s.process.pid
-					info.Uptime = time.Since(s.process.started).Round(time.Second).String()
-				} else {
-					s.process = nil
+		case core.StatusRunning:
+			stillRunning := false
+			if s.process != nil && s.process.pid > 0 && m.procMgr.IsRunning(s.process.pid) {
+				stillRunning = true
+			}
+			if !stillRunning && info.Port > 0 {
+				if pid, ok := portPIDMap[info.Port]; ok {
+					if isPortAlive(info.Port, pid) {
+						stillRunning = true
+						info.PID = pid
+						if s.process == nil || s.process.pid != pid {
+							s.process = &execWrapper{pid: pid, cmd: "", started: time.Now()}
+						}
+					}
 				}
-			} else {
+			}
+			if !stillRunning {
+				info.Status = core.StatusStopped
+				info.PID = 0
 				s.process = nil
 			}
-		}
 
-		// Check 2: Port-based detection + TCP health check
-		if !running {
-			if pid, ok := portPIDMap[info.Port]; ok {
-				conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", info.Port), 300*time.Millisecond)
-				if err == nil {
-					conn.Close()
-					running = true
-					info.PID = pid
-					if s.process == nil || s.process.pid != pid {
+		case core.StatusStopped:
+			if info.Port > 0 {
+				if pid, ok := portPIDMap[info.Port]; ok {
+					if isPortAlive(info.Port, pid) {
+						info.Status = core.StatusRunning
+						info.PID = pid
 						s.process = &execWrapper{pid: pid, cmd: "", started: time.Now()}
 					}
 				}
 			}
 		}
 
-		if running {
-			info.Status = core.StatusRunning
-		} else {
-			info.Status = core.StatusStopped
-			info.PID = 0
+		if info.Status == core.StatusRunning && s.process != nil {
+			info.Uptime = time.Since(s.process.started).Round(time.Second).String()
 		}
 
 		result = append(result, info)
@@ -187,35 +199,42 @@ func (m *Manager) Get(id string) (core.ServiceInfo, error) {
 		return core.ServiceInfo{}, core.ErrServiceNotFound
 	}
 
-	running := false
-	if s.process != nil && s.process.pid > 0 {
-		if m.procMgr.IsRunning(s.process.pid) {
-			portPID := process.FindPIDByPort(s.Info.Port)
-			if portPID == s.process.pid {
-				running = true
-				s.Info.PID = s.process.pid
+	info := s.Info
+
+	switch info.Status {
+	case core.StatusStarting, core.StatusStopping:
+		// Keep transitional states as-is
+
+	case core.StatusRunning:
+		stillRunning := false
+		if s.process != nil && s.process.pid > 0 && m.procMgr.IsRunning(s.process.pid) {
+			stillRunning = true
+		}
+		if !stillRunning && info.Port > 0 {
+			if pid := process.FindPIDByPort(info.Port); pid > 0 {
+				if isPortAlive(info.Port, pid) {
+					stillRunning = true
+					info.PID = pid
+				}
 			}
 		}
-	}
-	if !running {
-		pid := process.FindPIDByPort(s.Info.Port)
-		if pid > 0 {
-			conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", s.Info.Port), 300*time.Millisecond)
-			if err == nil {
-				conn.Close()
-				running = true
-				s.Info.PID = pid
+		if !stillRunning {
+			info.Status = core.StatusStopped
+			info.PID = 0
+		}
+
+	case core.StatusStopped:
+		if info.Port > 0 {
+			if pid := process.FindPIDByPort(info.Port); pid > 0 {
+				if isPortAlive(info.Port, pid) {
+					info.Status = core.StatusRunning
+					info.PID = pid
+				}
 			}
 		}
 	}
 
-	if running {
-		s.Info.Status = core.StatusRunning
-	} else {
-		s.Info.Status = core.StatusStopped
-		s.Info.PID = 0
-	}
-	return s.Info, nil
+	return info, nil
 }
 
 func (m *Manager) Start(id string) error {

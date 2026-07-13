@@ -101,24 +101,34 @@ func (h *RedisHandler) Stop(s *ServiceInstance, pm *process.Manager) error {
 		return nil
 	}
 	s.Info.Status = core.StatusStopping
+	pid := s.process.pid
 
 	binDir := filepath.Dir(s.process.cmd)
 	redisCli := filepath.Join(binDir, "redis-cli.exe")
 	if fileExists(redisCli) {
 		cmd := exec.Command(redisCli, "-p", fmt.Sprintf("%d", s.Info.Port), "SHUTDOWN")
 		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-		if err := cmd.Run(); err == nil {
+		cmd.Run()
+	}
+
+	for i := 0; i < 6; i++ {
+		if !pm.IsRunning(pid) {
 			s.process = nil
 			s.Info.Status = core.StatusStopped
 			s.Info.PID = 0
 			return nil
 		}
+		time.Sleep(500 * time.Millisecond)
 	}
 
-	if err := pm.Stop(s.process.pid); err != nil {
-		s.Info.Status = core.StatusError
-		return err
+	pm.Stop(pid)
+	for i := 0; i < 6; i++ {
+		if !pm.IsRunning(pid) {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
 	}
+
 	s.process = nil
 	s.Info.Status = core.StatusStopped
 	s.Info.PID = 0

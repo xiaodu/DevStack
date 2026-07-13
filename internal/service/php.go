@@ -326,6 +326,20 @@ func (h *PHPHandler) Stop(s *ServiceInstance, pm *process.Manager) error {
 		pm.Stop(pid)
 	}
 
+	for i := 0; i < 6; i++ {
+		allDead := true
+		for _, pid := range pids {
+			if pm.IsRunning(pid) {
+				allDead = false
+				break
+			}
+		}
+		if allDead {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+
 	s.process = nil
 	s.Info.Status = core.StatusStopped
 	s.Info.PID = 0

@@ -20,9 +20,13 @@ func (h *BaseHandler) Stop(s *ServiceInstance, pm *process.Manager) error {
 		return nil
 	}
 	s.Info.Status = core.StatusStopping
-	if err := pm.Stop(s.process.pid); err != nil {
-		s.Info.Status = core.StatusError
-		return err
+	pid := s.process.pid
+	pm.Stop(pid)
+	for i := 0; i < 6; i++ {
+		if !pm.IsRunning(pid) {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
 	}
 	s.process = nil
 	s.Info.Status = core.StatusStopped
