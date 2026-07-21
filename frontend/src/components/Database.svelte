@@ -8,11 +8,29 @@
   let loading = true
   let mysqlRootHasPassword = null
   let checkingAuth = false
+  let mysqlConfig = {}
+  let configLoading = false
 
   const dbTypes = [
     { id: 'mysql', label: 'MySQL', icon: '🐬' },
     { id: 'redis', label: 'Redis', icon: '🔴' },
   ]
+
+  const memoryOptions = ['64M', '128M', '256M', '512M', '1G', '2G', '4G']
+  const innodbLogOptions = ['32M', '64M', '128M', '256M', '512M']
+
+  const recommendedMySQLConfig = {
+    innodbBufferPoolSize: '256M',
+    innodbLogFileSize: '64M',
+    innodbFlushLogAtTrxCommit: '2',
+    maxConnections: '50',
+    tmpTableSize: '64M',
+    maxHeapTableSize: '64M',
+    threadCacheSize: '8',
+    tableOpenCache: '400',
+    bindAddress: '127.0.0.1',
+    port: '3306',
+  }
 
   async function load() {
     try {
@@ -50,17 +68,51 @@
     selectedId = id
     if (id === 'mysql') {
       checkMysqlAuth()
+      loadMySQLConfig()
     }
+  }
+
+  async function loadMySQLConfig() {
+    configLoading = true
+    try {
+      mysqlConfig = await api.getServiceConfig('mysql')
+    } catch (e) {
+      console.error(e)
+    } finally {
+      configLoading = false
+    }
+  }
+
+  function getRecommendedHint(key, label) {
+    const val = recommendedMySQLConfig[key]
+    if (!val) return ''
+    return `推荐值: ${val}${label ? ` · ${label}` : ''}`
+  }
+
+  function loadRecommendedMySQL() {
+    mysqlConfig = { ...recommendedMySQLConfig }
+    addToast('已加载推荐配置')
+  }
+
+  function intVal(key) {
+    return parseInt(mysqlConfig[key]) || 0
   }
 
   async function saveConfig(svc) {
     const vals = {}
     if (svc.id === 'mysql') {
-      const bindIp = document.getElementById('mysql-bind')
-      const port = document.getElementById('mysql-port')
+      vals['innodbBufferPoolSize'] = mysqlConfig.innodbBufferPoolSize || '256M'
+      vals['innodbLogFileSize'] = mysqlConfig.innodbLogFileSize || '64M'
+      vals['innodbFlushLogAtTrxCommit'] = String(intVal('innodbFlushLogAtTrxCommit'))
+      vals['maxConnections'] = String(intVal('maxConnections'))
+      vals['tmpTableSize'] = mysqlConfig.tmpTableSize || '64M'
+      vals['maxHeapTableSize'] = mysqlConfig.maxHeapTableSize || '64M'
+      vals['threadCacheSize'] = String(intVal('threadCacheSize'))
+      vals['tableOpenCache'] = String(intVal('tableOpenCache'))
+      vals['bindAddress'] = mysqlConfig.bindAddress || '127.0.0.1'
+      vals['port'] = String(intVal('port'))
+
       const password = document.getElementById('mysql-password')
-      if (bindIp) vals['bind-address'] = bindIp.value
-      if (port) vals['port'] = port.value
       if (password && password.value) vals['password'] = password.value
     } else if (svc.id === 'redis') {
       const bindIp = document.getElementById('redis-bind')
@@ -73,6 +125,7 @@
       addToast('保存成功')
       if (svc.id === 'mysql') {
         await checkMysqlAuth()
+        await loadMySQLConfig()
       }
     } catch (e) {
       addToast('保存失败: ' + (e.message || e), 'error')
@@ -129,7 +182,7 @@
     {#if current}
       <div class="detail-header">
         <div>
-          <h2>{current.name} {current.version} 设置</h2>
+          <h2>{current.name} {current.version}</h2>
         </div>
         <div class="header-actions">
           <button
@@ -141,132 +194,203 @@
         </div>
       </div>
 
-      <div class="config-grid">
-        {#if current.id === 'mysql'}
-          <div class="auth-status">
-            {#if current.status !== 'running'}
-              <span class="status-text muted">MySQL 未运行</span>
-            {:else if checkingAuth}
-              <span class="status-text loading">检查中...</span>
-            {:else if mysqlRootHasPassword === true}
-              <span class="status-text has-password">root 已设置密码</span>
-            {:else if mysqlRootHasPassword === false}
-              <span class="status-text no-password">root 无密码（初始状态）</span>
-            {:else}
-              <span class="status-text muted">无法检测</span>
-            {/if}
-          </div>
-
-          <div class="config-row">
-            <label class="form-label">
-              <span>账号</span>
-              <input class="form-input" value="root" readonly />
-            </label>
-            <label class="form-label">
-              <span>密码</span>
-              <input id="mysql-password" class="form-input" type="password" placeholder="留空则不修改" />
-            </label>
-          </div>
-
-          <div class="config-row">
-            <label class="form-label">
-              <span>绑定 IP</span>
-              <input id="mysql-bind" class="form-input" value="127.0.0.1" />
-            </label>
-            <label class="form-label">
-              <span>端口</span>
-              <input id="mysql-port" class="form-input" type="number" value="3306" />
-            </label>
-          </div>
-
-          <label class="form-label">
-            <span>数据目录</span>
-            <input class="form-input" value="data/mysql/{current.version}" readonly />
-          </label>
-
-          <div class="config-row">
-            <label class="form-label">
-              <span>Key Buffer Size</span>
-              <select class="form-input">
-                <option>256M</option>
-                <option>512M</option>
-                <option selected>1024M</option>
-              </select>
-            </label>
-            <label class="form-label">
-              <span>Sort Buffer Size</span>
-              <select class="form-input">
-                <option selected>16M</option>
-                <option>32M</option>
-                <option>64M</option>
-              </select>
-            </label>
-          </div>
-
-          <div class="config-row">
-            <label class="form-label">
-              <span>Read Buffer Size</span>
-              <select class="form-input">
-                <option selected>16M</option>
-                <option>32M</option>
-              </select>
-            </label>
-            <label class="form-label">
-              <span>Max Allowed Packet</span>
-              <select class="form-input">
-                <option>256M</option>
-                <option selected>1024M</option>
-              </select>
-            </label>
-          </div>
-
-        {:else if current.id === 'redis'}
-          <div class="config-row">
-            <label class="form-label">
-              <span>绑定 IP</span>
-              <input id="redis-bind" class="form-input" value="127.0.0.1" />
-            </label>
-            <label class="form-label">
-              <span>端口</span>
-              <input id="redis-port" class="form-input" type="number" value="6379" />
-            </label>
-          </div>
-
-          <div class="config-row">
-            <label class="form-label">
-              <span>最大内存</span>
-              <select class="form-input">
-                <option>256M</option>
-                <option selected>512M</option>
-                <option>1G</option>
-                <option>2G</option>
-              </select>
-            </label>
-            <label class="form-label">
-              <span>持久化</span>
-              <select class="form-input">
-                <option value="rdb">RDB</option>
-                <option value="aof">AOF</option>
-                <option value="both">RDB + AOF</option>
-                <option value="none">关闭</option>
-              </select>
-            </label>
-          </div>
-
-          <label class="form-label">
-            <span>数据目录</span>
-            <input class="form-input" value="data/redis" readonly />
-          </label>
-
-          <label class="form-label">
-            <span>密码</span>
-            <input class="form-input" type="password" placeholder="留空则无密码" />
-          </label>
+      <div class="status-bar">
+        <span class="status-dot" class:running={current.status === 'running'}></span>
+        <span class="status-text">{current.status === 'running' ? '运行中' : '已停止'}</span>
+        {#if current.status === 'running' && current.uptime}
+          <span class="uptime">运行 {current.uptime}</span>
+        {/if}
+        {#if current.port}
+          <span class="port-tag">端口 {current.port}</span>
         {/if}
       </div>
 
+      {#if current.id === 'mysql'}
+        {#if configLoading}
+          <div class="loading-hint">加载配置...</div>
+        {:else}
+          <div class="section">
+            <div class="auth-status">
+              {#if current.status !== 'running'}
+                <span class="status-text muted">MySQL 未运行</span>
+              {:else if checkingAuth}
+                <span class="status-text loading">检查中...</span>
+              {:else if mysqlRootHasPassword === true}
+                <span class="status-text has-password">root 已设置密码</span>
+              {:else if mysqlRootHasPassword === false}
+                <span class="status-text no-password">root 无密码（初始状态）</span>
+              {:else}
+                <span class="status-text muted">无法检测</span>
+              {/if}
+            </div>
+          </div>
+
+          <div class="section">
+            <h3>连接设置</h3>
+            <div class="config-grid">
+              <div class="config-row">
+                <label class="form-label">
+                  <span>账号</span>
+                  <input class="form-input" value="root" readonly />
+                </label>
+                <label class="form-label">
+                  <span>密码</span>
+                  <input id="mysql-password" class="form-input" type="password" placeholder="留空则不修改" />
+                </label>
+              </div>
+              <div class="config-row">
+                <label class="form-label">
+                  <span>绑定 IP</span>
+                  <input class="form-input" bind:value={mysqlConfig.bindAddress} />
+                  <span class="hint">{getRecommendedHint('bindAddress', '仅限本地')}</span>
+                </label>
+                <label class="form-label">
+                  <span>端口</span>
+                  <input class="form-input" type="number" min="1" max="65535"
+                    value={intVal('port')}
+                    on:change={e => mysqlConfig.port = String(e.target.value)} />
+                  <span class="hint">{getRecommendedHint('port')}</span>
+                </label>
+              </div>
+            </div>
+          </div>
+
+          <div class="section">
+            <div class="section-header">
+              <h3>InnoDB 优化</h3>
+              <button class="btn btn-sm btn-outline" on:click={loadRecommendedMySQL}>加载推荐值</button>
+            </div>
+            <div class="config-grid">
+              <div class="config-row">
+                <label class="form-label">
+                  <span>InnoDB 缓冲池大小</span>
+                  <select class="form-input" bind:value={mysqlConfig.innodbBufferPoolSize}>
+                    {#each memoryOptions as opt}
+                      <option value={opt}>{opt}</option>
+                    {/each}
+                  </select>
+                  <span class="hint">{getRecommendedHint('innodbBufferPoolSize', '建议内存的50-70%')}</span>
+                </label>
+                <label class="form-label">
+                  <span>InnoDB 日志文件大小</span>
+                  <select class="form-input" bind:value={mysqlConfig.innodbLogFileSize}>
+                    {#each innodbLogOptions as opt}
+                      <option value={opt}>{opt}</option>
+                    {/each}
+                  </select>
+                  <span class="hint">{getRecommendedHint('innodbLogFileSize')}</span>
+                </label>
+              </div>
+              <div class="config-row">
+                <label class="form-label">
+                  <span>InnoDB 刷新日志策略</span>
+                  <select class="form-input" bind:value={mysqlConfig.innodbFlushLogAtTrxCommit}>
+                    <option value="1">1 - 每次提交刷新（最安全）</option>
+                    <option value="2">2 - 每秒刷新（平衡）</option>
+                    <option value="0">0 - 不主动刷新（最快）</option>
+                  </select>
+                  <span class="hint">{getRecommendedHint('innodbFlushLogAtTrxCommit', '2为推荐值')}</span>
+                </label>
+              </div>
+            </div>
+          </div>
+
+          <div class="section">
+            <h3>连接与缓存</h3>
+            <div class="config-grid">
+              <div class="config-row">
+                <label class="form-label">
+                  <span>最大连接数</span>
+                  <input class="form-input" type="number" min="10" max="1000"
+                    value={intVal('maxConnections')}
+                    on:change={e => mysqlConfig.maxConnections = String(e.target.value)} />
+                  <span class="hint">{getRecommendedHint('maxConnections')}</span>
+                </label>
+                <label class="form-label">
+                  <span>临时表大小</span>
+                  <select class="form-input" bind:value={mysqlConfig.tmpTableSize}>
+                    {#each memoryOptions as opt}
+                      <option value={opt}>{opt}</option>
+                    {/each}
+                  </select>
+                  <span class="hint">{getRecommendedHint('tmpTableSize')}</span>
+                </label>
+              </div>
+              <div class="config-row">
+                <label class="form-label">
+                  <span>最大堆表大小</span>
+                  <select class="form-input" bind:value={mysqlConfig.maxHeapTableSize}>
+                    {#each memoryOptions as opt}
+                      <option value={opt}>{opt}</option>
+                    {/each}
+                  </select>
+                  <span class="hint">{getRecommendedHint('maxHeapTableSize', '与tmp一致')}</span>
+                </label>
+                <label class="form-label">
+                  <span>线程缓存大小</span>
+                  <input class="form-input" type="number" min="1" max="100"
+                    value={intVal('threadCacheSize')}
+                    on:change={e => mysqlConfig.threadCacheSize = String(e.target.value)} />
+                  <span class="hint">{getRecommendedHint('threadCacheSize')}</span>
+                </label>
+              </div>
+              <div class="config-row">
+                <label class="form-label">
+                  <span>表打开缓存</span>
+                  <input class="form-input" type="number" min="100" max="4000"
+                    value={intVal('tableOpenCache')}
+                    on:change={e => mysqlConfig.tableOpenCache = String(e.target.value)} />
+                  <span class="hint">{getRecommendedHint('tableOpenCache')}</span>
+                </label>
+              </div>
+            </div>
+          </div>
+
+          <div class="section">
+            <h3>文件信息</h3>
+            <div class="config-grid">
+              <label class="form-label">
+                <span>数据目录</span>
+                <input class="form-input" value="db/mysql/" readonly />
+              </label>
+              <label class="form-label">
+                <span>配置文件</span>
+                <input class="form-input" value="mysql/{current.version}/my.ini" readonly />
+              </label>
+            </div>
+          </div>
+        {/if}
+
+      {:else if current.id === 'redis'}
+        <div class="section">
+          <h3>连接设置</h3>
+          <div class="config-grid">
+            <div class="config-row">
+              <label class="form-label">
+                <span>绑定 IP</span>
+                <input id="redis-bind" class="form-input" value="127.0.0.1" />
+              </label>
+              <label class="form-label">
+                <span>端口</span>
+                <input id="redis-port" class="form-input" type="number" value="6379" />
+              </label>
+            </div>
+          </div>
+        </div>
+        <div class="section">
+          <h3>文件信息</h3>
+          <div class="config-grid">
+            <label class="form-label">
+              <span>数据目录</span>
+              <input class="form-input" value="data/redis" readonly />
+            </label>
+          </div>
+        </div>
+      {/if}
+
       <div class="actions">
         <button class="btn btn-primary" on:click={() => saveConfig(current)}>保存设置</button>
+        <span class="action-hint">MySQL 配置修改后需重启生效</span>
       </div>
     {:else}
       <div class="empty-state">
@@ -338,15 +462,62 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-bottom: 24px;
+    margin-bottom: 16px;
   }
   .detail-header h2 { font-size: 20px; font-weight: 600; }
   .header-actions { display: flex; gap: 8px; }
 
+  .status-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px;
+    background: var(--bg-inset);
+    border-radius: var(--radius-sm);
+    margin-bottom: 24px;
+    font-size: 13px;
+  }
+
+  .status-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--text-muted);
+  }
+  .status-dot.running { background: var(--green); }
+  .status-text { color: var(--text-secondary); }
+  .uptime { color: var(--text-muted); }
+  .port-tag {
+    margin-left: auto;
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 3px;
+    background: var(--accent-light);
+    color: var(--accent);
+  }
+
+  .section {
+    background: var(--bg-main, #fff);
+    border-radius: var(--radius);
+    padding: 20px;
+    margin-bottom: 16px;
+    border: 1px solid var(--border);
+  }
+  .section-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 14px;
+  }
+  .section h3 {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--accent);
+    margin: 0;
+  }
+
   .config-grid {
     display: flex;
     flex-direction: column;
-    gap: 16px;
+    gap: 12px;
     max-width: 700px;
   }
 
@@ -356,26 +527,58 @@
     gap: 12px;
   }
 
+  .form-label {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .form-label span:first-child {
+    font-size: 13px;
+    color: var(--text-secondary);
+  }
+  .form-label .hint {
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+
   .actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
     margin-top: 24px;
     padding-top: 16px;
     border-top: 1px solid var(--border);
+  }
+  .action-hint {
+    font-size: 12px;
+    color: var(--text-muted);
   }
 
   .auth-status {
     padding: 10px 14px;
     border-radius: var(--radius-sm);
     background: var(--bg-inset);
-    margin-bottom: 8px;
-  }
-
-  .status-text {
-    font-size: 13px;
-    font-weight: 500;
   }
 
   .status-text.muted { color: var(--text-muted); }
   .status-text.loading { color: var(--text-muted); }
   .status-text.has-password { color: var(--green); }
   .status-text.no-password { color: var(--orange); }
+
+  .loading-hint {
+    color: var(--text-muted);
+    padding: 40px;
+    text-align: center;
+  }
+
+  .empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: var(--text-muted);
+    font-size: 14px;
+  }
+  .empty-state .icon { font-size: 48px; margin-bottom: 12px; opacity: 0.5; }
 </style>

@@ -17,4 +17,6 @@ var (
 	ErrNotInstalled    = &AppError{Code: "NOT_INSTALLED", Message: "服务未安装"}
 	ErrDownloadFailed  = &AppError{Code: "DOWNLOAD_FAILED", Message: "下载失败"}
 	ErrExtractFailed   = &AppError{Code: "EXTRACT_FAILED", Message: "解压失败"}
+	ErrRuntimeNotFound = &AppError{Code: "RUNTIME_NOT_FOUND", Message: "运行时未找到"}
+	ErrProjectNotFound = &AppError{Code: "PROJECT_NOT_FOUND", Message: "项目未找到"}
 )

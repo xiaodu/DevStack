@@ -30,7 +30,7 @@ func (h *RedisHandler) Configure(s *ServiceInstance, cfg *config.Config) error {
 bind 127.0.0.1
 daemonize no
 loglevel notice
-logfile ""
+logfile "redis.log"
 dir "%s"
 `, s.Info.Port, redisDir)
 	return os.WriteFile(redisConf, []byte(conf), 0644)
@@ -54,7 +54,7 @@ func (h *RedisHandler) Start(s *ServiceInstance, cfg *config.Config, pm *process
 bind 127.0.0.1
 daemonize no
 loglevel notice
-logfile ""
+logfile "redis.log"
 dir "%s"
 `, s.Info.Port, redisDir)
 		os.WriteFile(redisConf, []byte(conf), 0644)

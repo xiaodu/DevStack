@@ -6,10 +6,11 @@
 
   const navItems = [
     { id: 'dashboard', label: '仪表盘', cls: 'icon-web_home' },
-    { id: 'sites', label: '网站', cls: '' },
-    { id: 'database', label: '数据库', cls: '' },
-    { id: 'languages', label: '语言', cls: '' },
+    { id: 'sites', label: '项目', cls: '' },
+
     { id: 'webserver', label: 'Web 服务器', cls: 'icon-webfuwuqi' },
+    { id: 'database', label: '数据库', cls: '' },
+    { id: 'runtime', label: '运行环境', cls: '' },
     { id: 'logs', label: '日志', cls: '' },
   ]
 
@@ -22,8 +23,9 @@
     dashboard: '◻',
     sites: '🌐',
     database: '🗄',
-    languages: '<>',
+    software: '📦',
     webserver: '☰',
+    runtime: '⚙',
     logs: '📄',
     packages: '📦',
     settings: '⚙',
@@ -33,7 +35,7 @@
 <aside class="sidebar">
   <div class="logo">
     <svg class="logo-icon" width="32" height="32" viewBox="0 0 32 32" fill="none">
-      <rect width="32" height="32" rx="8" fill="rgba(255,255,255,0.15)"/>
+      <rect width="32" height="32" rx="8" fill="var(--accent)"/>
       <path d="M10 16h12M16 10v12" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/>
     </svg>
     <span class="logo-text">DevStack</span>
@@ -103,7 +105,7 @@
     align-items: center;
     gap: 10px;
     padding: 20px 18px;
-    border-bottom: 1px solid rgba(255,255,255,0.1);
+    border-bottom: 1px solid var(--sidebar-border);
   }
 
   .logo-icon { flex-shrink: 0; }
@@ -111,7 +113,7 @@
   .logo-text {
     font-size: 18px;
     font-weight: 700;
-    color: #fff;
+    color: var(--sidebar-logo);
   }
 
   .nav {
@@ -124,7 +126,7 @@
 
   .nav-bottom {
     padding: 8px 10px;
-    border-top: 1px solid rgba(255,255,255,0.1);
+    border-top: 1px solid var(--sidebar-border);
     display: flex;
     flex-direction: column;
     gap: 2px;
@@ -165,7 +167,7 @@
 
   .sidebar-footer {
     padding: 14px 16px;
-    border-top: 1px solid rgba(255,255,255,0.1);
+    border-top: 1px solid var(--sidebar-border);
   }
 
   .user-info {
@@ -177,12 +179,12 @@
   .avatar {
     width: 34px; height: 34px;
     border-radius: 50%;
-    background: rgba(255,255,255,0.2);
+    background: var(--sidebar-avatar-bg);
     display: flex; align-items: center; justify-content: center;
-    color: #fff; font-size: 14px; font-weight: 600; flex-shrink: 0;
+    color: var(--sidebar-avatar-text); font-size: 14px; font-weight: 600; flex-shrink: 0;
   }
 
   .user-details { display: flex; flex-direction: column; min-width: 0; }
-  .user-name { color: #fff; font-size: 13px; font-weight: 500; }
-  .user-plan { color: rgba(255,255,255,0.5); font-size: 11px; }
+  .user-name { color: var(--sidebar-user-name); font-size: 13px; font-weight: 500; }
+  .user-plan { color: var(--sidebar-user-plan); font-size: 11px; }
 </style>

@@ -4,17 +4,15 @@
   import { refreshSignal, globalLoading, addToast } from '../lib/stores.js'
 
   let services = []
+  let runtimes = []
   let sites = []
   let systemInfo = {}
   let hasLoaded = false
 
-  const cardMeta = {
-    nginx:  { cls: 'icon-nginx',  color: '#009639' },
-    mysql:  { cls: 'icon-mysql',  color: '#4479A1' },
-    redis:  { cls: 'icon-redis',  color: '#DC382D' },
-    php:    { cls: 'icon-php',    color: '#777BB4' },
-    node:   { cls: 'icon-Nodejs', color: '#339933' },
-    python: { cls: 'icon-python', color: '#3776AB' },
+  const serviceMeta = {
+    nginx:  { label: 'Nginx',  cls: 'icon-nginx',  color: '#009639' },
+    mysql:  { label: 'MySQL',  cls: 'icon-mysql',  color: '#4479A1' },
+    redis:  { label: 'Redis',  cls: 'icon-redis',  color: '#DC382D' },
   }
 
   let ops = []
@@ -22,11 +20,12 @@
   async function load() {
     globalLoading.set(true)
     try {
-      const [s, si, info, opEntries] = await Promise.all([
-        api.getServices(), api.getSites(), api.getSystemInfo(), api.getRecentOps(100),
+      const [s, r, st, info, opEntries] = await Promise.all([
+        api.getServices(), api.getRuntimes(), api.getSites(), api.getSystemInfo(), api.getRecentOps(100),
       ])
       services = s
-      sites = si
+      runtimes = r
+      sites = st
       systemInfo = info
       ops = opEntries || []
       hasLoaded = true
@@ -37,7 +36,7 @@
     }
   }
 
-  async function toggle(id) {
+  async function toggleService(id) {
     try {
       const svc = services.find(s => s.id === id)
       if (svc && svc.status === 'running') {
@@ -64,72 +63,63 @@
 </script>
 
 <div class="dashboard">
-  <div class="service-cards">
-    {#each (hasLoaded ? services : [null,null,null,null,null,null]) as _, i}
-      {@const svc = hasLoaded ? services[i] : null}
-      {@const meta = svc ? (cardMeta[svc.id] || { cls: 'icon-nginx', color: 'var(--accent)' }) : { cls: '', color: 'var(--border)' }}
-      <button
-        class="service-card"
-        class:running={svc?.status === 'running'}
-        class:placeholder={!svc}
-        style={svc ? '--card-color: ' + meta.color + ';' : ''}
-        on:click={() => svc && toggle(svc.id)}
-        disabled={!svc || !svc.installed}
-      >
-        <div class="svc-accent" style="background: {meta.color};"></div>
-        <div class="svc-body">
-          <div class="svc-icon">
-            {#if svc}
-              <span class="iconfont {meta.cls}" style="color: {meta.color};"></span>
-            {:else}
-              <span class="icon-placeholder"></span>
-            {/if}
-          </div>
-          <div class="svc-info">
-            {#if svc}
-              <div class="svc-top">
-                <div class="svc-name">{svc.name}</div>
-                {#if svc.installed}
-                  <span class="svc-ver">v{svc.version}</span>
-                {/if}
-              </div>
-              <div class="svc-meta">
-                {#if svc.installed}
-                  <span class="svc-dot" class:running={svc.status === 'running'}></span>
-                  <span class="svc-status">{statusLabel(svc.status)}</span>
-                {:else}
-                  <span class="svc-dot"></span>
-                  <span class="svc-status">未安装</span>
-                {/if}
-              </div>
-            {:else}
-              <div class="svc-top"><div class="placeholder-line w-60"></div></div>
-              <div class="svc-meta"><div class="placeholder-line w-40"></div></div>
-            {/if}
-          </div>
-        </div>
-      </button>
-    {/each}
+  <div class="card-grid">
+    <div class="section card">
+      <div class="section-header"><h3>服务</h3></div>
+      <div class="mini-cards">
+        {#each (hasLoaded ? services : [null,null,null]) as _, i}
+          {@const svc = hasLoaded ? services[i] : null}
+          {@const meta = svc ? (serviceMeta[svc.id] || { cls: '', color: 'var(--accent)' }) : { cls: '', color: 'var(--border)' }}
+          <button
+            class="mini-card"
+            class:running={svc?.status === 'running'}
+            class:placeholder={!svc}
+            style={svc ? '--card-color: ' + meta.color + ';' : ''}
+            on:click={() => svc && svc.installed && toggleService(svc.id)}
+            disabled={!svc || !svc.installed}
+          >
+            <div class="mini-accent" style="background: {meta.color};"></div>
+            <div class="mini-body">
+              {#if svc}
+                <span class="iconfont {meta.cls}" style="color: {meta.color};font-size:28px"></span>
+                <div class="mini-info">
+                  <div class="mini-name">{svc.name}</div>
+                  <div class="mini-meta">
+                    <span class="mini-dot" class:on={svc.status === 'running'}></span>
+                    {svc.installed ? statusLabel(svc.status) : '未安装'}
+                  </div>
+                </div>
+              {:else}
+                <span class="icon-placeholder"></span>
+                <div class="mini-info"><div class="placeholder-line w-60"></div><div class="placeholder-line w-40"></div></div>
+              {/if}
+            </div>
+          </button>
+        {/each}
+      </div>
+    </div>
+
   </div>
 
   <div class="site-section card">
     <div class="section-header">
-      <h3>网站列表</h3>
-      <span class="badge badge-info">{sites.length} 个站点</span>
+      <h3>项目列表</h3>
+      <span class="badge badge-info">{sites.length} 个</span>
     </div>
     {#if !hasLoaded}
       <div class="empty-state"><p style="color:var(--text-muted)">加载中...</p></div>
     {:else if sites.length === 0}
       <div class="empty-state">
-        <p>暂无网站</p>
-        <p style="font-size:12px;margin-top:4px;">前往「网站」页面添加您的第一个站点</p>
+        <p>暂无项目</p>
+        <p style="font-size:12px;margin-top:4px;">前往「项目」页面添加您的第一个站点</p>
       </div>
     {:else}
       <table class="site-table">
         <thead>
           <tr>
-            <th>网站名称</th>
+            <th>名称</th>
             <th>域名</th>
+            <th>类型</th>
             <th>根目录</th>
             <th>状态</th>
           </tr>
@@ -139,7 +129,8 @@
             <tr>
               <td>{site.name}</td>
               <td><code>{site.domain}</code></td>
-              <td class="path">{site.root || site.documentRoot || '-'}</td>
+              <td><span class="type-badge">{site.type}</span></td>
+              <td class="path">{site.root || '-'}</td>
               <td>
                 <span class="badge {site.enabled ? 'badge-success' : 'badge-danger'}">
                   {site.enabled ? '已启用' : '已禁用'}
@@ -178,15 +169,15 @@
               <div class="info-item"><span class="info-label">-</span><span class="info-val">-</span></div>
             {/each}
           {:else}
-            {#each services as svc}
+            {#each [...services, ...runtimes] as svc}
               {#if svc.installed}
                 <div class="info-item">
-                  <span class="info-label" style="color: {cardMeta[svc.id]?.color || 'var(--text-primary)'};">{svc.name}</span>
+                  <span class="info-label">{svc.name}</span>
                   <span class="info-val">
-                    {#if svc.status === 'running'}
+                    {#if svc.status === 'running' || svc.running}
                       PID: {svc.pid || '-'}　{svc.uptime || ''}
                     {:else}
-                      {statusLabel(svc.status)}
+                      {statusLabel(svc.status) || '已停止'}
                     {/if}
                   </span>
                 </div>
@@ -213,11 +204,10 @@
           {#each ops as op}
             <div class="op-item" class:op-error={op.status && op.status.startsWith('失败')}>
               <span class="op-time">{op.time}</span>
-              <span class="op-action">{op.action}</span>
-              <span class="op-service">{op.service}</span>
+              <span class="op-action">{op.action} {op.service}</span>
               <span class="op-detail">{op.detail}</span>
               <span class="op-status" class:success={op.status === '成功'} class:fail={op.status && op.status.startsWith('失败')}>
-                {op.status}
+                {op.status === '成功' ? '成功' : '失败'}
               </span>
             </div>
           {/each}
@@ -236,6 +226,61 @@
     overflow: hidden;
   }
 
+  .card-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 20px;
+  }
+
+  .mini-cards {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+    padding: 12px;
+  }
+
+  .mini-card {
+    position: relative;
+    background: var(--bg-card-hover);
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border);
+    text-align: left;
+    cursor: pointer;
+    padding: 0;
+    overflow: hidden;
+    outline: none;
+    width: 100%;
+    box-sizing: border-box;
+  }
+  .mini-card:hover { box-shadow: var(--shadow-sm); }
+  .mini-card.running { border-color: var(--card-color); }
+  .mini-card:disabled { opacity: 0.5; cursor: default; }
+  .mini-card.placeholder { border-style: dashed; }
+
+  .mini-accent { height: 2px; width: 100%; }
+  .mini-body {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px;
+  }
+
+  .mini-info { flex: 1; min-width: 0; }
+  .mini-name { font-size: 13px; font-weight: 600; color: var(--text-primary); }
+  .mini-meta { display: flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+
+  .mini-dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--text-muted); flex-shrink: 0;
+  }
+  .mini-dot.on { background: var(--green); }
+
+  .icon-placeholder { width: 28px; height: 28px; border-radius: 6px; background: var(--border); }
+
+  .placeholder-line { height: 8px; border-radius: 4px; background: var(--border); margin-bottom: 4px; }
+  .w-60 { width: 60%; }
+  .w-40 { width: 40%; }
+
   .bottom-panel {
     display: grid;
     grid-template-columns: 1fr 1fr;
@@ -243,125 +288,6 @@
     flex: 1;
     min-height: 0;
   }
-
-  .service-cards {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 12px;
-    min-height: 120px;
-  }
-
-  .service-card {
-    position: relative;
-    background: var(--bg-card);
-    border-radius: var(--radius);
-    border: 1px solid var(--border);
-    text-align: left;
-    cursor: pointer;
-    padding: 0;
-    overflow: hidden;
-    outline: none;
-    -webkit-tap-highlight-color: transparent;
-    width: 100%;
-    box-sizing: border-box;
-  }
-  .service-card:hover {
-    box-shadow: var(--shadow-lg);
-  }
-  .service-card:focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: 2px;
-  }
-  .service-card.running {
-    border-color: var(--card-color);
-    box-shadow: 0 0 0 1px var(--card-color), var(--shadow-sm);
-  }
-  .service-card:disabled {
-    opacity: 0.5;
-    cursor: default;
-  }
-  .service-card:disabled:hover {
-    box-shadow: var(--shadow-sm);
-  }
-  .service-card:disabled.running {
-    border-color: var(--border);
-    box-shadow: var(--shadow-sm);
-  }
-  .service-card.placeholder {
-    border-color: var(--border);
-    border-style: dashed;
-  }
-
-  .svc-accent {
-    height: 3px;
-    width: 100%;
-  }
-
-  .svc-body {
-    display: flex;
-    align-items: center;
-    gap: 14px;
-    padding: 18px 18px 16px;
-  }
-
-  .svc-icon {
-    flex-shrink: 0;
-    width: 44px;
-    height: 44px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    border-radius: 12px;
-    background: var(--bg-inset);
-  }
-  .svc-icon .iconfont { font-size: 28px; }
-  .icon-placeholder { width: 28px; height: 28px; border-radius: 6px; background: var(--border); }
-
-  .svc-info { flex: 1; min-width: 0; }
-
-  .svc-top {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 6px;
-    margin-bottom: 4px;
-  }
-
-  .svc-name { font-size: 15px; font-weight: 600; color: var(--text-primary); }
-
-  .svc-ver {
-    flex-shrink: 0;
-    font-family: var(--font-mono);
-    font-size: 10px;
-    color: var(--text-secondary);
-    background: var(--bg-inset);
-    padding: 1px 6px;
-    border-radius: 4px;
-  }
-
-  .svc-meta { display: flex; align-items: center; gap: 4px; }
-
-  .svc-dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--text-muted);
-    flex-shrink: 0;
-  }
-  .svc-dot.running {
-    background: var(--green);
-    box-shadow: 0 0 6px rgba(5,150,105,0.4);
-  }
-
-  .svc-status { font-size: 11px; color: var(--text-muted); }
-
-  .placeholder-line {
-    height: 10px;
-    border-radius: 4px;
-    background: var(--border);
-  }
-  .w-60 { width: 60%; }
-  .w-40 { width: 40%; }
 
   .site-section { padding: 0; overflow: hidden; }
 
@@ -385,14 +311,25 @@
   .site-table .path { color: var(--text-muted); font-size: 12px; font-family: var(--font-mono); }
   .site-table code { background: var(--bg-input); padding: 2px 6px; border-radius: 4px; font-size: 12px; }
 
+  .type-badge {
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    background: var(--bg-inset);
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+  }
+
   .section-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 16px 20px;
+    padding: 14px 16px;
     border-bottom: 1px solid var(--border);
   }
-  .section-header h3 { font-size: 15px; font-weight: 600; }
+  .section-header h3 { font-size: 14px; font-weight: 600; }
+
+  .section.card { padding: 0; overflow: hidden; }
 
   .info-section { padding: 0; overflow: hidden; }
 
@@ -436,7 +373,7 @@
 
   .op-item {
     display: grid;
-    grid-template-columns: 80px 60px 60px 1fr 52px;
+    grid-template-columns: 80px 140px 1fr 52px;
     align-items: center;
     gap: 6px;
     padding: 6px 16px;

@@ -20,7 +20,7 @@ type MySQLHandler struct {
 func (h *MySQLHandler) Configure(s *ServiceInstance, cfg *config.Config) error {
 	installDir := cfg.Get().InstallDir
 	mysqlDir := filepath.Join(installDir, "mysql", s.Info.Version)
-	dataDir := filepath.Join(mysqlDir, "data")
+	dataDir := filepath.Join(installDir, "db", "mysql")
 
 	myIni := filepath.Join(mysqlDir, "my.ini")
 	if !fileExists(myIni) {
@@ -30,6 +30,8 @@ datadir=%s
 port=%d
 bind-address=127.0.0.1
 skip-networking=0
+log-error=error.log
+general_log=0
 
 innodb_buffer_pool_size = 256M
 innodb_log_file_size = 64M
@@ -68,7 +70,7 @@ func (h *MySQLHandler) Start(s *ServiceInstance, cfg *config.Config, pm *process
 		return fmt.Errorf("MySQL 可执行文件未找到: %s", mysqld)
 	}
 
-	dataDir := filepath.Join(mysqlDir, "data")
+	dataDir := filepath.Join(installDir, "db", "mysql")
 	os.MkdirAll(dataDir, 0755)
 
 	myIni := filepath.Join(mysqlDir, "my.ini")
@@ -79,6 +81,8 @@ datadir=%s
 port=%d
 bind-address=127.0.0.1
 skip-networking=0
+log-error=error.log
+general_log=0
 
 innodb_buffer_pool_size = 256M
 innodb_log_file_size = 64M
@@ -119,19 +123,95 @@ table_open_cache = 400
 
 func (h *MySQLHandler) SaveConfig(s *ServiceInstance, cfg *config.Config, values map[string]string) error {
 	installDir := cfg.Get().InstallDir
-	myIni := filepath.Join(installDir, "mysql", s.Info.Version, "my.ini")
-	if !fileExists(myIni) {
-		return h.Configure(s, cfg)
+	mysqlDir := filepath.Join(installDir, "mysql", s.Info.Version)
+	dataDir := filepath.Join(installDir, "db", "mysql")
+
+	settings := cfg.Get()
+	mc := settings.MySQLConfig
+	changed := false
+
+	if v, ok := values["innodbBufferPoolSize"]; ok {
+		mc.InnoDBBufferPoolSize = v
+		changed = true
 	}
-	data, err := os.ReadFile(myIni)
-	if err != nil {
-		return err
+	if v, ok := values["innodbLogFileSize"]; ok {
+		mc.InnoDBLogFileSize = v
+		changed = true
 	}
-	content := string(data)
-	for k, v := range values {
-		content = updateIniValue(content, k, v)
+	if v, ok := values["innodbFlushLogAtTrxCommit"]; ok {
+		var n int
+		fmt.Sscanf(v, "%d", &n)
+		mc.InnoDBFlushLogAtTrxCommit = n
+		changed = true
 	}
-	if err := os.WriteFile(myIni, []byte(content), 0644); err != nil {
+	if v, ok := values["maxConnections"]; ok {
+		var n int
+		fmt.Sscanf(v, "%d", &n)
+		mc.MaxConnections = n
+		changed = true
+	}
+	if v, ok := values["tmpTableSize"]; ok {
+		mc.TmpTableSize = v
+		changed = true
+	}
+	if v, ok := values["maxHeapTableSize"]; ok {
+		mc.MaxHeapTableSize = v
+		changed = true
+	}
+	if v, ok := values["threadCacheSize"]; ok {
+		var n int
+		fmt.Sscanf(v, "%d", &n)
+		mc.ThreadCacheSize = n
+		changed = true
+	}
+	if v, ok := values["tableOpenCache"]; ok {
+		var n int
+		fmt.Sscanf(v, "%d", &n)
+		mc.TableOpenCache = n
+		changed = true
+	}
+	if v, ok := values["bindAddress"]; ok {
+		mc.BindAddress = v
+		changed = true
+	}
+	if v, ok := values["port"]; ok {
+		var n int
+		fmt.Sscanf(v, "%d", &n)
+		mc.Port = n
+		changed = true
+	}
+
+	if changed {
+		settings.MySQLConfig = mc
+		if err := cfg.Update(settings); err != nil {
+			return err
+		}
+	}
+
+	myIni := filepath.Join(mysqlDir, "my.ini")
+	ini := fmt.Sprintf(`[mysqld]
+basedir=%s
+datadir=%s
+port=%d
+bind-address=%s
+skip-networking=0
+log-error=error.log
+general_log=0
+
+innodb_buffer_pool_size = %s
+innodb_log_file_size = %s
+innodb_flush_log_at_trx_commit = %d
+max_connections = %d
+tmp_table_size = %s
+max_heap_table_size = %s
+thread_cache_size = %d
+table_open_cache = %d
+`, mysqlDir, dataDir, mc.Port, mc.BindAddress,
+		mc.InnoDBBufferPoolSize, mc.InnoDBLogFileSize, mc.InnoDBFlushLogAtTrxCommit,
+		mc.MaxConnections, mc.TmpTableSize, mc.MaxHeapTableSize,
+		mc.ThreadCacheSize, mc.TableOpenCache)
+
+	if err := os.WriteFile(myIni, []byte(ini), 0644); err != nil {
 		return err
 	}
 

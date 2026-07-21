@@ -23,10 +23,10 @@ type Manager struct {
 	phpPorts  map[string]int
 }
 
-func NewManager(dataDir, installDir, nginxVer string, phpPort int) *Manager {
+func NewManager(installDir, nginxVer string, phpPort int) *Manager {
 	m := &Manager{
 		sites:      make(map[string]*core.Site),
-		filePath:   filepath.Join(dataDir, "sites.json"),
+		filePath:   filepath.Join(installDir, "data", "sites.json"),
 		installDir: installDir,
 		nginxVer:   nginxVer,
 		phpPort:    phpPort,

@@ -13,13 +13,15 @@
     { id: 'all', label: '全部', icon: '📦' },
     { id: 'webserver', label: 'Web 服务器', icon: '🌐' },
     { id: 'database', label: '数据库', icon: '🗄️' },
-    { id: 'language', label: '语言', icon: '💻' },
+    { id: 'runtime', label: '运行环境', icon: '💻' },
     { id: 'service', label: '基础服务', icon: '⚙' },
   ]
 
   const serviceNames = {
-    nginx: 'Nginx', mysql: 'MySQL', redis: 'Redis',
-    php: 'PHP', node: 'Node.js', python: 'Python',
+    nginx: 'Nginx', apache: 'Apache',
+    mysql: 'MySQL', postgresql: 'PostgreSQL', mongodb: 'MongoDB',
+    redis: 'Redis', memcached: 'Memcached',
+    php: 'PHP', node: 'Node.js', python: 'Python', composer: 'Composer',
   }
   async function load() {
     loading = true

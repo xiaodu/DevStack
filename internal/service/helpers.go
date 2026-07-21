@@ -42,12 +42,10 @@ type ServiceHandler interface {
 }
 
 var handlers = map[string]ServiceHandler{
-	"nginx":  &NginxHandler{},
-	"mysql":  &MySQLHandler{},
-	"redis":  &RedisHandler{},
-	"php":    &PHPHandler{},
-	"node":   &NodeHandler{},
-	"python": &PythonHandler{},
+	"nginx": &NginxHandler{},
+	"mysql": &MySQLHandler{},
+	"redis": &RedisHandler{},
+	"php":   &PHPHandler{},
 }
 
 func now() time.Time {
@@ -64,10 +62,14 @@ func updateIniValue(content, key, value string) string {
 
 func updateConfValue(content, key, value string) string {
 	re := regexp.MustCompile(`(?m)^\s*` + regexp.QuoteMeta(key) + `\s+.*$`)
-	if re.MatchString(content) {
-		return re.ReplaceAllString(content, key+" "+value)
+	repl := key + " " + value
+	if !strings.HasSuffix(strings.TrimSpace(repl), ";") {
+		repl += ";"
 	}
-	return content + "\n" + key + " " + value
+	if re.MatchString(content) {
+		return re.ReplaceAllString(content, repl)
+	}
+	return content + "\n" + repl
 }
 
 func generatePHPUpstreamConfig(basePort int) string {

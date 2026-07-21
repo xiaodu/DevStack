@@ -48,11 +48,19 @@
   function selectSite(id) {
     selectedId = id
     const s = sites.find(x => x.id === id)
-    editing = s ? { ...s } : null
+    if (s) {
+      editing = {
+        ...s,
+        root: s.root || s.documentRoot || '',
+        ssl: s.ssl || false,
+        targetPort: s.targetPort || 0,
+        proxyPass: s.proxyPass || '',
+      }
+    }
   }
 
   function newSite() {
-    editing = { id: '', name: '', domain: '', documentRoot: '', enabled: true, type: 'static', port: 80 }
+    editing = { id: '', name: '', domain: '', root: '', enabled: true, type: 'static', port: 80, httpsPort: 443, ssl: false, phpVersion: '', rewrite: 'default', targetPort: 3000, proxyPass: '' }
     selectedId = '__new__'
   }
 
@@ -79,7 +87,7 @@
 
   async function remove() {
     if (!editing || !editing.id || editing.id === '__new__') return
-    if (!confirm('确定删除此站点？')) return
+    if (!confirm('确定删除此项目？')) return
     try {
       await api.deleteSite(editing.id)
       selectedId = null
@@ -105,12 +113,17 @@
   )
 
   async function browseDirectory() {
-    const path = await api.openDirectory(editing?.documentRoot || '')
+    const path = await api.openDirectory(editing?.root || '')
     if (path && editing) {
-      editing.documentRoot = path
+      editing.root = path
       editing = editing
     }
   }
+
+  $: showTargetPort = editing && (editing.type === 'node' || editing.type === 'python')
+  $: showProxyPass = editing && editing.type === 'proxy'
+  $: showPHP = editing && editing.type === 'php'
+  $: isPHPOrStatic = editing && (editing.type === 'php' || editing.type === 'static')
 
   onMount(load)
 </script>
@@ -118,8 +131,8 @@
 <div class="sites-page">
   <div class="sites-left">
     <div class="list-header">
-      <h3>网站</h3>
-      <button class="btn-add" on:click={newSite} title="添加网站">+</button>
+      <h3>项目</h3>
+      <button class="btn-add" on:click={newSite} title="添加项目">+</button>
     </div>
     <div class="search-box">
       <input class="form-input" placeholder="搜索..." bind:value={searchQuery} />
@@ -138,6 +151,7 @@
               <div class="site-domain">{site.domain}</div>
             </div>
           </div>
+          <div class="site-type-label">{site.type}</div>
           <div class="site-actions">
             <button class="mini-btn" on:click|stopPropagation={() => toggleSite(site.id)} title={site.enabled ? '禁用' : '启用'}>
               {site.enabled ? '⏸' : '▶'}
@@ -146,7 +160,7 @@
         </button>
       {/each}
       {#if filteredSites.length === 0}
-        <div class="empty-list">暂无网站</div>
+        <div class="empty-list">暂无项目</div>
       {/if}
     </div>
   </div>
@@ -154,7 +168,7 @@
   <div class="sites-right">
     {#if editing}
       <div class="detail-header">
-        <h2>{editing.id === '__new__' ? '新建网站' : editing.name}</h2>
+        <h2>{editing.id === '__new__' ? '新建项目' : editing.name}</h2>
         <div class="header-actions">
           {#if editing.id && editing.id !== '__new__'}
             <button class="btn-icon red" on:click={remove} title="删除">🗑</button>
@@ -176,14 +190,6 @@
 
         <div class="form-row-3">
           <label class="form-label">
-            <span>Web 协议</span>
-            <select class="form-input" bind:value={editing.protocol}>
-              <option value="http">HTTP</option>
-              <option value="https">HTTPS</option>
-              <option value="both">HTTP & HTTPS</option>
-            </select>
-          </label>
-          <label class="form-label">
             <span>HTTP Port</span>
             <input class="form-input" type="number" bind:value={editing.port} />
           </label>
@@ -191,55 +197,79 @@
             <span>HTTPS Port</span>
             <input class="form-input" type="number" bind:value={editing.httpsPort} placeholder="443" />
           </label>
+          <label class="toggle-label" style="justify-content:flex-end;padding-top:18px">
+            <input type="checkbox" bind:checked={editing.ssl} />
+            <span>SSL</span>
+          </label>
         </div>
 
         <div class="form-row-3">
           <label class="form-label">
-            <span>网站类型</span>
+            <span>项目类型</span>
             <select class="form-input" bind:value={editing.type}>
               <option value="static">静态</option>
               <option value="php">PHP</option>
+              <option value="node">Node.js</option>
+              <option value="python">Python</option>
               <option value="proxy">反向代理</option>
             </select>
           </label>
-          <label class="form-label">
-            <span>PHP 版本</span>
-            <select class="form-input" bind:value={editing.phpVersion}>
-              <option value="">不使用</option>
-              {#each phpVersions as pv}
-                <option value={pv.version}>PHP {pv.version} (端口 {pv.port})</option>
-              {/each}
-            </select>
-          </label>
-          <label class="form-label">
-            <span>Rewrite 规则</span>
-            <select class="form-input" bind:value={editing.rewrite}>
-              <option value="default">Default</option>
-              <option value="laravel">Laravel</option>
-              <option value="thinkphp">ThinkPHP</option>
-              <option value="custom">自定义</option>
-            </select>
-          </label>
+
+          {#if showPHP}
+            <label class="form-label">
+              <span>PHP 版本</span>
+              <select class="form-input" bind:value={editing.phpVersion}>
+                <option value="">不使用</option>
+                {#each phpVersions as pv}
+                  <option value={pv.version}>PHP {pv.version} (端口 {pv.port})</option>
+                {/each}
+              </select>
+            </label>
+            <label class="form-label">
+              <span>Rewrite 规则</span>
+              <select class="form-input" bind:value={editing.rewrite}>
+                <option value="default">Default</option>
+                <option value="laravel">Laravel</option>
+                <option value="thinkphp">ThinkPHP</option>
+              </select>
+            </label>
+          {:else if showTargetPort}
+            <label class="form-label">
+              <span>应用端口</span>
+              <input class="form-input" type="number" bind:value={editing.targetPort} />
+            </label>
+            <label class="form-label">
+              <span>说明</span>
+              <input class="form-input" value="自行启动进程" readonly />
+            </label>
+          {:else if showProxyPass}
+            <label class="form-label" style="grid-column:span 2">
+              <span>目标地址</span>
+              <input class="form-input" bind:value={editing.proxyPass} placeholder="http://127.0.0.1:3000" />
+            </label>
+          {:else}
+            <div></div><div></div>
+          {/if}
         </div>
 
         <label class="form-label">
-          <span>网站根目录</span>
+          <span>项目根目录</span>
           <div class="input-row">
-            <input class="form-input" bind:value={editing.documentRoot} placeholder="E:\projects\my-site" />
+            <input class="form-input" bind:value={editing.root} placeholder="E:\projects\my-project" />
             <button class="btn btn-outline btn-sm" on:click={browseDirectory}>浏览</button>
           </div>
         </label>
 
         <label class="toggle-label">
           <input type="checkbox" bind:checked={editing.enabled} />
-          <span>启用站点</span>
+          <span>启用项目</span>
         </label>
       </div>
     {:else}
       <div class="empty-state">
         <div class="icon">🌐</div>
-        <p>选择左侧网站进行编辑</p>
-        <p style="font-size:12px;margin-top:4px;">或点击 + 创建新网站</p>
+        <p>选择左侧项目进行编辑</p>
+        <p style="font-size:12px;margin-top:4px;">或点击 + 创建新项目</p>
       </div>
     {/if}
   </div>
@@ -315,6 +345,15 @@
 
   .site-name { font-size: 13px; font-weight: 500; color: var(--text-primary); }
   .site-domain { font-size: 11px; color: var(--text-muted); font-family: var(--font-mono); }
+
+  .site-type-label {
+    font-size: 10px;
+    padding: 1px 5px;
+    border-radius: 3px;
+    background: var(--bg-inset);
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+  }
 
   .mini-btn {
     width: 24px; height: 24px; border-radius: 4px;

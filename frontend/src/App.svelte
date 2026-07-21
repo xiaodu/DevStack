@@ -4,11 +4,12 @@
   import Dashboard from './components/Dashboard.svelte'
   import Sites from './components/Sites.svelte'
   import Database from './components/Database.svelte'
-  import Languages from './components/Languages.svelte'
+
   import WebServer from './components/WebServer.svelte'
   import Packages from './components/Packages.svelte'
   import Logs from './components/Logs.svelte'
   import Settings from './components/Settings.svelte'
+  import Runtime from './components/Runtime.svelte'
   import SetupWizard from './components/SetupWizard.svelte'
   import { api } from './lib/api.js'
   import { refreshSignal, toasts, addToast, globalLoading } from './lib/stores.js'
@@ -49,15 +50,19 @@
     topBusy = true
     globalLoading.set(true)
     try {
-      const svcs = await api.getServices()
-      // DAG start order: nginx (depends on nothing) → php (nginx needs it) → mysql, redis
-      const order = { nginx: 0, php: 1, mysql: 2, redis: 2 }
-      const ids = svcs
-        .filter(s => s.installed && order[s.id] !== undefined)
-        .sort((a, b) => order[a.id] - order[b.id])
+      const [svcs, rts] = await Promise.all([api.getServices(), api.getRuntimes()])
+      const svcOrder = { nginx: 0, mysql: 1, redis: 2, php: 3 }
+      const svcIds = svcs
+        .filter(s => s.installed && s.status !== 'running')
+        .sort((a, b) => {
+          const order = { nginx: 0, mysql: 1, redis: 2 }
+          const aBase = a.id.startsWith('php-') ? 3 : (order[a.id] ?? 9)
+          const bBase = b.id.startsWith('php-') ? 3 : (order[b.id] ?? 9)
+          return aBase - bBase
+        })
         .map(s => s.id)
       let ok = 0, fail = 0
-      for (const id of ids) {
+      for (const id of svcIds) {
         try { await api.startService(id); ok++ }
         catch (e) { fail++ }
       }
@@ -77,19 +82,23 @@
     globalLoading.set(true)
     try {
       const svcs = await api.getServices()
-      const order = { nginx: 0, php: 1, mysql: 2, redis: 2 }
-      const ids = svcs
-        .filter(s => s.installed && s.status === 'running' && order[s.id] !== undefined)
-        .sort((a, b) => order[b.id] - order[a.id])
+      const svcIds = svcs
+        .filter(s => s.installed && s.status === 'running')
+        .sort((a, b) => {
+          const order = { redis: 0, mysql: 1, nginx: 2 }
+          const aBase = a.id.startsWith('php-') ? 0 : (order[a.id] ?? 0)
+          const bBase = b.id.startsWith('php-') ? 0 : (order[b.id] ?? 0)
+          return aBase - bBase
+        })
         .map(s => s.id)
-      if (ids.length === 0) {
+      if (svcIds.length === 0) {
         addToast('没有正在运行的服务', 'info')
         globalLoading.set(false)
         topBusy = false
         return
       }
       let ok = 0, fail = 0
-      for (const id of ids) {
+      for (const id of svcIds) {
         try { await api.stopService(id); ok++ }
         catch (e) { fail++ }
       }
@@ -120,10 +129,10 @@
 
   $: pageTitle = {
     dashboard: '仪表盘',
-    sites: '网站',
+    sites: '项目',
     database: '数据库',
-    languages: '语言',
     webserver: 'Web 服务器',
+    runtime: '运行环境',
     packages: '软件包',
     logs: '日志',
     settings: '设置',
@@ -144,7 +153,7 @@
       </div>
       <div class="load-bar" class:active={$globalLoading}></div>
       <div class="top-actions">
-        <button class="top-btn green" title="启动全部服务 (Nginx → PHP → MySQL + Redis)" on:click={startAll} disabled={topBusy}>▶</button>
+        <button class="top-btn green" title="启动全部服务 (Nginx → MySQL + Redis + PHP)" on:click={startAll} disabled={topBusy}>▶</button>
         <button class="top-btn orange" title="重启 Nginx" on:click={restartNginx} disabled={topBusy}>⟳</button>
         <button class="top-btn red" title="停止全部服务 (逆向顺序)" on:click={stopAll} disabled={topBusy}>■</button>
       </div>
@@ -153,9 +162,9 @@
       <div class="view-stack">
         <div class="view-pane" class:active={currentView === 'dashboard'}><Dashboard /></div>
         <div class="view-pane" class:active={currentView === 'sites'}><Sites /></div>
-        <div class="view-pane" class:active={currentView === 'database'}><Database /></div>
-        <div class="view-pane" class:active={currentView === 'languages'}><Languages /></div>
         <div class="view-pane" class:active={currentView === 'webserver'}><WebServer /></div>
+        <div class="view-pane" class:active={currentView === 'database'}><Database /></div>
+        <div class="view-pane" class:active={currentView === 'runtime'}><Runtime /></div>
         <div class="view-pane" class:active={currentView === 'packages'}><Packages /></div>
         <div class="view-pane" class:active={currentView === 'logs'}><Logs /></div>
         <div class="view-pane" class:active={currentView === 'settings'}><Settings /></div>
@@ -277,7 +286,7 @@
 
   .main-content {
     flex: 1;
-    overflow: hidden;
+    overflow-y: auto;
     scrollbar-gutter: stable;
     padding: 24px 32px;
     background: var(--bg-primary);

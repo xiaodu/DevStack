@@ -1,9 +1,15 @@
 :root {
-  --sidebar-bg: #0f172a;
-  --sidebar-text: rgba(255,255,255,0.6);
-  --sidebar-text-active: #fff;
-  --sidebar-hover: rgba(255,255,255,0.08);
-  --sidebar-active: rgba(255,255,255,0.12);
+  --sidebar-bg: #f1f5f9;
+  --sidebar-text: #64748b;
+  --sidebar-text-active: #0f172a;
+  --sidebar-hover: #e2e8f0;
+  --sidebar-active: #dbeafe;
+  --sidebar-border: #e2e8f0;
+  --sidebar-logo: #0f172a;
+  --sidebar-avatar-bg: #4f46e5;
+  --sidebar-avatar-text: #fff;
+  --sidebar-user-name: #0f172a;
+  --sidebar-user-plan: #94a3b8;
 
   --bg-primary: #f8fafc;
   --bg-card: #ffffff;
@@ -57,6 +63,12 @@
   --sidebar-text-active: #fff;
   --sidebar-hover: rgba(255,255,255,0.08);
   --sidebar-active: rgba(255,255,255,0.12);
+  --sidebar-border: rgba(255,255,255,0.1);
+  --sidebar-logo: #fff;
+  --sidebar-avatar-bg: rgba(255,255,255,0.2);
+  --sidebar-avatar-text: #fff;
+  --sidebar-user-name: #fff;
+  --sidebar-user-plan: rgba(255,255,255,0.5);
 
   --bg-primary: #0f172a;
   --bg-card: #1e293b;

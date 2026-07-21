@@ -14,6 +14,8 @@ import (
 	"github.com/xiaodu/DevStack/internal/config"
 	"github.com/xiaodu/DevStack/internal/core"
 	"github.com/xiaodu/DevStack/internal/process"
+	"github.com/xiaodu/DevStack/internal/registry"
+	"github.com/xiaodu/DevStack/internal/runtime"
 )
 
 type Manager struct {
@@ -50,50 +52,30 @@ func NewManager(cfg *config.Config, procMgr *process.Manager) *Manager {
 
 func (m *Manager) registerDefaults() {
 	installDir := m.cfg.Get().InstallDir
+	manifest := registry.Builtin()
 
-	m.services["nginx"] = &ServiceInstance{
-		Info: core.ServiceInfo{
-			ID: "nginx", Name: "Nginx", Type: core.TypeNginx,
-			Category: core.CategoryWebServer,
-			Version: "1.26.0", Port: 80, Status: core.StatusStopped,
-		},
-	}
-	m.services["mysql"] = &ServiceInstance{
-		Info: core.ServiceInfo{
-			ID: "mysql", Name: "MySQL", Type: core.TypeMySQL,
-			Category: core.CategoryDatabase,
-			Version: "8.4.0", Port: 3306, Status: core.StatusStopped,
-		},
-	}
-	m.services["redis"] = &ServiceInstance{
-		Info: core.ServiceInfo{
-			ID: "redis", Name: "Redis", Type: core.TypeRedis,
-			Category: core.CategoryDatabase,
-			Version: "7.2.0", Port: 6379, Status: core.StatusStopped,
-		},
-	}
-	m.services["php"] = &ServiceInstance{
-		Info: core.ServiceInfo{
-			ID: "php", Name: "PHP", Type: core.TypePHP,
-			Category: core.CategoryLanguage,
-			Version: "8.3.32", Port: 9000, Status: core.StatusStopped,
-		},
-	}
-	m.services["node"] = &ServiceInstance{
-		Info: core.ServiceInfo{
-			ID: "node", Name: "Node.js", Type: core.TypeNode,
-			Category: core.CategoryLanguage,
-			Version: "20.11.0", Port: 3000, Status: core.StatusStopped,
-		},
-	}
-	m.services["python"] = &ServiceInstance{
-		Info: core.ServiceInfo{
-			ID: "python", Name: "Python", Type: core.TypePython,
-			Category: core.CategoryLanguage,
-			Version: "3.12.0", Port: 3001, Status: core.StatusStopped,
-		},
-	}
+	for _, pkg := range manifest.List("") {
+		svcType := serviceTypeFromPkg(pkg.Type)
+		if svcType == "" {
+			continue
+		}
+		cat := serviceCategoryFromPkg(pkg.Category)
 
+		// PHP: register each installed version as a separate service
+		if svcType == core.TypePHP {
+			m.registerPHPVersions(installDir, pkg)
+			continue
+		}
+
+		m.services[pkg.ID] = &ServiceInstance{
+			Info: core.ServiceInfo{
+				ID: pkg.ID, Name: pkg.Name, Type: svcType,
+				Category: cat,
+				Version:  pkg.DefaultVersion, Port: pkg.DefaultPort,
+				Status: core.StatusStopped,
+			},
+		}
+	}
 	for _, s := range m.services {
 		svcDir := filepath.Join(installDir, string(s.Info.Type))
 		entries, err := os.ReadDir(svcDir)
@@ -119,7 +101,51 @@ func (m *Manager) registerDefaults() {
 	}
 }
 
-var serviceOrder = []string{"nginx", "php", "mysql", "redis", "node", "python"}
+func (m *Manager) registerPHPVersions(installDir string, pkg registry.PackageDef) {
+	phpDir := filepath.Join(installDir, "php")
+	entries, err := os.ReadDir(phpDir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		version := entry.Name()
+		id := "php-" + version
+		port := runtime.GetPHPVersionPort(m.cfg, version)
+
+		m.services[id] = &ServiceInstance{
+			Info: core.ServiceInfo{
+				ID: id, Name: "PHP " + version, Type: core.TypePHP,
+				Category: core.CategoryService,
+				Version:  version, Port: port,
+				Installed: true,
+				Status:    core.StatusStopped,
+			},
+		}
+
+		if pid := process.FindPIDByPort(port); pid > 0 {
+			m.services[id].Info.Status = core.StatusRunning
+			m.services[id].Info.PID = pid
+		}
+	}
+}
+
+var serviceOrder = []string{"nginx", "apache", "mysql", "postgresql", "mongodb", "redis", "memcached", "node", "python", "composer"}
+
+func (m *Manager) matchHandler(id string) ServiceHandler {
+	if h, ok := handlers[id]; ok {
+		return h
+	}
+	// Prefix match: "php-8.3" → "php"
+	if idx := strings.IndexByte(id, '-'); idx > 0 {
+		if h, ok := handlers[id[:idx]]; ok {
+			return h
+		}
+	}
+	return nil
+}
 
 func isPortAlive(port, pid int) bool {
 	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 300*time.Millisecond)
@@ -188,6 +214,28 @@ func (m *Manager) List() []core.ServiceInfo {
 
 		result = append(result, info)
 	}
+
+	// Append PHP version services (not in hardcoded serviceOrder)
+	for id, s := range m.services {
+		if s.Info.Type == core.TypePHP {
+			// Only if not already added via serviceOrder
+			alreadyAdded := false
+			for _, r := range result {
+				if r.ID == id {
+					alreadyAdded = true
+					break
+				}
+			}
+			if !alreadyAdded {
+				info := s.Info
+				if info.Status == core.StatusRunning && s.process != nil {
+					info.Uptime = time.Since(s.process.started).Round(time.Second).String()
+				}
+				result = append(result, info)
+			}
+		}
+	}
+
 	return result
 }
 
@@ -250,8 +298,8 @@ func (m *Manager) Start(id string) error {
 		return nil
 	}
 
-	handler, ok := handlers[id]
-	if !ok {
+	handler := m.matchHandler(id)
+	if handler == nil {
 		m.mu.Unlock()
 		return fmt.Errorf("不支持的的服务类型: %s", id)
 	}
@@ -286,8 +334,8 @@ func (m *Manager) Stop(id string) error {
 	}
 
 	if s.process != nil && s.process.pid > 0 {
-		handler, ok := handlers[id]
-		if !ok {
+		handler := m.matchHandler(id)
+		if handler == nil {
 			return fmt.Errorf("不支持的的服务类型: %s", id)
 		}
 		return handler.Stop(s, m.procMgr)
@@ -314,29 +362,60 @@ func (m *Manager) watchProcess(id string) {
 		m.mu.RUnlock()
 		return
 	}
-	pid := s.process.pid
 	stopped := s.stopped
 	m.mu.RUnlock()
 
-	select {
-	case <-m.procMgr.WaitChan(pid):
-	case <-stopped:
-		return
+	for {
+		select {
+		case <-stopped:
+			return
+		case <-time.After(5 * time.Second):
+			m.mu.RLock()
+			s2 := m.services[id]
+			if s2 == nil || s2.stopped == nil || s2.Info.Status != core.StatusRunning {
+				m.mu.RUnlock()
+				return
+			}
+			port := s2.Info.Port
+			m.mu.RUnlock()
+
+			if !m.checkServiceHealth(id, port) {
+				time.Sleep(2 * time.Second)
+				if !m.checkServiceHealth(id, port) {
+					m.mu.Lock()
+					s3 := m.services[id]
+					if s3 != nil && s3.stopped != nil && s3.Info.Status == core.StatusRunning {
+						s3.process = nil
+						s3.Info.PID = 0
+					}
+					m.mu.Unlock()
+					m.Start(id)
+				}
+			}
+		}
+	}
+}
+
+func (m *Manager) checkServiceHealth(id string, port int) bool {
+	if port <= 0 {
+		return true
 	}
 
-	m.mu.Lock()
-	s2 := m.services[id]
-	if s2 == nil || s2.stopped == nil || s2.Info.Status == core.StatusStopped || s2.Info.Status == core.StatusStopping {
-		m.mu.Unlock()
-		return
+	if s := m.GetService(id); s != nil && s.process != nil {
+		pids := append([]int{s.process.pid}, s.process.extraPids...)
+		for _, pid := range pids {
+			if pid > 0 && !m.procMgr.IsRunning(pid) {
+				return false
+			}
+		}
 	}
-	// Clean up stale process ref and restart
-	s2.process = nil
-	s2.Info.PID = 0
-	m.mu.Unlock()
 
-	time.Sleep(2 * time.Second)
-	m.Start(id)
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 500*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
 }
 
 func (m *Manager) Restart(id string) error {
@@ -403,6 +482,24 @@ func (m *Manager) SetVersion(id, version string) error {
 func (m *Manager) MarkInstalled(id, version string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	// PHP: create a new service entry per version
+	if id == "php" {
+		phpID := "php-" + version
+		if _, exists := m.services[phpID]; !exists {
+			port := runtime.GetPHPVersionPort(m.cfg, version)
+			m.services[phpID] = &ServiceInstance{
+				Info: core.ServiceInfo{
+					ID: phpID, Name: "PHP " + version, Type: core.TypePHP,
+					Category: core.CategoryService,
+					Version:  version, Port: port,
+					Installed: true,
+				},
+			}
+		}
+		return
+	}
+
 	if s, ok := m.services[id]; ok {
 		s.Info.Version = version
 		s.Info.Installed = true
@@ -416,35 +513,11 @@ func (m *Manager) SaveConfig(id string, values map[string]string) error {
 	if !ok {
 		return core.ErrServiceNotFound
 	}
-	handler, ok := handlers[id]
-	if !ok {
+	handler := m.matchHandler(id)
+	if handler == nil {
 		return nil
 	}
 	return handler.SaveConfig(s, m.cfg, values)
-}
-
-func (m *Manager) GetPHPExtensions(version string) ([]PHPExtensionInfo, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	s := &ServiceInstance{
-		Info: core.ServiceInfo{
-			ID: "php", Type: core.TypePHP, Version: version,
-		},
-	}
-	handler := &PHPHandler{}
-	return handler.GetExtensions(s, m.cfg)
-}
-
-func (m *Manager) SavePHPExtensions(version string, extensionNames []string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	s := &ServiceInstance{
-		Info: core.ServiceInfo{
-			ID: "php", Type: core.TypePHP, Version: version,
-		},
-	}
-	handler := &PHPHandler{}
-	return handler.SaveExtensions(s, m.cfg, extensionNames)
 }
 
 func (m *Manager) Configure(id string) error {
@@ -454,8 +527,8 @@ func (m *Manager) Configure(id string) error {
 	if !ok {
 		return core.ErrServiceNotFound
 	}
-	handler, ok := handlers[id]
-	if !ok {
+	handler := m.matchHandler(id)
+	if handler == nil {
 		return nil
 	}
 	return handler.Configure(s, m.cfg)
@@ -576,6 +649,54 @@ func (m *Manager) GetInstalledVersions(serviceType string) []string {
 		}
 	}
 	return versions
+}
+
+func (m *Manager) GetService(id string) *ServiceInstance {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.services[id]
+}
+
+func serviceTypeFromPkg(pt registry.PackageType) core.ServiceType {
+	switch pt {
+	case registry.PkgNginx:
+		return core.TypeNginx
+	case registry.PkgApache:
+		return core.TypeApache
+	case registry.PkgMySQL:
+		return core.TypeMySQL
+	case registry.PkgPostgreSQL:
+		return core.TypePostgreSQL
+	case registry.PkgMongoDB:
+		return core.TypeMongoDB
+	case registry.PkgRedis:
+		return core.TypeRedis
+	case registry.PkgMemcached:
+		return core.TypeMemcached
+	case registry.PkgPHP:
+		return core.TypePHP
+	case registry.PkgNode:
+		return core.TypeNode
+	case registry.PkgPython:
+		return core.TypePython
+	case registry.PkgComposer:
+		return core.TypeComposer
+	default:
+		return ""
+	}
+}
+
+func serviceCategoryFromPkg(c registry.Category) string {
+	switch c {
+	case registry.CatWebServer:
+		return core.CategoryWebServer
+	case registry.CatDatabase:
+		return core.CategoryDatabase
+	case registry.CatRuntime:
+		return "runtime"
+	default:
+		return core.CategoryService
+	}
 }
 
 func fileExists(path string) bool {
