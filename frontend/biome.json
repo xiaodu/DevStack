@@ -1,0 +1,49 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.5.6/schema.json",
+  "assist": { "actions": { "source": { "organizeImports": "on" } } },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "preset": "recommended",
+      "correctness": {
+        "noUnusedVariables": "off",
+        "noUnusedImports": "off",
+        "noSelfAssign": "off"
+      },
+      "style": {
+        "noNonNullAssertion": "warn",
+        "useConst": "warn"
+      },
+      "complexity": {
+        "noForEach": "off",
+        "noBannedTypes": "warn"
+      },
+      "suspicious": {
+        "noExplicitAny": "warn",
+        "useIterableCallbackReturn": "off"
+      }
+    }
+  },
+  "formatter": {
+    "enabled": true,
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "lineWidth": 120
+  },
+  "javascript": {
+    "formatter": {
+      "quoteStyle": "single",
+      "semicolons": "asNeeded"
+    }
+  },
+  "files": {
+    "includes": [
+      "**/src/**/*.js",
+      "**/src/**/*.ts",
+      "**/src/**/*.svelte",
+      "!**/node_modules",
+      "!**/dist",
+      "!**/wailsjs"
+    ]
+  }
+}

@@ -3,71 +3,18 @@ package service
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
-	"time"
 
 	"github.com/xiaodu/DevStack/internal/config"
-	"github.com/xiaodu/DevStack/internal/core"
-	"github.com/xiaodu/DevStack/internal/process"
+	"github.com/xiaodu/DevStack/internal/resource"
 )
 
-type NginxHandler struct {
-	BaseHandler
-}
+type NginxHandler struct{}
 
-func (h *NginxHandler) Start(s *ServiceInstance, cfg *config.Config, pm *process.Manager) error {
+func (h *NginxHandler) Configure(s *ServiceInstance, cfg *config.Config, resMgr *resource.Manager) error {
 	installDir := cfg.Get().InstallDir
-	nginxDir := filepath.Join(installDir, "nginx", s.Info.Version)
-	nginxExe := filepath.Join(nginxDir, "nginx.exe")
-
-	if !fileExists(nginxExe) {
-		return fmt.Errorf("Nginx 可执行文件未找到: %s", nginxExe)
-	}
-
-	s.Info.Status = core.StatusStarting
-
-	pid, err := pm.Start("nginx", nginxExe, nil, nil, nginxDir)
-	if err != nil {
-		s.Info.Status = core.StatusError
-		s.Info.Error = err.Error()
-		return err
-	}
-
-	// Nginx master may exit after spawning workers on Windows.
-	// Poll port until it's actually listening (up to ~3s) to confirm success.
-	actualPid := pid
-	for i := 0; i < 6; i++ {
-		time.Sleep(500 * time.Millisecond)
-		if p := process.FindPIDByPort(s.Info.Port); p > 0 {
-			actualPid = p
-			break
-		}
-	}
-
-	// If neither master process nor worker port is alive, nginx failed to start.
-	if !pm.IsRunning(pid) && process.FindPIDByPort(s.Info.Port) == 0 {
-		pm.Stop(pid) // clean up zombie if any
-		s.Info.Status = core.StatusError
-		return fmt.Errorf("Nginx 启动失败：3 秒内端口 %d 无响应，请检查配置或端口是否被占用", s.Info.Port)
-	}
-
-	s.process = &execWrapper{
-		pid:     actualPid,
-		mpid:    pid,
-		cmd:     nginxExe,
-		started: now(),
-	}
-	s.Info.Status = core.StatusRunning
-	s.Info.PID = actualPid
-	return nil
-}
-
-func (h *NginxHandler) Configure(s *ServiceInstance, cfg *config.Config) error {
-	installDir := cfg.Get().InstallDir
-	nginxDir := filepath.Join(installDir, "nginx", s.Info.Version)
+	nginxDir := filepath.Join(installDir, "programs", "nginx", s.Info.Version)
 
 	confDir := filepath.Join(nginxDir, "conf")
 	os.MkdirAll(confDir, 0755)
@@ -92,7 +39,17 @@ func (h *NginxHandler) Configure(s *ServiceInstance, cfg *config.Config) error {
 		serverTokensOn = "off"
 	}
 
-	phpUpstream := generatePHPUpstreamConfig(9000)
+	phpPort := 9000
+	if resMgr != nil {
+		allocated := resMgr.Ports().ListAllocated()
+		for port, owner := range allocated {
+			if strings.HasPrefix(owner, "php:") {
+				phpPort = port
+				break
+			}
+		}
+	}
+	phpUpstream := generatePHPUpstreamConfig(phpPort)
 	content := fmt.Sprintf(`worker_processes auto;
 error_log logs/error.log;
 pid logs/nginx.pid;
@@ -248,44 +205,10 @@ func (h *NginxHandler) SaveConfig(s *ServiceInstance, cfg *config.Config, values
 		}
 	}
 
-	return h.Configure(s, cfg)
+	return h.Configure(s, cfg, nil)
 }
 
-func (h *NginxHandler) Stop(s *ServiceInstance, pm *process.Manager) error {
-	if s.process == nil || s.process.pid <= 0 {
-		return nil
-	}
-	s.Info.Status = core.StatusStopping
 
-	pid := s.process.pid
-
-	// Kill tracked processes first (for clean processManager map cleanup)
-	if s.process.mpid > 0 {
-		pm.Stop(s.process.mpid)
-	}
-	pm.Stop(pid)
-
-	// taskkill all nginx processes — most reliable on Windows
-	kill := exec.Command("taskkill", "/f", "/im", "nginx.exe")
-	kill.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	kill.Run()
-
-	// Wait for process death (up to 3s)
-	for i := 0; i < 6; i++ {
-		time.Sleep(500 * time.Millisecond)
-		if !pm.IsRunning(pid) {
-			break
-		}
-	}
-
-	s.process = nil
-	s.Info.Status = core.StatusStopped
-	s.Info.PID = 0
-	if pm.IsRunning(pid) {
-		return fmt.Errorf("Nginx 进程停止失败")
-	}
-	return nil
-}
 
 const defaultIndexHTML = `<!DOCTYPE html>
 <html>

@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"os"
@@ -14,40 +15,76 @@ import (
 	"github.com/xiaodu/DevStack/internal/config"
 	"github.com/xiaodu/DevStack/internal/core"
 	"github.com/xiaodu/DevStack/internal/process"
+	"github.com/xiaodu/DevStack/internal/provider"
 	"github.com/xiaodu/DevStack/internal/registry"
-	"github.com/xiaodu/DevStack/internal/runtime"
+	"github.com/xiaodu/DevStack/internal/resource"
+	"github.com/xiaodu/DevStack/internal/reactive"
+	"github.com/xiaodu/DevStack/internal/tx"
 )
 
 type Manager struct {
 	mu        sync.RWMutex
 	cfg       *config.Config
 	procMgr   *process.Manager
+	resMgr    *resource.Manager
 	services  map[string]*ServiceInstance
+	dependents map[string][]string
+	reactive  *reactive.Engine
 }
 
 type ServiceInstance struct {
-	Info    core.ServiceInfo
-	process *execWrapper
-	stopped chan struct{}
+	Info         core.ServiceInfo
+	process      *process.ProcessHandle
+	stopped      chan struct{}
+	restartCount int
 }
 
-type execWrapper struct {
-	pid       int
-	mpid      int   // master PID (for services like nginx with master/worker)
-	extraPids []int // additional PIDs (e.g. multiple php-cgi workers)
-	cmd       string
-	env       []string
-	started   time.Time
-}
-
-func NewManager(cfg *config.Config, procMgr *process.Manager) *Manager {
+func NewManager(cfg *config.Config, procMgr *process.Manager, resMgr *resource.Manager) *Manager {
 	m := &Manager{
-		cfg:      cfg,
-		procMgr:  procMgr,
-		services: make(map[string]*ServiceInstance),
+		cfg:        cfg,
+		procMgr:    procMgr,
+		resMgr:     resMgr,
+		services:   make(map[string]*ServiceInstance),
+		dependents: make(map[string][]string),
+		reactive:   reactive.NewEngine(100),
 	}
+	m.reactive.Start()
 	m.registerDefaults()
+	m.registerReactiveRules()
 	return m
+}
+
+func (m *Manager) registerReactiveRules() {
+	m.reactive.AddRule(reactive.NewRule(
+		"service-crash-restart",
+		reactive.EventServiceCrashed,
+		func(ctx context.Context, event *reactive.Event) bool {
+			if count, ok := event.Data["restartCount"].(int); ok && count >= maxRestartCount {
+				return false
+			}
+			return true
+		},
+		func(ctx context.Context, event *reactive.Event) error {
+			if id, ok := event.Data["serviceID"].(string); ok {
+				return m.Start(id)
+			}
+			return nil
+		},
+	))
+
+	m.reactive.AddRule(reactive.NewRule(
+		"service-health-failed",
+		reactive.EventServiceHealthFailed,
+		func(ctx context.Context, event *reactive.Event) bool {
+			return true
+		},
+		func(ctx context.Context, event *reactive.Event) error {
+			if id, ok := event.Data["serviceID"].(string); ok {
+				m.publishCrashEvent(id)
+			}
+			return nil
+		},
+	))
 }
 
 func (m *Manager) registerDefaults() {
@@ -59,13 +96,11 @@ func (m *Manager) registerDefaults() {
 		if svcType == "" {
 			continue
 		}
-		cat := serviceCategoryFromPkg(pkg.Category)
-
-		// PHP: register each installed version as a separate service
+		// PHP 归 runtime 管理，不在 service 中注册
 		if svcType == core.TypePHP {
-			m.registerPHPVersions(installDir, pkg)
 			continue
 		}
+		cat := serviceCategoryFromPkg(pkg.Category)
 
 		m.services[pkg.ID] = &ServiceInstance{
 			Info: core.ServiceInfo{
@@ -77,7 +112,7 @@ func (m *Manager) registerDefaults() {
 		}
 	}
 	for _, s := range m.services {
-		svcDir := filepath.Join(installDir, string(s.Info.Type))
+		svcDir := filepath.Join(installDir, "programs", string(s.Info.Type))
 		entries, err := os.ReadDir(svcDir)
 		if err == nil {
 			for _, entry := range entries {
@@ -101,46 +136,14 @@ func (m *Manager) registerDefaults() {
 	}
 }
 
-func (m *Manager) registerPHPVersions(installDir string, pkg registry.PackageDef) {
-	phpDir := filepath.Join(installDir, "php")
-	entries, err := os.ReadDir(phpDir)
-	if err != nil {
-		return
-	}
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		version := entry.Name()
-		id := "php-" + version
-		port := runtime.GetPHPVersionPort(m.cfg, version)
-
-		m.services[id] = &ServiceInstance{
-			Info: core.ServiceInfo{
-				ID: id, Name: "PHP " + version, Type: core.TypePHP,
-				Category: core.CategoryService,
-				Version:  version, Port: port,
-				Installed: true,
-				Status:    core.StatusStopped,
-			},
-		}
-
-		if pid := process.FindPIDByPort(port); pid > 0 {
-			m.services[id].Info.Status = core.StatusRunning
-			m.services[id].Info.PID = pid
-		}
-	}
-}
-
 var serviceOrder = []string{"nginx", "apache", "mysql", "postgresql", "mongodb", "redis", "memcached", "node", "python", "composer"}
 
-func (m *Manager) matchHandler(id string) ServiceHandler {
-	if h, ok := handlers[id]; ok {
+func (m *Manager) matchConfigHandler(id string) ConfigHandler {
+	if h, ok := configHandlers[id]; ok {
 		return h
 	}
-	// Prefix match: "php-8.3" → "php"
 	if idx := strings.IndexByte(id, '-'); idx > 0 {
-		if h, ok := handlers[id[:idx]]; ok {
+		if h, ok := configHandlers[id[:idx]]; ok {
 			return h
 		}
 	}
@@ -156,97 +159,7 @@ func isPortAlive(port, pid int) bool {
 	return process.IsProcessRunning(pid)
 }
 
-func (m *Manager) List() []core.ServiceInfo {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	portPIDMap := process.FindAllPIDsByPort()
-
-	result := make([]core.ServiceInfo, 0, len(m.services))
-	for _, id := range serviceOrder {
-		s, ok := m.services[id]
-		if !ok {
-			continue
-		}
-		info := s.Info
-
-		switch info.Status {
-		case core.StatusStarting, core.StatusStopping:
-			// Keep transitional states as-is
-
-		case core.StatusRunning:
-			stillRunning := false
-			if s.process != nil && s.process.pid > 0 && m.procMgr.IsRunning(s.process.pid) {
-				stillRunning = true
-			}
-			if !stillRunning && info.Port > 0 {
-				if pid, ok := portPIDMap[info.Port]; ok {
-					if isPortAlive(info.Port, pid) {
-						stillRunning = true
-						info.PID = pid
-						if s.process == nil || s.process.pid != pid {
-							s.process = &execWrapper{pid: pid, cmd: "", started: time.Now()}
-						}
-					}
-				}
-			}
-			if !stillRunning {
-				info.Status = core.StatusStopped
-				info.PID = 0
-				s.process = nil
-			}
-
-		case core.StatusStopped:
-			if info.Port > 0 {
-				if pid, ok := portPIDMap[info.Port]; ok {
-					if isPortAlive(info.Port, pid) {
-						info.Status = core.StatusRunning
-						info.PID = pid
-						s.process = &execWrapper{pid: pid, cmd: "", started: time.Now()}
-					}
-				}
-			}
-		}
-
-		if info.Status == core.StatusRunning && s.process != nil {
-			info.Uptime = time.Since(s.process.started).Round(time.Second).String()
-		}
-
-		result = append(result, info)
-	}
-
-	// Append PHP version services (not in hardcoded serviceOrder)
-	for id, s := range m.services {
-		if s.Info.Type == core.TypePHP {
-			// Only if not already added via serviceOrder
-			alreadyAdded := false
-			for _, r := range result {
-				if r.ID == id {
-					alreadyAdded = true
-					break
-				}
-			}
-			if !alreadyAdded {
-				info := s.Info
-				if info.Status == core.StatusRunning && s.process != nil {
-					info.Uptime = time.Since(s.process.started).Round(time.Second).String()
-				}
-				result = append(result, info)
-			}
-		}
-	}
-
-	return result
-}
-
-func (m *Manager) Get(id string) (core.ServiceInfo, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	s, ok := m.services[id]
-	if !ok {
-		return core.ServiceInfo{}, core.ErrServiceNotFound
-	}
-
+func (m *Manager) syncServiceState(s *ServiceInstance, portPIDMap map[int]int) core.ServiceInfo {
 	info := s.Info
 
 	switch info.Status {
@@ -255,11 +168,11 @@ func (m *Manager) Get(id string) (core.ServiceInfo, error) {
 
 	case core.StatusRunning:
 		stillRunning := false
-		if s.process != nil && s.process.pid > 0 && m.procMgr.IsRunning(s.process.pid) {
+		if s.process != nil && s.process.PID > 0 && m.procMgr.IsRunning(s.process.PID) {
 			stillRunning = true
 		}
 		if !stillRunning && info.Port > 0 {
-			if pid := process.FindPIDByPort(info.Port); pid > 0 {
+			if pid, ok := portPIDMap[info.Port]; ok {
 				if isPortAlive(info.Port, pid) {
 					stillRunning = true
 					info.PID = pid
@@ -273,7 +186,7 @@ func (m *Manager) Get(id string) (core.ServiceInfo, error) {
 
 	case core.StatusStopped:
 		if info.Port > 0 {
-			if pid := process.FindPIDByPort(info.Port); pid > 0 {
+			if pid, ok := portPIDMap[info.Port]; ok {
 				if isPortAlive(info.Port, pid) {
 					info.Status = core.StatusRunning
 					info.PID = pid
@@ -281,6 +194,48 @@ func (m *Manager) Get(id string) (core.ServiceInfo, error) {
 			}
 		}
 	}
+
+	if info.Status == core.StatusRunning && s.process != nil {
+		info.Uptime = time.Since(s.process.Started).Round(time.Second).String()
+	}
+
+	return info
+}
+
+func (m *Manager) List() []core.ServiceInfo {
+	m.mu.RLock()
+	servicesCopy := make(map[string]*ServiceInstance, len(m.services))
+	for id, s := range m.services {
+		servicesCopy[id] = s
+	}
+	m.mu.RUnlock()
+
+	portPIDMap := process.FindAllPIDsByPort()
+
+	result := make([]core.ServiceInfo, 0, len(servicesCopy))
+	for _, id := range serviceOrder {
+		s, ok := servicesCopy[id]
+		if !ok {
+			continue
+		}
+		info := m.syncServiceState(s, portPIDMap)
+		result = append(result, info)
+	}
+
+	return result
+}
+
+func (m *Manager) Get(id string) (core.ServiceInfo, error) {
+	m.mu.RLock()
+	s, ok := m.services[id]
+	if !ok {
+		m.mu.RUnlock()
+		return core.ServiceInfo{}, core.ErrServiceNotFound
+	}
+	m.mu.RUnlock()
+
+	portPIDMap := process.FindAllPIDsByPort()
+	info := m.syncServiceState(s, portPIDMap)
 
 	return info, nil
 }
@@ -298,73 +253,111 @@ func (m *Manager) Start(id string) error {
 		return nil
 	}
 
-	handler := m.matchHandler(id)
-	if handler == nil {
-		m.mu.Unlock()
+	providerName := id
+
+	version := s.Info.Version
+	port := s.Info.Port
+	m.mu.Unlock()
+
+	p := provider.Get(providerName)
+	if p == nil {
 		return fmt.Errorf("不支持的的服务类型: %s", id)
 	}
 
-	err := handler.Start(s, m.cfg, m.procMgr)
+	config := map[string]interface{}{
+		"version": version,
+		"port":    port,
+	}
+	entity, err := p.NewInstance(context.Background(), config)
 	if err != nil {
-		m.mu.Unlock()
 		return err
 	}
+	if err := entity.Start(context.Background()); err != nil {
+		return err
+	}
+	pid := process.FindPIDByPort(port)
+	proc := &process.ProcessHandle{PID: pid, Started: time.Now()}
+	if pid <= 0 {
+		proc = nil
+	}
 
+	m.mu.Lock()
+	s = m.services[id]
+	if s == nil {
+		m.mu.Unlock()
+		return core.ErrServiceNotFound
+	}
+	s.Info.Status = core.StatusRunning
+	if proc != nil && proc.PID > 0 {
+		s.Info.PID = proc.PID
+	}
+	s.process = proc
 	s.stopped = make(chan struct{})
+	s.restartCount = 0
+
+	stoppedChan := s.stopped
 	m.mu.Unlock()
 
-	go m.watchProcess(id)
-
+	if proc != nil {
+		go m.watchProcess(id, stoppedChan)
+	}
 	return nil
 }
 
 func (m *Manager) Stop(id string) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	s, ok := m.services[id]
 	if !ok {
+		m.mu.Unlock()
 		return core.ErrServiceNotFound
 	}
 
-	// Signal watcher to stop (no-op if already stopped/not watching)
+	if dependents := m.dependents[id]; len(dependents) > 0 {
+		m.mu.Unlock()
+		return fmt.Errorf("服务 %s 被以下实体依赖，无法停止: %v", id, dependents)
+	}
+
 	if s.stopped != nil {
 		close(s.stopped)
 		s.stopped = nil
 	}
 
-	if s.process != nil && s.process.pid > 0 {
-		handler := m.matchHandler(id)
-		if handler == nil {
-			return fmt.Errorf("不支持的的服务类型: %s", id)
-		}
-		return handler.Stop(s, m.procMgr)
-	}
+	providerName := id
 
-	pid := process.FindPIDByPort(s.Info.Port)
-	if pid > 0 {
-		s.Info.Status = core.StatusStopping
-		if err := m.procMgr.Stop(pid); err != nil {
-			s.Info.Status = core.StatusError
+	p := provider.Get(providerName)
+	if p != nil {
+		config := map[string]interface{}{
+			"version": s.Info.Version,
+			"port":    s.Info.Port,
+		}
+		entity, err := p.NewInstance(context.Background(), config)
+		if err != nil {
+			m.mu.Unlock()
 			return err
 		}
+		if err := entity.Stop(context.Background()); err != nil {
+			m.mu.Unlock()
+			return err
+		}
+	} else {
+		pid := process.FindPIDByPort(s.Info.Port)
+		if pid > 0 {
+			s.Info.Status = core.StatusStopping
+			m.procMgr.Stop(pid)
+		}
 	}
+
 	s.process = nil
 	s.Info.Status = core.StatusStopped
 	s.Info.PID = 0
+	m.mu.Unlock()
 	return nil
 }
 
-func (m *Manager) watchProcess(id string) {
-	m.mu.RLock()
-	s, ok := m.services[id]
-	if !ok || s.process == nil || s.stopped == nil {
-		m.mu.RUnlock()
-		return
-	}
-	stopped := s.stopped
-	m.mu.RUnlock()
+const maxRestartCount = 3
 
+func (m *Manager) watchProcess(id string, stopped <-chan struct{}) {
 	for {
 		select {
 		case <-stopped:
@@ -384,16 +377,74 @@ func (m *Manager) watchProcess(id string) {
 				if !m.checkServiceHealth(id, port) {
 					m.mu.Lock()
 					s3 := m.services[id]
-					if s3 != nil && s3.stopped != nil && s3.Info.Status == core.StatusRunning {
-						s3.process = nil
-						s3.Info.PID = 0
+					if s3 != nil {
+						s3.restartCount++
+						if s3.restartCount > maxRestartCount {
+							s3.process = nil
+							s3.Info.PID = 0
+							s3.Info.Status = core.StatusError
+							s3.Info.Error = fmt.Sprintf("服务连续崩溃 %d 次，已停止自动重启", maxRestartCount)
+							m.mu.Unlock()
+							m.reactive.Publish(reactive.NewEvent(
+								reactive.EventServiceCrashed,
+								id,
+								map[string]interface{}{
+									"serviceID":   id,
+									"restartCount": s3.restartCount,
+									"maxRetries":   maxRestartCount,
+									"error":        s3.Info.Error,
+								},
+							))
+							return
+						}
+						m.mu.Unlock()
+
+						m.reactive.Publish(reactive.NewEvent(
+							reactive.EventServiceHealthFailed,
+							id,
+							map[string]interface{}{
+								"serviceID":   id,
+								"restartCount": s3.restartCount,
+							},
+						))
+					} else {
+						m.mu.Unlock()
 					}
-					m.mu.Unlock()
-					m.Start(id)
 				}
 			}
 		}
 	}
+}
+
+func (m *Manager) publishCrashEvent(id string) {
+	m.mu.RLock()
+	s := m.services[id]
+	if s == nil {
+		m.mu.RUnlock()
+		return
+	}
+	restartCount := s.restartCount
+	m.mu.RUnlock()
+
+	backoff := time.Duration(5*restartCount) * time.Second
+	time.Sleep(backoff)
+
+	m.mu.Lock()
+	s3 := m.services[id]
+	if s3 != nil && s3.stopped != nil && s3.Info.Status == core.StatusRunning {
+		s3.process = nil
+		s3.Info.PID = 0
+	}
+	m.mu.Unlock()
+
+	m.reactive.Publish(reactive.NewEvent(
+		reactive.EventServiceCrashed,
+		id,
+		map[string]interface{}{
+			"serviceID":   id,
+			"restartCount": restartCount,
+		},
+	))
 }
 
 func (m *Manager) checkServiceHealth(id string, port int) bool {
@@ -402,7 +453,7 @@ func (m *Manager) checkServiceHealth(id string, port int) bool {
 	}
 
 	if s := m.GetService(id); s != nil && s.process != nil {
-		pids := append([]int{s.process.pid}, s.process.extraPids...)
+		pids := append([]int{s.process.PID}, s.process.ExtraPIDs...)
 		for _, pid := range pids {
 			if pid > 0 && !m.procMgr.IsRunning(pid) {
 				return false
@@ -447,7 +498,7 @@ func (m *Manager) Uninstall(id string) error {
 	}
 
 	installDir := m.cfg.Get().InstallDir
-	binPath := filepath.Join(installDir, id, s.Info.Version)
+	binPath := filepath.Join(installDir, "programs", id, s.Info.Version)
 	if dirExists(binPath) {
 		if err := removeAll(id, binPath); err != nil {
 			return fmt.Errorf("删除安装目录失败: %w", err)
@@ -483,20 +534,8 @@ func (m *Manager) MarkInstalled(id, version string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// PHP: create a new service entry per version
+	// PHP 归 runtime 管理，不在 service 中处理
 	if id == "php" {
-		phpID := "php-" + version
-		if _, exists := m.services[phpID]; !exists {
-			port := runtime.GetPHPVersionPort(m.cfg, version)
-			m.services[phpID] = &ServiceInstance{
-				Info: core.ServiceInfo{
-					ID: phpID, Name: "PHP " + version, Type: core.TypePHP,
-					Category: core.CategoryService,
-					Version:  version, Port: port,
-					Installed: true,
-				},
-			}
-		}
 		return
 	}
 
@@ -513,7 +552,7 @@ func (m *Manager) SaveConfig(id string, values map[string]string) error {
 	if !ok {
 		return core.ErrServiceNotFound
 	}
-	handler := m.matchHandler(id)
+	handler := m.matchConfigHandler(id)
 	if handler == nil {
 		return nil
 	}
@@ -522,16 +561,114 @@ func (m *Manager) SaveConfig(id string, values map[string]string) error {
 
 func (m *Manager) Configure(id string) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	s, ok := m.services[id]
 	if !ok {
+		m.mu.Unlock()
 		return core.ErrServiceNotFound
 	}
-	handler := m.matchHandler(id)
+	handler := m.matchConfigHandler(id)
 	if handler == nil {
+		m.mu.Unlock()
 		return nil
 	}
-	return handler.Configure(s, m.cfg)
+	oldVersion := s.Info.Version
+	m.mu.Unlock()
+
+	compensator := tx.NewCompensator()
+	txn := tx.NewTransaction("configure-" + id)
+
+	installDir := m.cfg.Get().InstallDir
+	configPath := filepath.Join(installDir, "programs", id, oldVersion, "conf")
+	backupPath := configPath + ".bak"
+
+	txn.
+		Step("backup-config", func(ctx context.Context) error {
+			return copyDir(configPath, backupPath)
+		}, compensator.RestoreBackup(backupPath, configPath)).
+		Step("apply-config", func(ctx context.Context) error {
+			m.mu.Lock()
+			defer m.mu.Unlock()
+			return handler.Configure(m.services[id], m.cfg, m.resMgr)
+		}, compensator.RestoreBackup(backupPath, configPath))
+
+	if err := txn.Commit(); err != nil {
+		return fmt.Errorf("配置事务失败: %w", err)
+	}
+
+	os.RemoveAll(backupPath)
+	return nil
+}
+
+func copyDir(src, dest string) error {
+	if !dirExists(src) {
+		return nil
+	}
+	if err := os.RemoveAll(dest); err != nil {
+		return err
+	}
+	return copyDirRecursive(src, dest)
+}
+
+func copyDirRecursive(src, dest string) error {
+	if err := os.MkdirAll(dest, 0755); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		srcPath := filepath.Join(src, entry.Name())
+		destPath := filepath.Join(dest, entry.Name())
+		if entry.IsDir() {
+			if err := copyDirRecursive(srcPath, destPath); err != nil {
+				return err
+			}
+		} else {
+			data, err := os.ReadFile(srcPath)
+			if err != nil {
+				return err
+			}
+			if err := os.WriteFile(destPath, data, 0644); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (m *Manager) RegisterDependent(serviceID, dependentID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.dependents == nil {
+		m.dependents = make(map[string][]string)
+	}
+	for _, d := range m.dependents[serviceID] {
+		if d == dependentID {
+			return
+		}
+	}
+	m.dependents[serviceID] = append(m.dependents[serviceID], dependentID)
+}
+
+func (m *Manager) UnregisterDependent(serviceID, dependentID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	dependents := m.dependents[serviceID]
+	for i, d := range dependents {
+		if d == dependentID {
+			m.dependents[serviceID] = append(dependents[:i], dependents[i+1:]...)
+			return
+		}
+	}
+}
+
+func (m *Manager) GetDependents(serviceID string) []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	deps := make([]string, len(m.dependents[serviceID]))
+	copy(deps, m.dependents[serviceID])
+	return deps
 }
 
 func (m *Manager) CheckMySQLRootAuth() (bool, error) {
@@ -548,7 +685,7 @@ func (m *Manager) CheckMySQLRootAuth() (bool, error) {
 	}
 
 	installDir := m.cfg.Get().InstallDir
-	mysqlDir := filepath.Join(installDir, "mysql", s.Info.Version)
+	mysqlDir := filepath.Join(installDir, "programs", "mysql", s.Info.Version)
 	mysqlBin := filepath.Join(mysqlDir, "bin", "mysql.exe")
 
 	if _, err := os.Stat(mysqlBin); err != nil {
@@ -589,38 +726,79 @@ func (m *Manager) CheckVersionInstalled(serviceType, version string) bool {
 	if installDir == "" {
 		return false
 	}
-	return dirExists(filepath.Join(installDir, serviceType, version))
+	return dirExists(filepath.Join(installDir, "programs", serviceType, version))
 }
 
 func (m *Manager) UninstallVersion(serviceType, version string) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	installDir := m.cfg.Get().InstallDir
 	if installDir == "" {
+		m.mu.Unlock()
 		return nil
 	}
 
-	if s, ok := m.services[serviceType]; ok {
-		if s.Info.Version == version && s.Info.PID > 0 {
-			if s.stopped != nil {
-				close(s.stopped)
-				s.stopped = nil
+	m.mu.Unlock()
+
+	compensator := tx.NewCompensator()
+	txn := tx.NewTransaction("uninstall-" + serviceType + "-" + version)
+
+	binPath := filepath.Join(installDir, "programs", serviceType, version)
+	backupPath := binPath + ".backup"
+
+	txn.
+		Step("stop-service", func(ctx context.Context) error {
+			m.mu.Lock()
+			defer m.mu.Unlock()
+			if s, ok := m.services[serviceType]; ok {
+				if s.Info.Version == version && s.Info.PID > 0 {
+					if s.stopped != nil {
+						close(s.stopped)
+						s.stopped = nil
+					}
+					return m.procMgr.Stop(s.Info.PID)
+				}
 			}
-			m.procMgr.Stop(s.Info.PID)
+			return nil
+		}, compensator.Noop()).
+		Step("backup-before-delete", func(ctx context.Context) error {
+			if !dirExists(binPath) {
+				return nil
+			}
+			return copyDir(binPath, backupPath)
+		}, compensator.Noop()).
+		Step("update-service-state", func(ctx context.Context) error {
+			m.mu.Lock()
+			defer m.mu.Unlock()
+			if s, ok := m.services[serviceType]; ok {
+				if s.Info.Version == version {
+					s.Info.Installed = false
+					s.Info.Status = core.StatusStopped
+					s.Info.PID = 0
+					s.process = nil
+				}
+			}
+			return nil
+		}, compensator.Noop()).
+		Step("delete-install-dir", func(ctx context.Context) error {
+			if dirExists(binPath) {
+				return removeAll(serviceType, binPath)
+			}
+			return nil
+		}, func(ctx context.Context) error {
+			if dirExists(backupPath) {
+				return copyDir(backupPath, binPath)
+			}
+			return nil
+		})
+
+	if err := txn.Commit(); err != nil {
+		if dirExists(backupPath) {
+			copyDir(backupPath, binPath)
 		}
-		if s.Info.Version == version {
-			s.Info.Installed = false
-			s.Info.Status = core.StatusStopped
-			s.Info.PID = 0
-			s.process = nil
-		}
+		return fmt.Errorf("卸载事务失败: %w", err)
 	}
 
-	binPath := filepath.Join(installDir, serviceType, version)
-	if dirExists(binPath) {
-		return removeAll(serviceType, binPath)
-	}
+	os.RemoveAll(backupPath)
 	return nil
 }
 
@@ -637,7 +815,7 @@ func (m *Manager) GetInstalledVersions(serviceType string) []string {
 	if installDir == "" {
 		return nil
 	}
-	svcDir := filepath.Join(installDir, serviceType)
+	svcDir := filepath.Join(installDir, "programs", serviceType)
 	entries, err := os.ReadDir(svcDir)
 	if err != nil {
 		return nil
@@ -708,7 +886,6 @@ var serviceExecutables = map[string][]string{
 	"nginx":  {"nginx.exe"},
 	"mysql":  {"mysqld.exe"},
 	"redis":  {"redis-server.exe"},
-	"php":    {"php-cgi.exe", "php.exe"},
 	"node":   {"node.exe"},
 	"python": {"python.exe"},
 }
@@ -718,13 +895,17 @@ func removeAll(serviceType, path string) error {
 		for _, exe := range exes {
 			cmd := exec.Command("taskkill", "/f", "/im", exe)
 			cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-			cmd.Run()
+			if err := cmd.Run(); err != nil {
+				return fmt.Errorf("终止进程 %s 失败: %w", exe, err)
+			}
 		}
 	}
 
 	c := exec.Command("cmd", "/c", "attrib", "-r", "-s", "-h", filepath.Join(path, "*"), "/s")
 	c.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	c.Run()
+	if err := c.Run(); err != nil {
+		return fmt.Errorf("移除文件属性失败: %w", err)
+	}
 
 	rd := exec.Command("cmd", "/c", "rd", "/s", "/q", path)
 	rd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}

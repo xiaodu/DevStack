@@ -3,23 +3,17 @@ package service
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"syscall"
-	"time"
 
 	"github.com/xiaodu/DevStack/internal/config"
-	"github.com/xiaodu/DevStack/internal/core"
-	"github.com/xiaodu/DevStack/internal/process"
+	"github.com/xiaodu/DevStack/internal/resource"
 )
 
-type RedisHandler struct {
-	BaseHandler
-}
+type RedisHandler struct{}
 
-func (h *RedisHandler) Configure(s *ServiceInstance, cfg *config.Config) error {
+func (h *RedisHandler) Configure(s *ServiceInstance, cfg *config.Config, resMgr *resource.Manager) error {
 	installDir := cfg.Get().InstallDir
-	redisDir := filepath.Join(installDir, "redis", s.Info.Version)
+	redisDir := filepath.Join(installDir, "programs", "redis", s.Info.Version)
 
 	redisConf := filepath.Join(redisDir, "redis.conf")
 	if fileExists(redisConf) {
@@ -36,54 +30,11 @@ dir "%s"
 	return os.WriteFile(redisConf, []byte(conf), 0644)
 }
 
-func (h *RedisHandler) Start(s *ServiceInstance, cfg *config.Config, pm *process.Manager) error {
-	installDir := cfg.Get().InstallDir
-	redisDir := filepath.Join(installDir, "redis", s.Info.Version)
-	redisServer := filepath.Join(redisDir, "redis-server.exe")
-
-	if !fileExists(redisServer) {
-		redisServer = filepath.Join(redisDir, "src", "redis-server.exe")
-	}
-	if !fileExists(redisServer) {
-		return fmt.Errorf("Redis 可执行文件未找到: %s", redisServer)
-	}
-
-	redisConf := filepath.Join(redisDir, "redis.conf")
-	if !fileExists(redisConf) {
-		conf := fmt.Sprintf(`port %d
-bind 127.0.0.1
-daemonize no
-loglevel notice
-logfile "redis.log"
-dir "%s"
-`, s.Info.Port, redisDir)
-		os.WriteFile(redisConf, []byte(conf), 0644)
-	}
-
-	s.Info.Status = core.StatusStarting
-	args := []string{redisConf}
-	pid, err := pm.Start("redis", redisServer, args, nil, redisDir)
-	if err != nil {
-		s.Info.Status = core.StatusError
-		s.Info.Error = err.Error()
-		return err
-	}
-
-	s.process = &execWrapper{
-		pid:     pid,
-		cmd:     redisServer,
-		started: time.Now(),
-	}
-	s.Info.Status = core.StatusRunning
-	s.Info.PID = pid
-	return nil
-}
-
 func (h *RedisHandler) SaveConfig(s *ServiceInstance, cfg *config.Config, values map[string]string) error {
 	installDir := cfg.Get().InstallDir
-	confPath := filepath.Join(installDir, "redis", s.Info.Version, "redis.conf")
+	confPath := filepath.Join(installDir, "programs", "redis", s.Info.Version, "redis.conf")
 	if !fileExists(confPath) {
-		return h.Configure(s, cfg)
+		return h.Configure(s, cfg, nil)
 	}
 	data, err := os.ReadFile(confPath)
 	if err != nil {
@@ -96,41 +47,4 @@ func (h *RedisHandler) SaveConfig(s *ServiceInstance, cfg *config.Config, values
 	return os.WriteFile(confPath, []byte(content), 0644)
 }
 
-func (h *RedisHandler) Stop(s *ServiceInstance, pm *process.Manager) error {
-	if s.process == nil || s.process.pid <= 0 {
-		return nil
-	}
-	s.Info.Status = core.StatusStopping
-	pid := s.process.pid
 
-	binDir := filepath.Dir(s.process.cmd)
-	redisCli := filepath.Join(binDir, "redis-cli.exe")
-	if fileExists(redisCli) {
-		cmd := exec.Command(redisCli, "-p", fmt.Sprintf("%d", s.Info.Port), "SHUTDOWN")
-		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-		cmd.Run()
-	}
-
-	for i := 0; i < 6; i++ {
-		if !pm.IsRunning(pid) {
-			s.process = nil
-			s.Info.Status = core.StatusStopped
-			s.Info.PID = 0
-			return nil
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-
-	pm.Stop(pid)
-	for i := 0; i < 6; i++ {
-		if !pm.IsRunning(pid) {
-			break
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-
-	s.process = nil
-	s.Info.Status = core.StatusStopped
-	s.Info.PID = 0
-	return nil
-}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"embed"
+	"log"
 
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
@@ -15,9 +16,12 @@ import (
 var assets embed.FS
 
 func main() {
+	log.Println("[WAILS] main() started")
+
 	app := NewApp()
 
-	err := wails.Run(&options.App{
+	var err error
+	err = wails.Run(&options.App{
 		Title:     "DevStack",
 		Width:     1200,
 		Height:    800,
@@ -34,7 +38,9 @@ func main() {
 		Windows: &windows.Options{
 			WebviewIsTransparent: false,
 			WindowIsTranslucent:  false,
-			Theme:                windows.Dark,
+		},
+		Debug: options.Debug{
+			OpenInspectorOnStartup: true,
 		},
 		Mac: &mac.Options{
 			TitleBar:             mac.TitleBarHiddenInset(),
@@ -48,6 +54,8 @@ func main() {
 	})
 
 	if err != nil {
+		log.Println("[WAILS] wails.Run error:", err.Error())
 		println("Error:", err.Error())
 	}
+	log.Println("[WAILS] main() exited")
 }

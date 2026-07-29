@@ -1,6 +1,7 @@
 package log
 
 import (
+	"fmt"
 	"sync"
 	"time"
 )
@@ -14,20 +15,29 @@ type OpEntry struct {
 }
 
 type OpStore struct {
-	mu  sync.RWMutex
-	buf []OpEntry
-	max int
+	mu      sync.RWMutex
+	buf     []OpEntry
+	max     int
+	logger  *FileLogger
 }
 
 func NewOpStore(max int) *OpStore {
 	return &OpStore{max: max}
 }
 
+func (s *OpStore) SetLogger(logger *FileLogger) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.logger = logger
+}
+
 func (s *OpStore) Add(action, service, detail, status string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	timestamp := time.Now().Format("15:04:05")
 	s.buf = append(s.buf, OpEntry{
-		Time:    time.Now().Format("15:04:05"),
+		Time:    timestamp,
 		Action:  action,
 		Service: service,
 		Detail:  detail,
@@ -35,6 +45,38 @@ func (s *OpStore) Add(action, service, detail, status string) {
 	})
 	if len(s.buf) > s.max {
 		s.buf = s.buf[len(s.buf)-s.max:]
+	}
+
+	if s.logger != nil {
+		logLevel := LevelInfo
+		if status == "failed" || status == "error" {
+			logLevel = LevelError
+		}
+		s.logger.log(logLevel, "[%s] %s | %s | %s", service, action, detail, status)
+	}
+}
+
+func (s *OpStore) LogInfo(message string, args ...interface{}) {
+	if s.logger != nil {
+		s.logger.Info(message, args...)
+	}
+}
+
+func (s *OpStore) LogWarn(message string, args ...interface{}) {
+	if s.logger != nil {
+		s.logger.Warn(message, args...)
+	}
+}
+
+func (s *OpStore) LogError(message string, args ...interface{}) {
+	if s.logger != nil {
+		s.logger.Error(message, args...)
+	}
+}
+
+func (s *OpStore) LogDebug(message string, args ...interface{}) {
+	if s.logger != nil {
+		s.logger.Debug(message, args...)
 	}
 }
 
@@ -45,4 +87,31 @@ func (s *OpStore) Recent(n int) []OpEntry {
 		n = len(s.buf)
 	}
 	return append([]OpEntry{}, s.buf[len(s.buf)-n:]...)
+}
+
+func (s *OpStore) GetLogFiles() ([]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.logger == nil {
+		return nil, fmt.Errorf("文件日志未配置")
+	}
+	return s.logger.GetLogFiles()
+}
+
+func (s *OpStore) ReadLogFile(path string) ([]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.logger == nil {
+		return nil, fmt.Errorf("文件日志未配置")
+	}
+	return s.logger.ReadLogFile(path)
+}
+
+func (s *OpStore) ReadRecentLines(count int) ([]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.logger == nil {
+		return nil, fmt.Errorf("文件日志未配置")
+	}
+	return s.logger.ReadRecentLines(count)
 }

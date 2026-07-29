@@ -5,6 +5,130 @@
 
 ---
 
+## 0. 重大决策记录
+
+### 0.1 向后兼容性决策
+
+**决策：** `feature/foundation-phase0` 分支及后续重构分支**不保证向后兼容性**。
+
+**原因：**
+- 本次重构是对底层架构的彻底重写，而非增量改进
+- 保留旧 API、旧数据结构会严重阻碍新架构的设计
+- 前端也需要同步升级以支持新的声明式 API
+
+**影响：**
+- 旧版本的 `sites.json`、`settings.json` 数据格式可能不再兼容
+- 旧的前端 API（如 `StartService`、`StopService`）将被移除，直接替换为声明式接口
+- 废弃代码（如 `internal/site/`）可以直接删除
+
+**回滚策略：**
+- 主分支（`main`）保留当前可运行状态
+- 重构分支完成后一次性合并，而非逐步迁移
+
+### 0.2 清理及时性原则
+
+**决策：** 废弃文件/代码**必须立即删除**，不允许在重构过程中保留待最后处理。
+
+**原因：**
+- 保留废弃文件会导致依赖关系混乱，开发者无法判断代码是否仍在使用
+- 编译错误可能指向已经被替代的旧文件，浪费时间排查
+- 项目历史越长，废弃文件越难清理（"这个文件还在用吗？"）
+
+**执行规范：**
+- 每次重构变更导致某个文件/函数/字段不再被引用时，**立即删除**该文件/函数/字段
+- 删除前确认：grep 全局无引用 + 编译通过
+- 不允许出现 `// TODO: 待清理`、`// 已废弃` 这类注释后保留代码
+- 删除废弃文件后，立即运行 `go build ./...` 确认无遗漏引用
+
+**反例（不允许）：**
+```
+重构 5 个 Phase 后，才统一清理废弃文件
+→ 此时已经分不清哪些文件是"在用但没用"哪些是"已废弃"
+```
+
+**正例（应当）：**
+```
+Phase 1 移除 site/ → 立即删除该目录
+Phase 2 移除 SwitchCase → 立即删除该函数
+Phase 3 移除 V1 API → 立即删除对应文件
+```
+
+### 0.3 清理强制自检原则
+
+**决策：** 每次重构变更（无论多小）结束后，**必须**执行"清理自检清单"，并立即清理发现的所有废弃项。**不允许**延后到"全部做完再统一清理"。
+
+**为什么需要单独列一条（与 0.2 区分）：**
+
+- 0.2 规定了"原则要立即清理"
+- 0.3 规定了"**怎么发现要清理的东西**"——给出一份可执行的自检清单
+
+**清理自检清单（每次重构必跑）：**
+
+```bash
+# 1. 找未引用的导出符号（Go）
+go vet ./...
+go build ./...
+
+# 2. 找被注释掉的旧实现（任何语言）
+# 搜索：// removed | // deprecated | // TODO: 待清理 | // 旧逻辑 | /* old */
+
+# 3. 找同名但用途已变更的函数（可能有"鬼代码"残留）
+# 全文搜索原函数名，确认是否仍被引用
+
+# 4. 找空实现 / 仅返回 nil 的占位
+grep -rn "return nil" --include="*.go"   # 配合人工判断
+
+# 5. 找仅在 frontend 引用、但后端已删除的绑定
+# wailsjs/go/main/App.js 是自动生成，不要手改；但 frontend/src/lib/api.js 必须同步
+```
+
+**删除顺序（先验证再删）：**
+
+1. 先 `grep` 确认无外部引用
+2. 物理删除文件 / 函数 / 字段
+3. 立即 `go build ./...`（或对应语言编译）确认无遗漏
+4. 立即跑相关单元测试
+
+**反例（不允许）：**
+
+```
+"Phase 1 删了一些，但还遗留一些旧 API 标记为废弃"
+"先合并，等下一轮重构再删"
+"测试一下没问题，反正有 git 可以恢复"
+```
+
+**正例（应当）：**
+
+```
+识别到 app.go 的 GetSites/CreateSite 等是 site/ 时代的别名 →
+立即在 app.go 中删除，并同步清理 frontend/src/lib/api.js 的引用 →
+go build ./... 通过 → 提交
+```
+
+### 0.4 目录结构约束
+
+**决策：** 严格遵守项目既定的目录结构，新增代码必须归类到正确位置。
+
+**位置映射：**
+
+| 代码类型 | 必须位于 | 严禁放入 |
+|----------|----------|----------|
+| 声明式引擎 / 状态机 / Diff 算法 | `internal/engine/` | `app.go`、`internal/service/` |
+| 资源调度（端口池、路径、进程） | `internal/resource/` | `app.go`、其他业务包 |
+| 依赖图 | `internal/graph/` | `internal/engine/`（避免循环依赖） |
+| Provider 实现（WebServer / DB） | `internal/service/<name>.go` | `internal/runtime/`、`app.go` |
+| 运行时实例（PHP-FPM 等） | `internal/runtime/` | `internal/service/` |
+| 公开 API 暴露 | `app.go` | 业务包内（不与前端耦合） |
+
+**反例（不允许）：**
+
+```
+"为了快速验证，把图算法写在 app.go 里"
+"图算法写在 engine 包里" → 引起循环依赖
+```
+
+---
+
 ## 1. 现状诊断
 
 ### 1.1 代码层面的具体脆弱点
@@ -322,30 +446,31 @@ type DependencyGraph interface {
 
 ### Phase 1: 声明式状态引擎（3 周）
 
-**目标：** 建立 Desired State → Current State → Reconcile 的核心骨架。
+**目标：** 建立 Desired State → Current State → Reconcile 的核心骨架。**不保留向后兼容**，直接替换旧的命令式逻辑。
 
 | 任务 | 新建/修改 | 说明 |
 |------|-----------|------|
 | 新建 `internal/engine/` | 新建目录 | 声明式状态引擎核心 |
-| `engine/types.go` | 新建 | 定义 `Environment`, `ServiceRef`, `ProjectRef`, `EntityState` 等 |
-| `engine/reconciler.go` | 新建 | 实现 `Reconciler` 接口：`Apply()`, `Diff()`, `Rollback()` |
-| `engine/state_store.go` | 新建 | 持久化 Desired State 和 Current State（JSON 文件） |
-| `engine/snapshot.go` | 新建 | 快照创建、存储、回滚机制 |
-| 修改 `service/manager.go` | 修改 | 让 `ServiceInstance` 支持 `DesiredState` 和 `CurrentState` |
-| 修改 `app.go` | 修改 | 新增 `ApplyEnvironment(env engine.Environment)` API，保留旧 API 做兼容 |
+| `engine/types.go` | 新建 | 定义 `Environment`, `ServiceDesiredState`, `ProjectDesiredState`, `Change` 等 |
+| `engine/state_store.go` | 新建 | 持久化 Desired State（JSON 文件） |
+| `engine/diff.go` | 新建 | 计算 Desired vs Current 的差异 |
+| `engine/reconciler.go` | 新建 | 实现 `Reconciler` 接口：`Apply()`, `Diff()` |
+| 重构 `service/manager.go` | 修改 | 移除命令式 Start/Stop 逻辑，改为调用 Reconciler |
+| 重构 `app.go` | 修改 | 移除旧 API（`StartService`/`StopService`），新增声明式接口 `ApplyEnvironment`/`GetEnvironment` |
+| 删除废弃代码 | 删除 | `internal/site/`（已被 project 替代）、`internal/service/node.go`、`internal/service/python.go`（已移到 runtime） |
 
 **设计要点：**
 - `Reconciler.Apply` 的流程：
   1. 计算 Diff（Desired - Current）
-  2. 按依赖图拓扑排序
+  2. 按依赖图拓扑排序（先实现简单排序，Phase 3 完善）
   3. 逐个执行 Change（Start/Stop/Configure）
-  4. 每步成功更新 Current State；失败触发 Rollback
-- 先只支持 `Service` 的声明式管理，`Project` 和 `Runtime` 在 Phase 2 接入
+  4. 每步成功更新 Current State；失败返回错误（事务回滚在 Phase 4 实现）
+- 一次性支持 `Service`、`Project`、`Runtime` 的声明式管理，不再分阶段接入
 
 **验收标准：**
-- 可以通过 JSON/YAML 定义一组服务的期望状态，调用 `Apply` 后系统自动启动/停止对应服务
-- 故意在 Apply 中间制造失败（如端口被占用），验证 Rollback 能恢复到之前状态
-- 旧的前端 API（`StartService`/`StopService`）仍然可用，但内部转发到新的 Reconciler
+- 可以通过 JSON 定义一组服务的期望状态，调用 `Apply` 后系统自动启动/停止对应服务
+- 旧的前端 API（`StartService`/`StopService`）不再存在，统一使用声明式接口
+- 项目创建、启用时自动推导并启动依赖服务
 
 ### Phase 2: 统一资源调度器（2 周）
 

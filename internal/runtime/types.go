@@ -1,20 +1,12 @@
 package runtime
 
 import (
-	"time"
-
 	"github.com/xiaodu/DevStack/internal/core"
+	"github.com/xiaodu/DevStack/internal/process"
 )
-
-type execWrapper struct {
-	pid       int
-	extraPids []int
-	cmd       string
-	started   time.Time
-}
 
 type Instance struct {
 	Info    core.RuntimeInfo
-	process *execWrapper
+	process *process.ProcessHandle
 	stopped chan struct{}
 }

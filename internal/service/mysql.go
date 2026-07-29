@@ -6,21 +6,18 @@ import (
 	"os/exec"
 	"path/filepath"
 	"syscall"
-	"time"
 
 	"github.com/xiaodu/DevStack/internal/config"
-	"github.com/xiaodu/DevStack/internal/core"
 	"github.com/xiaodu/DevStack/internal/process"
+	"github.com/xiaodu/DevStack/internal/resource"
 )
 
-type MySQLHandler struct {
-	BaseHandler
-}
+type MySQLHandler struct{}
 
-func (h *MySQLHandler) Configure(s *ServiceInstance, cfg *config.Config) error {
+func (h *MySQLHandler) Configure(s *ServiceInstance, cfg *config.Config, resMgr *resource.Manager) error {
 	installDir := cfg.Get().InstallDir
-	mysqlDir := filepath.Join(installDir, "mysql", s.Info.Version)
-	dataDir := filepath.Join(installDir, "db", "mysql")
+	mysqlDir := filepath.Join(installDir, "programs", "mysql", s.Info.Version)
+	dataDir := filepath.Join(installDir, "data", "mysql")
 
 	myIni := filepath.Join(mysqlDir, "my.ini")
 	if !fileExists(myIni) {
@@ -61,70 +58,10 @@ table_open_cache = 400
 	return nil
 }
 
-func (h *MySQLHandler) Start(s *ServiceInstance, cfg *config.Config, pm *process.Manager) error {
-	installDir := cfg.Get().InstallDir
-	mysqlDir := filepath.Join(installDir, "mysql", s.Info.Version)
-	mysqld := filepath.Join(mysqlDir, "bin", "mysqld.exe")
-
-	if !fileExists(mysqld) {
-		return fmt.Errorf("MySQL 可执行文件未找到: %s", mysqld)
-	}
-
-	dataDir := filepath.Join(installDir, "db", "mysql")
-	os.MkdirAll(dataDir, 0755)
-
-	myIni := filepath.Join(mysqlDir, "my.ini")
-	if !fileExists(myIni) {
-		ini := fmt.Sprintf(`[mysqld]
-basedir=%s
-datadir=%s
-port=%d
-bind-address=127.0.0.1
-skip-networking=0
-log-error=error.log
-general_log=0
-
-innodb_buffer_pool_size = 256M
-innodb_log_file_size = 64M
-innodb_flush_log_at_trx_commit = 2
-max_connections = 50
-tmp_table_size = 64M
-max_heap_table_size = 64M
-thread_cache_size = 8
-table_open_cache = 400
-`, mysqlDir, dataDir, s.Info.Port)
-		os.WriteFile(myIni, []byte(ini), 0644)
-	}
-
-	s.Info.Status = core.StatusStarting
-	args := []string{
-		fmt.Sprintf("--defaults-file=%s", myIni),
-		"--console",
-	}
-
-	env := []string{fmt.Sprintf("MYSQL_HOME=%s", mysqlDir)}
-
-	pid, err := pm.Start("mysql", mysqld, args, env, mysqlDir)
-	if err != nil {
-		s.Info.Status = core.StatusError
-		s.Info.Error = err.Error()
-		return err
-	}
-
-	s.process = &execWrapper{
-		pid:     pid,
-		cmd:     mysqld,
-		started: now(),
-	}
-	s.Info.Status = core.StatusRunning
-	s.Info.PID = pid
-	return nil
-}
-
 func (h *MySQLHandler) SaveConfig(s *ServiceInstance, cfg *config.Config, values map[string]string) error {
 	installDir := cfg.Get().InstallDir
-	mysqlDir := filepath.Join(installDir, "mysql", s.Info.Version)
-	dataDir := filepath.Join(installDir, "db", "mysql")
+	mysqlDir := filepath.Join(installDir, "programs", "mysql", s.Info.Version)
+	dataDir := filepath.Join(installDir, "data", "mysql")
 
 	settings := cfg.Get()
 	mc := settings.MySQLConfig
@@ -225,7 +162,7 @@ table_open_cache = %d
 
 func (h *MySQLHandler) setPassword(s *ServiceInstance, cfg *config.Config, newPassword string) error {
 	installDir := cfg.Get().InstallDir
-	mysqlDir := filepath.Join(installDir, "mysql", s.Info.Version)
+	mysqlDir := filepath.Join(installDir, "programs", "mysql", s.Info.Version)
 	mysqlBin := filepath.Join(mysqlDir, "bin", "mysql.exe")
 
 	if !fileExists(mysqlBin) {
@@ -277,41 +214,4 @@ func isMySQL8OrAbove(version string) bool {
 	return major >= 8
 }
 
-func (h *MySQLHandler) Stop(s *ServiceInstance, pm *process.Manager) error {
-	if s.process == nil || s.process.pid <= 0 {
-		return nil
-	}
-	s.Info.Status = core.StatusStopping
-	pid := s.process.pid
 
-	binDir := filepath.Dir(s.process.cmd)
-	mysqladmin := filepath.Join(binDir, "mysqladmin.exe")
-	if fileExists(mysqladmin) {
-		cmd := exec.Command(mysqladmin, "-u", "root", "shutdown")
-		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-		cmd.Run()
-	}
-
-	for i := 0; i < 6; i++ {
-		if !pm.IsRunning(pid) {
-			s.process = nil
-			s.Info.Status = core.StatusStopped
-			s.Info.PID = 0
-			return nil
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-
-	pm.Stop(pid)
-	for i := 0; i < 6; i++ {
-		if !pm.IsRunning(pid) {
-			break
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-
-	s.process = nil
-	s.Info.Status = core.StatusStopped
-	s.Info.PID = 0
-	return nil
-}

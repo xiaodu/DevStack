@@ -97,13 +97,23 @@ type Project struct {
 	HTTPSPort  int         `json:"httpsPort"`   // HTTPS 端口 (默认 443)
 	SSL        bool        `json:"ssl"`
 
-	PHPVersion string      `json:"phpVersion,omitempty"` // PHP 版选
+	// EnvironmentID 引用的环境模板（EnvironmentProfile.ID），同一环境可被多个项目共享。
+	// 非空时，以下五个 *Version 字段可通过 profile 自动填充，但也允许项目单独覆盖。
+	EnvironmentID string `json:"environmentID,omitempty"`
+
+	// 以下字段保持向后兼容，保留；在 EnvironmentID 存在但字段为空时，作为 profile 版本的"项目级覆盖"
+	PHPVersion    string `json:"phpVersion,omitempty"`    // PHP 版本
+	MySQLVersion  string `json:"mysqlVersion,omitempty"`  // MySQL 版本
+	NginxVersion  string `json:"nginxVersion,omitempty"`  // Nginx 版本
+	NodeVersion   string `json:"nodeVersion,omitempty"`   // Node.js 版本
+	PythonVersion string `json:"pythonVersion,omitempty"` // Python 版本
 
 	ProxyPass  string      `json:"proxyPass,omitempty"`  // Proxy 反代目标
 	TargetPort int         `json:"targetPort,omitempty"`  // Node/Python 进程端口
 
-	Rewrite    string      `json:"rewrite,omitempty"`
-	Notes      string      `json:"notes,omitempty"`
+	Rewrite      string            `json:"rewrite,omitempty"`
+	Notes        string            `json:"notes,omitempty"`
+	Dependencies map[string]string `json:"dependencies,omitempty"` // key: capability, value: providerID
 
 	Enabled    bool        `json:"enabled"`
 	CreatedAt  string      `json:"createdAt"`

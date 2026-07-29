@@ -19,4 +19,6 @@ var (
 	ErrExtractFailed   = &AppError{Code: "EXTRACT_FAILED", Message: "解压失败"}
 	ErrRuntimeNotFound = &AppError{Code: "RUNTIME_NOT_FOUND", Message: "运行时未找到"}
 	ErrProjectNotFound = &AppError{Code: "PROJECT_NOT_FOUND", Message: "项目未找到"}
+	ErrNotFound        = &AppError{Code: "NOT_FOUND", Message: "资源未找到"}
+	ErrEnvProfileInUse = &AppError{Code: "ENV_PROFILE_IN_USE", Message: "该环境被项目引用，禁止删除"}
 )

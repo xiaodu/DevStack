@@ -25,7 +25,7 @@ type PHPRegistry struct {
 }
 
 func getRegistryPath(cfg *config.Config) string {
-	return filepath.Join(cfg.Get().InstallDir, "data", "php_registry.json")
+	return filepath.Join(cfg.Get().InstallDir, "config", "php_registry.json")
 }
 
 func LoadPHPRegistry(cfg *config.Config) *PHPRegistry {
@@ -70,8 +70,8 @@ func RegisterPHPVersion(cfg *config.Config, version string, port int) {
 	SavePHPRegistry(cfg, reg)
 }
 
-func AutoAssignPorts(cfg *config.Config, installDir string) {
-	phpDir := filepath.Join(installDir, "php")
+func AutoAssignPorts(cfg *config.Config, installDir string, portPool interface{ Allocate(owner string, preferred int) (int, error) }) {
+	phpDir := filepath.Join(installDir, "programs", "php")
 	entries, err := os.ReadDir(phpDir)
 	if err != nil {
 		return
@@ -85,7 +85,6 @@ func AutoAssignPorts(cfg *config.Config, installDir string) {
 		}
 	}
 
-	basePort := 9001
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -99,12 +98,12 @@ func AutoAssignPorts(cfg *config.Config, installDir string) {
 			}
 		}
 		if !found {
-			for existingPorts[basePort] {
-				basePort++
+			port, err := portPool.Allocate("php:"+ver, 0)
+			if err != nil {
+				continue
 			}
-			reg.Versions = append(reg.Versions, PHPVersionInfo{Version: ver, Port: basePort})
-			existingPorts[basePort] = true
-			basePort++
+			reg.Versions = append(reg.Versions, PHPVersionInfo{Version: ver, Port: port})
+			existingPorts[port] = true
 		}
 	}
 	SavePHPRegistry(cfg, reg)
@@ -126,7 +125,7 @@ func (m *Manager) GetPHPRegistryVersions() []PHPVersionInfo {
 func (m *Manager) RefreshPHPRegistry() []PHPVersionInfo {
 	installDir := m.cfg.Get().InstallDir
 	if installDir != "" {
-		AutoAssignPorts(m.cfg, installDir)
+		AutoAssignPorts(m.cfg, installDir, m.resMgr.Ports())
 	}
 	reg := LoadPHPRegistry(m.cfg)
 	return reg.Versions

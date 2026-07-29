@@ -1,13 +1,14 @@
 package config
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 
+	"github.com/pelletier/go-toml/v2"
+	"github.com/spf13/viper"
 	"github.com/xiaodu/DevStack/internal/core"
 )
 
@@ -24,20 +25,6 @@ func readBootstrap() string {
 	if err == nil {
 		return strings.TrimSpace(string(data))
 	}
-	// Migration: read old settings.json for installDir
-	home, _ := os.UserHomeDir()
-	oldPath := filepath.Join(home, bootstrapDirName, "settings.json")
-	data, err = os.ReadFile(oldPath)
-	if err == nil {
-		var old struct {
-			InstallDir string `json:"installDir"`
-		}
-		if json.Unmarshal(data, &old) == nil && old.InstallDir != "" {
-			os.MkdirAll(filepath.Dir(bootstrapPath()), 0755)
-			os.WriteFile(bootstrapPath(), []byte(old.InstallDir), 0644)
-			return old.InstallDir
-		}
-	}
 	return ""
 }
 
@@ -47,21 +34,81 @@ func writeBootstrap(installDir string) error {
 }
 
 type Config struct {
-	mu       sync.RWMutex
-	filePath string
-	Settings core.AppSettings
+	mu         sync.RWMutex
+	viper      *viper.Viper
+	installDir string
+	filePath   string
+	Settings   core.AppSettings
 }
 
 func NewConfig() *Config {
 	installDir := readBootstrap()
-	cfg := &Config{
-		filePath: filepath.Join(installDir, "data", "settings.json"),
+
+	v := viper.New()
+	v.SetConfigName("settings")
+	v.SetConfigType("toml")
+	cfgDir := filepath.Join(installDir, "config")
+	v.AddConfigPath(cfgDir)
+
+	setViperDefaults(v)
+
+	settings := defaultSettings(installDir)
+
+	if err := v.ReadInConfig(); err == nil {
+		v.Unmarshal(&settings)
 	}
-	cfg.Settings = core.AppSettings{
+
+	settings.InstallDir = installDir
+
+	filePath := filepath.Join(cfgDir, "settings.toml")
+
+	cfg := &Config{
+		viper:      v,
+		installDir: installDir,
+		filePath:   filePath,
+		Settings:   settings,
+	}
+	return cfg
+}
+
+func setViperDefaults(v *viper.Viper) {
+	def := defaultSettings("")
+	v.SetDefault("installDir", def.InstallDir)
+	v.SetDefault("startOnBoot", def.StartOnBoot)
+	v.SetDefault("minimizeToTray", def.MinimizeToTray)
+	v.SetDefault("theme", def.Theme)
+	v.SetDefault("language", def.Language)
+	v.SetDefault("nginxConfig.workerConnections", def.NginxConfig.WorkerConnections)
+	v.SetDefault("nginxConfig.clientMaxBodySize", def.NginxConfig.ClientMaxBodySize)
+	v.SetDefault("nginxConfig.gzipEnabled", def.NginxConfig.GzipEnabled)
+	v.SetDefault("nginxConfig.staticCacheDays", def.NginxConfig.StaticCacheDays)
+	v.SetDefault("nginxConfig.keepaliveTimeout", def.NginxConfig.KeepaliveTimeout)
+	v.SetDefault("nginxConfig.serverTokens", def.NginxConfig.ServerTokens)
+	v.SetDefault("phpConfig.memoryLimit", def.PHPConfig.MemoryLimit)
+	v.SetDefault("phpConfig.maxExecutionTime", def.PHPConfig.MaxExecutionTime)
+	v.SetDefault("phpConfig.uploadMaxFilesize", def.PHPConfig.UploadMaxFilesize)
+	v.SetDefault("phpConfig.postMaxSize", def.PHPConfig.PostMaxSize)
+	v.SetDefault("phpConfig.displayErrors", def.PHPConfig.DisplayErrors)
+	v.SetDefault("phpConfig.opcacheEnabled", def.PHPConfig.OPcacheEnabled)
+	v.SetDefault("phpConfig.realpathCacheSize", def.PHPConfig.RealpathCacheSize)
+	v.SetDefault("mysqlConfig.innodbBufferPoolSize", def.MySQLConfig.InnoDBBufferPoolSize)
+	v.SetDefault("mysqlConfig.innodbLogFileSize", def.MySQLConfig.InnoDBLogFileSize)
+	v.SetDefault("mysqlConfig.innodbFlushLogAtTrxCommit", def.MySQLConfig.InnoDBFlushLogAtTrxCommit)
+	v.SetDefault("mysqlConfig.maxConnections", def.MySQLConfig.MaxConnections)
+	v.SetDefault("mysqlConfig.tmpTableSize", def.MySQLConfig.TmpTableSize)
+	v.SetDefault("mysqlConfig.maxHeapTableSize", def.MySQLConfig.MaxHeapTableSize)
+	v.SetDefault("mysqlConfig.threadCacheSize", def.MySQLConfig.ThreadCacheSize)
+	v.SetDefault("mysqlConfig.tableOpenCache", def.MySQLConfig.TableOpenCache)
+	v.SetDefault("mysqlConfig.bindAddress", def.MySQLConfig.BindAddress)
+	v.SetDefault("mysqlConfig.port", def.MySQLConfig.Port)
+}
+
+func defaultSettings(installDir string) core.AppSettings {
+	return core.AppSettings{
 		InstallDir:     installDir,
 		StartOnBoot:    false,
 		MinimizeToTray: true,
-		Theme:          "dark",
+		Theme:          "light",
 		Language:       "zh-CN",
 		NginxConfig: core.NginxSettings{
 			WorkerConnections:   2048,
@@ -81,43 +128,24 @@ func NewConfig() *Config {
 			RealpathCacheSize:   "4096K",
 		},
 		MySQLConfig: core.MySQLSettings{
-			InnoDBBufferPoolSize:     "256M",
-			InnoDBLogFileSize:        "64M",
+			InnoDBBufferPoolSize:      "256M",
+			InnoDBLogFileSize:         "64M",
 			InnoDBFlushLogAtTrxCommit: 2,
-			MaxConnections:           50,
-			TmpTableSize:             "64M",
-			MaxHeapTableSize:         "64M",
-			ThreadCacheSize:          8,
-			TableOpenCache:           400,
-			BindAddress:              "127.0.0.1",
-			Port:                     3306,
+			MaxConnections:            50,
+			TmpTableSize:              "64M",
+			MaxHeapTableSize:          "64M",
+			ThreadCacheSize:           8,
+			TableOpenCache:            400,
+			BindAddress:               "127.0.0.1",
+			Port:                      3306,
 		},
-	}
-	cfg.load()
-	return cfg
-}
-
-func (c *Config) load() {
-	if c.Settings.InstallDir == "" {
-		return
-	}
-	data, err := os.ReadFile(c.filePath)
-	if err != nil {
-		// 文件不存在时创建默认配置
-		c.save()
-		return
-	}
-	var s core.AppSettings
-	if json.Unmarshal(data, &s) == nil {
-		s.InstallDir = c.Settings.InstallDir // always use bootstrap as source of truth
-		c.Settings = s
 	}
 }
 
 func (c *Config) save() error {
-	data, err := json.MarshalIndent(c.Settings, "", "  ")
+	data, err := toml.Marshal(c.Settings)
 	if err != nil {
-		return err
+		return fmt.Errorf("序列化配置失败: %w", err)
 	}
 	if c.Settings.InstallDir != "" {
 		EnsureDirs(c.Settings.InstallDir)
@@ -130,19 +158,7 @@ func (c *Config) save() error {
 		}
 	}
 	if err := os.WriteFile(c.filePath, data, 0644); err != nil {
-		return err
-	}
-	// 写入后读回验证
-	verify, err := os.ReadFile(c.filePath)
-	if err != nil {
-		return fmt.Errorf("配置文件写入验证失败: %w", err)
-	}
-	var v core.AppSettings
-	if err := json.Unmarshal(verify, &v); err != nil {
-		return fmt.Errorf("配置文件解析验证失败: %w", err)
-	}
-	if v.Theme != c.Settings.Theme {
-		return fmt.Errorf("配置文件验证失败: 期望 theme=%s, 实际 theme=%s", c.Settings.Theme, v.Theme)
+		return fmt.Errorf("写入配置文件失败: %w", err)
 	}
 	return nil
 }
@@ -159,7 +175,6 @@ func (c *Config) Get() core.AppSettings {
 	return c.Settings
 }
 
-// FilePath 返回当前配置文件的绝对路径
 func (c *Config) FilePath() string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -178,7 +193,7 @@ func (c *Config) Update(s core.AppSettings) error {
 		if err := writeBootstrap(s.InstallDir); err != nil {
 			return err
 		}
-		c.filePath = filepath.Join(s.InstallDir, "data", "settings.json")
+		c.filePath = filepath.Join(s.InstallDir, "config", "settings.toml")
 	}
 
 	c.Settings = s
@@ -188,18 +203,12 @@ func (c *Config) Update(s core.AppSettings) error {
 func EnsureDirs(installDir string) {
 	dirs := []string{
 		installDir,
+		filepath.Join(installDir, "config"),
+		filepath.Join(installDir, "logs"),
 		filepath.Join(installDir, "data"),
-		filepath.Join(installDir, "data", "logs"),
 		filepath.Join(installDir, "data", "certs"),
-		filepath.Join(installDir, "db"),
-		filepath.Join(installDir, "db", "mysql"),
+		filepath.Join(installDir, "data", "mysql"),
 		filepath.Join(installDir, "www"),
-		filepath.Join(installDir, "nginx"),
-		filepath.Join(installDir, "mysql"),
-		filepath.Join(installDir, "redis"),
-		filepath.Join(installDir, "php"),
-		filepath.Join(installDir, "node"),
-		filepath.Join(installDir, "python"),
 	}
 	for _, d := range dirs {
 		if d != "" {

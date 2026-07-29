@@ -45,7 +45,7 @@ decorate_workers_output = no
 }
 
 func getExtensionList(cfg *config.Config, version string) ([]PHPExtensionInfo, error) {
-	phpDir := filepath.Join(cfg.Get().InstallDir, "php", version)
+	phpDir := filepath.Join(cfg.Get().InstallDir, "programs", "php", version)
 	extDir := filepath.Join(phpDir, "ext")
 
 	enabledExts := make(map[string]bool)
@@ -81,7 +81,7 @@ func getExtensionList(cfg *config.Config, version string) ([]PHPExtensionInfo, e
 }
 
 func saveExtensionList(cfg *config.Config, version string, extensionNames []string) error {
-	phpDir := filepath.Join(cfg.Get().InstallDir, "php", version)
+	phpDir := filepath.Join(cfg.Get().InstallDir, "programs", "php", version)
 	extDir := filepath.Join(phpDir, "ext")
 	phpIni := filepath.Join(phpDir, "php.ini")
 

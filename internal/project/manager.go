@@ -6,11 +6,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/xiaodu/DevStack/internal/core"
+	"github.com/xiaodu/DevStack/internal/resource"
+	"github.com/xiaodu/DevStack/internal/runtime"
+	"github.com/xiaodu/DevStack/internal/service"
 )
 
 type Manager struct {
@@ -20,18 +24,34 @@ type Manager struct {
 	installDir string
 	nginxVer   string
 	runtime    RuntimePortGetter
+	resMgr     *resource.Manager
+	svcMgr     *service.Manager
+	rtMgr      *runtime.Manager
 }
 
-func NewManager(installDir, nginxVer string, runtime RuntimePortGetter) *Manager {
+func NewManager(installDir, nginxVer string, runtime RuntimePortGetter, resMgr *resource.Manager) *Manager {
 	m := &Manager{
 		projects:   make(map[string]*core.Project),
-		filePath:   filepath.Join(installDir, "data", "projects.json"),
+		filePath:   filepath.Join(installDir, "config", "projects.json"),
 		installDir: installDir,
 		nginxVer:   nginxVer,
 		runtime:    runtime,
+		resMgr:     resMgr,
 	}
 	m.load()
 	return m
+}
+
+func (m *Manager) SetServiceManager(svcMgr *service.Manager) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.svcMgr = svcMgr
+}
+
+func (m *Manager) SetRuntimeManager(rtMgr *runtime.Manager) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.rtMgr = rtMgr
 }
 
 func (m *Manager) List() []core.Project {
@@ -63,9 +83,18 @@ func (m *Manager) Create(p core.Project) (*core.Project, error) {
 	}
 	p.CreatedAt = time.Now().Format("2006-01-02 15:04:05")
 
+	if p.Port <= 0 {
+		port, err := m.resMgr.Ports().Allocate("project:"+p.ID, 0)
+		if err != nil {
+			return nil, fmt.Errorf("为项目分配端口失败: %w", err)
+		}
+		p.Port = port
+	}
+
 	m.projects[p.ID] = &p
 	if err := m.save(); err != nil {
 		delete(m.projects, p.ID)
+		m.resMgr.Ports().Release(p.Port)
 		return nil, err
 	}
 	m.syncNginx()
@@ -137,11 +166,96 @@ func (m *Manager) Toggle(id string) error {
 	return nil
 }
 
+func (m *Manager) Enable(id string) error {
+	m.mu.Lock()
+
+	p, ok := m.projects[id]
+	if !ok {
+		m.mu.Unlock()
+		return core.ErrProjectNotFound
+	}
+	if p.Enabled {
+		m.mu.Unlock()
+		return nil
+	}
+
+	deps := make(map[string]string, len(p.Dependencies))
+	for k, v := range p.Dependencies {
+		deps[k] = v
+	}
+	domain := p.Domain
+	p.Enabled = true
+	ensureHostsEntry(domain, true)
+	if err := m.save(); err != nil {
+		p.Enabled = false
+		m.mu.Unlock()
+		return err
+	}
+	m.syncNginx()
+	m.mu.Unlock()
+
+	for capability, providerID := range deps {
+		if m.svcMgr != nil {
+			m.svcMgr.RegisterDependent(providerID, id)
+		}
+		if strings.HasPrefix(providerID, "php-") {
+			if m.rtMgr != nil {
+				if err := m.rtMgr.Start(providerID); err != nil {
+					return fmt.Errorf("启动运行时依赖 %s (%s) 失败: %w", capability, providerID, err)
+				}
+			}
+		} else {
+			if m.svcMgr != nil {
+				if err := m.svcMgr.Start(providerID); err != nil {
+					return fmt.Errorf("启动服务依赖 %s (%s) 失败: %w", capability, providerID, err)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func (m *Manager) Disable(id string) error {
+	m.mu.Lock()
+
+	p, ok := m.projects[id]
+	if !ok {
+		m.mu.Unlock()
+		return core.ErrProjectNotFound
+	}
+	if !p.Enabled {
+		m.mu.Unlock()
+		return nil
+	}
+
+	deps := make(map[string]string, len(p.Dependencies))
+	for k, v := range p.Dependencies {
+		deps[k] = v
+	}
+	domain := p.Domain
+	p.Enabled = false
+	ensureHostsEntry(domain, false)
+	if err := m.save(); err != nil {
+		p.Enabled = true
+		m.mu.Unlock()
+		return err
+	}
+	m.syncNginx()
+	m.mu.Unlock()
+
+	for _, providerID := range deps {
+		if m.svcMgr != nil {
+			m.svcMgr.UnregisterDependent(providerID, id)
+		}
+	}
+	return nil
+}
+
 func (m *Manager) nginxDir() string {
 	if m.installDir == "" || m.nginxVer == "" {
 		return ""
 	}
-	return filepath.Join(m.installDir, "nginx", m.nginxVer)
+	return filepath.Join(m.installDir, "programs", "nginx", m.nginxVer)
 }
 
 func (m *Manager) syncNginx() {

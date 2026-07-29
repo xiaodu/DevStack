@@ -2,6 +2,7 @@ package download
 
 import (
 	"archive/zip"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/xiaodu/DevStack/internal/registry"
+	"github.com/xiaodu/DevStack/internal/tx"
 )
 
 type ReleaseInfo struct {
@@ -217,12 +219,29 @@ func (m *Manager) DownloadAndExtract(url, destDir string, callback ProgressCallb
 }
 
 func (m *Manager) TryDownloadAndExtract(urls []string, destDir string, callback ProgressCallback) error {
-	zipPath := filepath.Join(destDir, "package.zip")
-	if err := m.tryDownload(urls, zipPath, callback); err != nil {
-		return err
+	compensator := tx.NewCompensator()
+	txn := tx.NewTransaction("download-extract-" + filepath.Base(destDir))
+
+	var zipPath string
+
+	txn.
+		Step("create-dest-dir", func(ctx context.Context) error {
+			return os.MkdirAll(destDir, 0755)
+		}, compensator.DeleteDir(destDir)).
+		Step("download-package", func(ctx context.Context) error {
+			zipPath = filepath.Join(destDir, "package.zip")
+			return m.tryDownload(urls, zipPath, callback)
+		}, compensator.DeleteFile(zipPath)).
+		Step("extract-package", func(ctx context.Context) error {
+			return m.ExtractZip(zipPath, destDir)
+		}, compensator.DeleteDir(destDir))
+
+	if err := txn.Commit(); err != nil {
+		return fmt.Errorf("事务失败: %w", err)
 	}
-	defer os.Remove(zipPath)
-	return m.ExtractZip(zipPath, destDir)
+
+	os.Remove(zipPath)
+	return nil
 }
 
 func (m *Manager) GetAvailableVersions(serviceType string) ([]ReleaseInfo, error) {

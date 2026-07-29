@@ -4,52 +4,23 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
-	"time"
 
 	"github.com/xiaodu/DevStack/internal/config"
-	"github.com/xiaodu/DevStack/internal/core"
-	"github.com/xiaodu/DevStack/internal/process"
+	"github.com/xiaodu/DevStack/internal/resource"
 )
 
 const phpWorkerCount = 4
 
-type BaseHandler struct{}
-
-func (h *BaseHandler) Stop(s *ServiceInstance, pm *process.Manager) error {
-	if s.process == nil || s.process.pid <= 0 {
-		return nil
-	}
-	s.Info.Status = core.StatusStopping
-	pid := s.process.pid
-	pm.Stop(pid)
-	for i := 0; i < 6; i++ {
-		if !pm.IsRunning(pid) {
-			break
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-	s.process = nil
-	s.Info.Status = core.StatusStopped
-	s.Info.PID = 0
-	return nil
-}
-
-type ServiceHandler interface {
-	Start(s *ServiceInstance, cfg *config.Config, pm *process.Manager) error
-	Stop(s *ServiceInstance, pm *process.Manager) error
-	Configure(s *ServiceInstance, cfg *config.Config) error
+// ConfigHandler 仅用于配置操作，所有启停逻辑已迁移到 Provider 架构
+type ConfigHandler interface {
+	Configure(s *ServiceInstance, cfg *config.Config, resMgr *resource.Manager) error
 	SaveConfig(s *ServiceInstance, cfg *config.Config, values map[string]string) error
 }
 
-var handlers = map[string]ServiceHandler{
+var configHandlers = map[string]ConfigHandler{
 	"nginx": &NginxHandler{},
 	"mysql": &MySQLHandler{},
 	"redis": &RedisHandler{},
-	"php":   &PHPHandler{},
-}
-
-func now() time.Time {
-	return time.Now()
 }
 
 func updateIniValue(content, key, value string) string {
