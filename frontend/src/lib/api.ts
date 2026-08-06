@@ -1,23 +1,22 @@
 import {
   ActivateEnvironment,
   ActivateEnvironmentForProject,
-  ApplyEnvironment,
+  ActivateEnvironmentOnly,
   ApplyServiceConfig,
   CheckMySQLRootAuth,
   CheckVersionInstalled,
-  CreateEnvironmentProfile,
+  ClearLogs,
+  CreateEnvironment,
   CreateProject,
   DeactivateEnvironment,
-  DeleteEnvironmentProfile,
+  DeleteEnvironment,
   DeleteProject,
   DeleteSnapshot,
-  DiffEnvironment,
   DownloadService,
-  GetActiveEnvironment,
   GetAvailableVersions,
   GetConfigPath,
   GetEnvironment,
-  GetEnvironmentProfile,
+  GetEnvironmentState,
   GetInstalledVersions,
   GetLogFiles,
   GetLogs,
@@ -33,24 +32,26 @@ import {
   GetSnapshotDetail,
   GetSnapshots,
   GetSystemInfo,
-  ListEnvironmentProfiles,
+  ListEnvironments,
+  LogToast,
   OpenDirectory,
   ReadLogFile,
   RefreshPHPRegistry,
   RestartService,
-  RollbackSnapshot,
+  RunEnvironment,
   SavePHPExtensions,
   SaveProjectAsEnvironment,
   SaveServiceConfig,
   SaveSettings,
   SetServiceVersion,
+  StartRuntime,
   StartService,
+  StopRuntime,
   StopService,
-  TakeSnapshot,
   ToggleProject,
   UninstallService,
   UninstallVersion,
-  UpdateEnvironmentProfile,
+  UpdateEnvironment,
   UpdateProject,
 } from '../../wailsjs/go/main/App.js'
 
@@ -58,51 +59,57 @@ import {
 const isWailsEnv = typeof window !== 'undefined' && (window as any).go !== undefined
 
 // ====== Mock 数据（仅用于浏览器预览 UI 样式） ======
-const mockProfiles = [
+const mockEnvironments = [
   {
-    id: 'profile-lemp',
-    name: 'LEMP 标准环境',
-    description: 'Nginx + MySQL + PHP 8.3 组合，适用于现代 Web 应用',
+    id: 'builtin-lnmp-php74',
+    name: 'LNMP (PHP 7.4 + MySQL 5.7 + Nginx 1.20)',
+    description: '经典 LNMP 组合，兼容绝大多数国内 PHP 开源系统',
     isBuiltin: true,
-    services: [
-      { id: 'nginx', version: '1.24.0' },
-      { id: 'mysql', version: '8.0.36' },
+    tags: ['LAMP', 'PHP', '推荐', '建站'],
+    units: [
+      { kind: 'nginx', version: '1.20.2', name: 'Nginx' },
+      { kind: 'mysql', version: '5.7.44', name: 'MySQL' },
+      { kind: 'php', version: '7.4.33', name: 'PHP' },
+      { kind: 'redis', version: '7.2.5', name: 'Redis' },
     ],
-    runtimes: [{ runtimeId: 'php', version: '8.3.0', default: true }],
-    dependencies: {},
+    createdAt: '2024-01-01',
+    updatedAt: '2024-01-01',
   },
   {
-    id: 'profile-lnmp',
-    name: 'LNMP 经典环境',
-    description: 'Nginx + MySQL + PHP 7.4 组合，兼容老项目',
+    id: 'builtin-modern-php8',
+    name: '现代 PHP 全栈 (PHP 8.3 + MySQL 8.0 + Redis 7 + Nginx 1.24)',
+    description: '面向 Laravel / Symfony / ThinkPHP 8 等现代框架的高性能组合',
     isBuiltin: true,
-    services: [
-      { id: 'nginx', version: '1.24.0' },
-      { id: 'mysql', version: '5.7.44' },
+    tags: ['PHP8', 'Laravel', '高性能'],
+    units: [
+      { kind: 'nginx', version: '1.24.0', name: 'Nginx' },
+      { kind: 'mysql', version: '8.0.39', name: 'MySQL' },
+      { kind: 'php', version: '8.3.12', name: 'PHP' },
+      { kind: 'redis', version: '7.2.5', name: 'Redis' },
     ],
-    runtimes: [{ runtimeId: 'php', version: '7.4.33', default: true }],
-    dependencies: {},
+    createdAt: '2024-01-01',
+    updatedAt: '2024-01-01',
   },
   {
-    id: 'profile-lnmpj',
-    name: 'LNMPJ 全栈环境',
-    description: 'Nginx + MySQL + PHP + Node.js 组合，前后端一体化',
+    id: 'builtin-node-web',
+    name: 'Node 全栈 (Node 20 + Nginx 1.24 + Redis 7)',
+    description: '适用于 Vue/Next/Nuxt 前端 SSR、Koa/Nest/Egg 服务端项目',
     isBuiltin: true,
-    services: [
-      { id: 'nginx', version: '1.24.0' },
-      { id: 'mysql', version: '8.0.36' },
+    tags: ['Node', 'SSR', 'Vue', 'React'],
+    units: [
+      { kind: 'nginx', version: '1.24.0', name: 'Nginx' },
+      { kind: 'redis', version: '7.2.5', name: 'Redis' },
+      { kind: 'node', version: '20.18.0', name: 'Node.js' },
     ],
-    runtimes: [
-      { runtimeId: 'php', version: '8.3.0', default: true },
-      { runtimeId: 'node', version: '20.11.1', default: false },
-    ],
-    dependencies: {},
+    createdAt: '2024-01-01',
+    updatedAt: '2024-01-01',
   },
 ]
 
 const mockServices = [
   {
-    id: 'nginx',
+    id: 'nginx@1.24.0',
+    kind: 'nginx',
     name: 'Nginx',
     type: 'webserver',
     category: 'web',
@@ -111,10 +118,10 @@ const mockServices = [
     port: 80,
     pid: 1234,
     installed: true,
-    autoStart: true,
   },
   {
-    id: 'mysql',
+    id: 'mysql@8.0.36',
+    kind: 'mysql',
     name: 'MySQL',
     type: 'database',
     category: 'db',
@@ -123,10 +130,10 @@ const mockServices = [
     port: 3306,
     pid: 5678,
     installed: true,
-    autoStart: true,
   },
   {
-    id: 'redis',
+    id: 'redis@7.2.4',
+    kind: 'redis',
     name: 'Redis',
     type: 'cache',
     category: 'cache',
@@ -135,13 +142,13 @@ const mockServices = [
     port: 6379,
     pid: 0,
     installed: false,
-    autoStart: false,
   },
 ]
 
 const mockRuntimes = [
   {
-    id: 'php-8.3.0',
+    id: 'php@8.3.0',
+    kind: 'php',
     type: 'php',
     version: '8.3.0',
     path: '/usr/local/php8.3',
@@ -154,7 +161,8 @@ const mockRuntimes = [
     pid: 9012,
   },
   {
-    id: 'php-7.4.33',
+    id: 'php@7.4.33',
+    kind: 'php',
     type: 'php',
     version: '7.4.33',
     path: '/usr/local/php7.4',
@@ -167,7 +175,8 @@ const mockRuntimes = [
     pid: 0,
   },
   {
-    id: 'node-20.11.1',
+    id: 'node@20.11.1',
+    kind: 'node',
     type: 'node',
     version: '20.11.1',
     path: '/usr/local/node20',
@@ -191,9 +200,9 @@ const mockProjects = [
     port: 80,
     httpsPort: 443,
     ssl: false,
-    environmentID: 'profile-lemp',
-    phpVersion: '8.3.0',
-    mysqlVersion: '8.0.36',
+    environmentID: 'builtin-modern-php8',
+    phpVersion: '8.3.12',
+    mysqlVersion: '8.0.39',
     nginxVersion: '1.24.0',
     enabled: true,
     createdAt: '2024-01-15T10:00:00Z',
@@ -293,6 +302,8 @@ export const api = {
 
   // ====== 运行时管理 ======
   getRuntimes: () => callOrMock(GetRuntimes, mockRuntimes as any),
+  startRuntime: (id: string) => callOrMock(() => StartRuntime(id), { success: true } as any),
+  stopRuntime: (id: string) => callOrMock(() => StopRuntime(id), { success: true } as any),
   getPHPRegistry: () => callOrMock(GetPHPRegistry, [] as any),
   refreshPHPRegistry: () => callOrMock(RefreshPHPRegistry, [] as any),
   getPHPExtensions: (version: string) => callOrMock(() => GetPHPExtensions(version), [] as any),
@@ -305,7 +316,7 @@ export const api = {
   checkVersionInstalled: (serviceId: string, version: string) =>
     callOrMock(() => CheckVersionInstalled(serviceId, version), false as any),
   downloadService: (serviceId: string, version: string) =>
-    callOrMock(() => DownloadService(serviceId, version), { success: true } as any),
+    callOrMock(() => DownloadService(serviceId, version, ''), { success: true } as any),
   uninstallVersion: (serviceId: string, version: string) =>
     callOrMock(() => UninstallVersion(serviceId, version), { success: true } as any),
 
@@ -315,55 +326,44 @@ export const api = {
   updateProject: (project: any) => callOrMock(() => UpdateProject(project), { success: true } as any),
   deleteProject: (id: string) => callOrMock(() => DeleteProject(id), { success: true } as any),
   toggleProject: (id: string) => callOrMock(() => ToggleProject(id), { success: true } as any),
-  saveProjectAsEnvironment: (id: string) => callOrMock(() => SaveProjectAsEnvironment(id), { success: true } as any),
   activateEnvironmentForProject: (id: string) =>
     callOrMock(() => ActivateEnvironmentForProject(id), { success: true } as any),
 
   // ====== 环境管理 ======
   getEnvironment: () =>
-    callOrMock(GetEnvironment, {
+    callOrMock(GetEnvironmentState, {
       services: {
-        nginx: { version: '1.24.0', state: 'running' },
-        mysql: { version: '8.0.36', state: 'running' },
+        'nginx@1.24.0': { version: '1.24.0', state: 'running' },
+        'mysql@8.0.39': { version: '8.0.39', state: 'running' },
       },
       runtimes: {
-        'php-8.3.0': { version: '8.3.0', state: 'running', active: true },
+        'php@8.3.12': { version: '8.3.12', state: 'running', active: true },
       },
       projects: {},
-      activeProfileID: 'profile-lemp',
+      activeProfileID: 'builtin-modern-php8',
     } as any),
-  getActiveEnvironment: () =>
-    callOrMock(GetActiveEnvironment, {
-      services: {
-        nginx: { version: '1.24.0', state: 'running' },
-        mysql: { version: '8.0.36', state: 'running' },
-      },
-      runtimes: {
-        'php-8.3.0': { version: '8.3.0', state: 'running', active: true },
-      },
-      projects: {},
-      activeProfileID: 'profile-lemp',
-    } as any),
-  applyEnvironment: (env: any) => callOrMock(() => ApplyEnvironment(env), { success: true } as any),
-  diffEnvironment: (env: any) => callOrMock(() => DiffEnvironment(env), [] as any),
-  activateEnvironment: (profileId: string) =>
-    callOrMock(() => ActivateEnvironment(profileId), { success: true } as any),
+  activateEnvironment: (envId: string) => callOrMock(() => ActivateEnvironment(envId), { success: true } as any),
+  activateEnvironmentOnly: (envId: string) =>
+    callOrMock(() => ActivateEnvironmentOnly(envId), { success: true } as any),
+  runEnvironment: (envId: string) => callOrMock(() => RunEnvironment(envId), { success: true } as any),
   deactivateEnvironment: () => callOrMock(() => DeactivateEnvironment(), { success: true } as any),
+  logToast: (msg: string, type: string) => callOrMock(() => LogToast(msg, type), null as any),
+  clearLogs: () => callOrMock(() => ClearLogs(), { success: true } as any),
 
-  // ====== 环境模板（Profiles） ======
-  listEnvironmentProfiles: () => callOrMock(ListEnvironmentProfiles, mockProfiles as any),
-  getEnvironmentProfile: (id: string) => callOrMock(() => GetEnvironmentProfile(id), mockProfiles[0] as any),
-  createEnvironmentProfile: (profile: any) =>
-    callOrMock(() => CreateEnvironmentProfile(profile), { id: 'new-profile' } as any),
-  updateEnvironmentProfile: (profile: any) =>
-    callOrMock(() => UpdateEnvironmentProfile(profile), { success: true } as any),
-  deleteEnvironmentProfile: (id: string) => callOrMock(() => DeleteEnvironmentProfile(id), { success: true } as any),
+  // ====== 环境 ======
+  listEnvironments: () => callOrMock(ListEnvironments, mockEnvironments as any),
+  getOneEnvironment: (id: string) => callOrMock(() => GetEnvironment(id), mockEnvironments[0] as any),
+  createEnvironment: (env: any) => callOrMock(() => CreateEnvironment(env), { id: 'new-env' } as any),
+  updateEnvironment: (env: any) => callOrMock(() => UpdateEnvironment(env), { success: true } as any),
+  deleteEnvironment: (id: string) => callOrMock(() => DeleteEnvironment(id), { success: true } as any),
+  saveProjectAsEnvironment: (projectId: string, name?: string, description?: string) =>
+    callOrMock(() => SaveProjectAsEnvironment({ projectId, name: name || '', description: description || '' }), {
+      success: true,
+    } as any),
 
   // ====== 快照管理 ======
   getSnapshots: () => callOrMock(GetSnapshots, mockSnapshots as any),
   getSnapshotDetail: (id: string) => callOrMock(() => GetSnapshotDetail(id), { id, content: '' } as any),
-  takeSnapshot: () => callOrMock(TakeSnapshot, 'new-snap' as any),
-  rollbackSnapshot: (id: string) => callOrMock(() => RollbackSnapshot(id), { success: true } as any),
   deleteSnapshot: (id: string) => callOrMock(() => DeleteSnapshot(id), { success: true } as any),
 
   // ====== 设置 ======

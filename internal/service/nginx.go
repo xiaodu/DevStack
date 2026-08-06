@@ -39,17 +39,8 @@ func (h *NginxHandler) Configure(s *ServiceInstance, cfg *config.Config, resMgr 
 		serverTokensOn = "off"
 	}
 
-	phpPort := 9000
-	if resMgr != nil {
-		allocated := resMgr.Ports().ListAllocated()
-		for port, owner := range allocated {
-			if strings.HasPrefix(owner, "php:") {
-				phpPort = port
-				break
-			}
-		}
-	}
-	phpUpstream := generatePHPUpstreamConfig(phpPort)
+	phpPorts := allocatedPHPBasePorts(resMgr)
+	phpUpstream := generatePHPUpstreamConfig(phpPorts)
 	content := fmt.Sprintf(`worker_processes auto;
 error_log logs/error.log;
 pid logs/nginx.pid;

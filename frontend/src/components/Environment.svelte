@@ -1,32 +1,54 @@
 <script lang="ts">
 import { onMount } from 'svelte'
 import { api } from '../lib/api'
+import { useDownloadProgress } from '../lib/events'
 import { safeInvoke } from '../lib/safeInvoke'
-import { addToast, refreshSignal } from '../lib/stores'
+import { addToast, operation, refreshSignal, runOperation } from '../lib/stores'
 
 let env = { services: {}, projects: {}, runtimes: {}, activeProfileID: '' }
 let envLoading = true
-let profiles = []
-let profilesLoading = true
-let selectedProfile = null
-let editingProfile = null
-let profileModalOpen = false
+let environments = []
+let envsLoading = true
+let selectedEnv = null
+let editingEnv = null
+let envModalOpen = false
 let snapshots = []
 let snapshotDetails = {}
 let snapLoading = true
 let busy = false
 let confirmRollbackId = null
 let confirmDeleteId = null
-let confirmDeleteProfileId = null
+let confirmDeleteEnvId = null
 let selectedSnapshotId = null
-let activeTab = 'profiles'
-let availableServices = []
-let availableRuntimes = []
+let activeTab = 'environments'
+// 基于后端 getInstalledVersions 构建的安装状态映射，格式: { 'nginx 1.24.0': true }
+let installStatus = {}
+let installStatusReady = false
+
+// 安装进度相关
+let installModal = false
+let installingEnv = null
+let installTasks = [] // [{ id, version, name, status: 'pending'|'downloading'|'extracting'|'done'|'error', progress: 0 }]
+let installProgress = {} // { 'nginx@1.24.0': { downloaded: 0, total: 0 } }
+let installCancelled = false // 用户点击取消时设为 true
+
+// 监听下载进度事件（后端 key 格式 "download:nginx:1.24.0" → 前端 key "nginx@1.24.0"）
+useDownloadProgress((data) => {
+  if (!data || !data.key) return
+  installProgress[data.key] = { downloaded: data.downloaded, total: data.total }
+  const shortKey = data.key.replace('download:', '').replace(':', '@')
+  installTasks = installTasks.map((t) => {
+    if (`${t.id}@${t.version}` === shortKey && t.status === 'downloading') {
+      return { ...t, progress: data.total > 0 ? Math.round((data.downloaded / data.total) * 100) : 0 }
+    }
+    return t
+  })
+})
 
 $: sortedSnapshots = Array.isArray(snapshots) ? [...snapshots].reverse() : []
 
-// 当前激活的 profile ID
-$: activeProfileID = env.activeProfileID || ''
+// 当前激活的环境 ID
+$: activeEnvID = env.activeProfileID || ''
 $: hasRunningServices =
   Object.values(env.services || {}).some((s) => s.state === 'running') ||
   Object.values(env.runtimes || {}).some((r) => r.state === 'running')
@@ -38,7 +60,7 @@ async function withTimeout(promise, timeoutMs = 5000, fallback = null) {
 async function loadEnvironment() {
   envLoading = true
   try {
-    const result = await withTimeout(api.getActiveEnvironment(), 5000, {
+    const result = await withTimeout(api.getEnvironment(), 5000, {
       services: {},
       projects: {},
       runtimes: {},
@@ -52,15 +74,20 @@ async function loadEnvironment() {
   }
 }
 
-async function loadProfiles() {
-  profilesLoading = true
+async function loadEnvironments() {
+  envsLoading = true
   try {
-    const result = await withTimeout(api.listEnvironmentProfiles(), 5000, [])
-    profiles = Array.isArray(result) ? result : []
+    const result = await withTimeout(api.listEnvironments(), 5000, [])
+    environments = (Array.isArray(result) ? result : []).sort((a, b) => {
+      // 预设环境排前面，然后按名称字母排序
+      if (a.isBuiltin && !b.isBuiltin) return -1
+      if (!a.isBuiltin && b.isBuiltin) return 1
+      return (a.name || '').localeCompare(b.name || 'zh-CN')
+    })
   } catch (e) {
-    profiles = []
+    environments = []
   } finally {
-    profilesLoading = false
+    envsLoading = false
   }
 }
 
@@ -78,42 +105,23 @@ async function loadSnapshots() {
 }
 
 async function load() {
-  await Promise.all([loadEnvironment(), loadProfiles(), loadSnapshots()])
+  await Promise.all([loadEnvironment(), loadEnvironments(), loadSnapshots()])
+  await refreshInstallStatus()
 }
 
-// 检查 profile 中声明的服务/运行时是否全部已安装
-function checkProfileInstalled(profile) {
-  const svcs = profile.services
-    ? Array.isArray(profile.services)
-      ? profile.services
-      : Object.values(profile.services)
-    : []
-  const rts = profile.runtimes
-    ? Array.isArray(profile.runtimes)
-      ? profile.runtimes
-      : Object.values(profile.runtimes)
-    : []
+// 使用后端 installStatus 检查组件安装状态
+function checkEnvInstalled(env) {
+  const units = env.units ? (Array.isArray(env.units) ? env.units : Object.values(env.units)) : []
 
   const allInstalled = []
   const missing = []
 
-  for (const s of svcs) {
-    const found = availableServices.find((av) => av.id === s.id && av.installed)
-    if (found) {
-      allInstalled.push(`${s.id} ${s.version}`)
+  for (const u of units) {
+    const key = `${u.kind} ${u.version}`
+    if (installStatus[key]) {
+      allInstalled.push(key)
     } else {
-      missing.push(`${s.id} ${s.version}`)
-    }
-  }
-
-  for (const r of rts) {
-    // 运行时 ID 格式为 "php-8.3"，但 profile 中 runtimeId 为 "php"，version 为 "8.3"
-    const rtID = `${r.runtimeId}-${r.version}`
-    const found = availableRuntimes.find((av) => av.id === rtID && av.installed)
-    if (found) {
-      allInstalled.push(`${r.runtimeId} ${r.version}`)
-    } else {
-      missing.push(`${r.runtimeId} ${r.version}`)
+      missing.push(key)
     }
   }
 
@@ -124,118 +132,205 @@ function checkProfileInstalled(profile) {
   }
 }
 
-async function activateCurrent() {
-  if (busy) return
-  busy = true
-  try {
-    await withTimeout(api.activateEnvironment(''), 8000)
-    addToast('环境已按依赖顺序激活', 'success')
-    refreshSignal.update((n) => n + 1)
-    await load()
-  } catch (e) {
-    addToast(`环境激活失败: ${e.message || e}`, 'error')
-  } finally {
-    busy = false
+// 收集所有环境涉及的服务类型，查询后端实际安装版本
+async function refreshInstallStatus() {
+  installStatusReady = false
+  const types = new Set()
+  for (const e of environments) {
+    const units = Array.isArray(e.units) ? e.units : Object.values(e.units || {})
+    for (const u of units) types.add(u.kind)
   }
+  const map = {}
+  for (const kind of types) {
+    const versions = await withTimeout(api.getInstalledVersions(kind), 5000, []).catch(() => [])
+    if (Array.isArray(versions)) {
+      for (const v of versions) map[`${kind} ${v}`] = true
+    }
+  }
+  installStatus = map
+  installStatusReady = true
 }
 
 async function deactivateCurrent() {
-  await safeInvoke(
-    'deactivateEnvironment',
-    async () => {
-      await api.deactivateEnvironment()
+  await runOperation({
+    action: 'deactivate',
+    title: '正在停止环境',
+    call: () => api.deactivateEnvironment(),
+    successMsg: '环境已安全停止',
+    onDone: () => {
       refreshSignal.update((n) => n + 1)
-      await load()
+      return load()
     },
-    { successMsg: '环境已按依赖顺序安全停止', errorPrefix: '环境停止失败' },
-  )
+  })
 }
 
-async function activateProfile(profile) {
+async function activateEnv(env) {
+  await runOperation({
+    action: 'activate',
+    title: `正在激活「${env.name}」`,
+    call: () => api.activateEnvironment(env.id),
+    successMsg: `已按「${env.name}」激活并启动环境`,
+    onDone: () => {
+      refreshSignal.update((n) => n + 1)
+      return load()
+    },
+  })
+}
+
+// 仅切换 activeEnvironmentId 标记，不启停任何组件
+async function activateEnvOnly(env) {
+  await runOperation({
+    action: 'activate-only',
+    title: `正在激活「${env.name}」`,
+    call: () => api.activateEnvironmentOnly(env.id),
+    successMsg: `已激活「${env.name}」（未启动组件）`,
+    onDone: () => {
+      refreshSignal.update((n) => n + 1)
+      return load()
+    },
+  })
+}
+
+// 仅启动环境内的全部组件，不修改激活标记 —— 已移除 UI 入口，禁止直接运行未激活的环境
+// async function runEnv(env) {
+//   await runOperation({
+//     action: 'run',
+//     title: `正在启动「${env.name}」`,
+//     call: () => api.runEnvironment(env.id),
+//     successMsg: `已启动「${env.name}」的全部组件`,
+//     onDone: () => {
+//       refreshSignal.update((n) => n + 1)
+//       return load()
+//     },
+//   })
+// }
+
+async function installEnvComponents(env) {
   if (busy) return
-  const installCheck = checkProfileInstalled(profile)
-  if (!installCheck.allInstalled && installCheck.total > 0) {
-    addToast(`部分组件未安装: ${installCheck.missing.join('，')}`, 'warning')
+  const installCheck = checkEnvInstalled(env)
+  if (!installCheck.missing.length) {
+    addToast('所有组件已安装，可直接激活', 'info')
+    return
   }
+
+  installCancelled = false
+  installTasks = []
+  const units = Array.isArray(env.units) ? env.units : Object.values(env.units || {})
+  for (const u of units) {
+    if (installCheck.missing.includes(`${u.kind} ${u.version}`)) {
+      installTasks.push({
+        id: u.kind,
+        version: u.version,
+        name: unitNames[u.kind] || u.name || u.kind,
+        status: 'pending',
+        progress: 0,
+      })
+    }
+  }
+
+  installingEnv = env
+  installModal = true
   busy = true
-  try {
-    await withTimeout(api.activateEnvironment(profile.id), 15000)
-    refreshSignal.update((n) => n + 1)
-    await load()
-    addToast(`已按「${profile.name}」激活环境`, 'success')
-  } catch (e) {
-    addToast(`环境激活失败: ${e.message || e}`, 'error')
-  } finally {
-    busy = false
+
+  for (const task of installTasks) {
+    if (installCancelled) break
+    task.status = 'downloading'
+    installTasks = [...installTasks]
+    try {
+      await api.downloadService(task.id, task.version)
+      if (installCancelled) break
+      task.status = 'done'
+      task.progress = 100
+      installTasks = [...installTasks]
+    } catch (e) {
+      task.status = 'error'
+      installTasks = [...installTasks]
+      if (!installCancelled) {
+        addToast(`安装 ${task.name} ${task.version} 失败: ${e.message || e}`, 'error')
+      }
+    }
+  }
+
+  for (const task of installTasks) {
+    if (task.status === 'pending' || task.status === 'downloading') {
+      task.status = 'error'
+      task.progress = 0
+    }
+  }
+  installTasks = [...installTasks]
+
+  await load()
+  busy = false
+
+  if (installCancelled) {
+    // 已由 cancelInstall 提示
+  } else if (installTasks.every((t) => t.status === 'done')) {
+    addToast('所有组件安装完成，可点击「激活并运行」启动环境', 'success')
   }
 }
 
-async function saveProfile() {
-  if (!editingProfile.name?.trim()) {
+function cancelInstall() {
+  if (installCancelled) return
+  installCancelled = true
+  // 立即反馈：未完成任务标记为已取消并关闭弹窗，不必等待正在进行的下载结束
+  installTasks = installTasks.map((t) => (t.status === 'done' ? t : { ...t, status: 'cancelled', progress: 0 }))
+  installModal = false
+  addToast('已取消安装', 'warning')
+}
+
+const unitNames = {
+  nginx: 'Nginx',
+  mysql: 'MySQL',
+  redis: 'Redis',
+  php: 'PHP',
+  node: 'Node.js',
+  python: 'Python',
+}
+
+function closeInstallModal() {
+  installModal = false
+  installingEnv = null
+  installTasks = []
+  installProgress = {}
+}
+
+async function saveEnv() {
+  if (!editingEnv.name?.trim()) {
     addToast('请填写环境名称', 'error')
     return
   }
   await safeInvoke(
-    'saveProfile',
+    'saveEnv',
     async () => {
-      if (editingProfile.id) {
-        await api.updateEnvironmentProfile(editingProfile)
+      if (editingEnv.id) {
+        await api.updateEnvironment(editingEnv)
       } else {
-        await api.createEnvironmentProfile(editingProfile)
+        await api.createEnvironment(editingEnv)
       }
-      profileModalOpen = false
-      editingProfile = null
-      await loadProfiles()
+      envModalOpen = false
+      editingEnv = null
+      await loadEnvironments()
     },
-    { successMsg: editingProfile.id ? '环境已更新' : '环境已创建', errorPrefix: '保存失败' },
+    { successMsg: editingEnv.id ? '环境已更新' : '环境已创建', errorPrefix: '保存失败' },
   )
 }
 
-async function doDeleteProfile() {
-  if (!confirmDeleteProfileId) return
-  const deletedId = confirmDeleteProfileId
+async function doDeleteEnv() {
+  if (!confirmDeleteEnvId) return
+  const deletedId = confirmDeleteEnvId
   await safeInvoke(
-    'deleteProfile',
+    'deleteEnv',
     async () => {
-      await api.deleteEnvironmentProfile(deletedId)
-      confirmDeleteProfileId = null
-      if (selectedProfile?.id === deletedId) selectedProfile = null
-      await loadProfiles()
+      await api.deleteEnvironment(deletedId)
+      confirmDeleteEnvId = null
+      if (selectedEnv?.id === deletedId) selectedEnv = null
+      await loadEnvironments()
     },
     { successMsg: '环境已删除', errorPrefix: '删除失败' },
   )
 }
 
-async function createSnapshot() {
-  await safeInvoke(
-    'createSnapshot',
-    async () => {
-      const id = await api.takeSnapshot()
-      await loadSnapshots()
-    },
-    { successMsg: '快照已创建', errorPrefix: '创建快照失败' },
-  )
-}
-
-async function doRollback() {
-  if (!confirmRollbackId) return
-  if (busy) return
-  busy = true
-  const id = confirmRollbackId
-  try {
-    await withTimeout(api.rollbackSnapshot(id), 30000)
-    confirmRollbackId = null
-    refreshSignal.update((n) => n + 1)
-    await load()
-    addToast('已回滚', 'success')
-  } catch (e) {
-    addToast(`回滚失败: ${e.message || e}`, 'error')
-  } finally {
-    busy = false
-  }
-}
-
-async function doDelete() {
+async function doDeleteSnapshot() {
   if (!confirmDeleteId) return
   if (busy) return
   busy = true
@@ -261,39 +356,22 @@ function formatTime(snapshotId) {
   return `${ts.slice(0, 4)}-${ts.slice(4, 6)}-${ts.slice(6, 8)} ${ts.slice(9, 11)}:${ts.slice(11, 13)}`
 }
 
-function profileSummary(profile) {
-  const parts = []
-  const svcs = profile.services
-    ? Array.isArray(profile.services)
-      ? profile.services
-      : Object.values(profile.services)
-    : []
-  const rts = profile.runtimes
-    ? Array.isArray(profile.runtimes)
-      ? profile.runtimes
-      : Object.values(profile.runtimes)
-    : []
-  if (svcs.length) parts.push(svcs.map((s) => `${s.id || '?'} ${s.version || ''}`).join('，'))
-  if (rts.length) parts.push(rts.map((r) => `${r.runtimeId || '?'} ${r.version || ''}`).join('，'))
-  return parts.length ? parts.join('；') : '空环境模板'
-}
-
 function stateLabel(state) {
   return { running: '运行中', stopped: '已停止', starting: '启动中', stopping: '停止中' }[state] || state || '未知'
 }
 
-function openCreateProfile() {
-  editingProfile = { id: '', name: '', description: '', isBuiltin: false, services: [], runtimes: [] }
-  profileModalOpen = true
+function openCreateEnv() {
+  expandedVersions = {}
+  editingEnv = { id: '', name: '', description: '', isBuiltin: false, units: [] }
+  preloadVersions()
+  envModalOpen = true
 }
 
-function openEditProfile(profile) {
-  if (profile.isBuiltin) {
-    addToast('内置预设无法编辑，建议先保存为自定义环境', 'warning')
-    return
-  }
-  editingProfile = JSON.parse(JSON.stringify(profile))
-  profileModalOpen = true
+function openEditEnv(env) {
+  expandedVersions = {}
+  editingEnv = JSON.parse(JSON.stringify(env))
+  preloadVersions()
+  envModalOpen = true
 }
 
 function loadSnapshotDetail(id) {
@@ -315,31 +393,102 @@ function loadSnapshotDetail(id) {
     .catch(() => addToast('加载快照详情失败', 'error'))
 }
 
-function addServiceSpec() {
-  editingProfile.services = [...(editingProfile.services || []), { id: '', version: '' }]
+// 组件目录：环境编辑器中可选的全部组件类型
+const catalog = [
+  { kind: 'nginx', name: 'Nginx', icon: 'icon-nginx' },
+  { kind: 'mysql', name: 'MySQL', icon: 'icon-mysql' },
+  { kind: 'redis', name: 'Redis', icon: 'icon-redis' },
+  { kind: 'memcached', name: 'Memcached', icon: '' },
+  { kind: 'php', name: 'PHP', icon: 'icon-php1' },
+  { kind: 'node', name: 'Node.js', icon: 'icon-Nodejs' },
+  { kind: 'python', name: 'Python', icon: 'icon-python' },
+]
+
+// 每类组件的版本缓存: { [kind]: { installed: string[], available: string[], loading: bool } }
+// installed 来自 getInstalledVersions，available 来自 getAvailableVersions（可下载）
+let versionCache = {}
+
+// 版本列表是否展开（false = 只显示一行，通过"更多"展开）
+let expandedVersions = {}
+
+function sortVersions(list) {
+  return [...list].sort((a, b) => b.localeCompare(a, 'en', { numeric: true }))
 }
-function removeServiceSpec(idx) {
-  const a = [...editingProfile.services]
-  a.splice(idx, 1)
-  editingProfile.services = a
+
+// 合并某类组件的全部版本：已安装优先（带 ✓ 标识），其后为可下载版本
+function allVersions(kind) {
+  const v = versionCache[kind] || { installed: [], available: [] }
+  const installed = v.installed || []
+  const avail = (v.available || []).filter((x) => !installed.includes(x))
+  return [...sortVersions(installed), ...sortVersions(avail)]
 }
-function updateServiceSpec(idx, field, value) {
-  const a = [...editingProfile.services]
-  a[idx] = { ...a[idx], [field]: value }
-  editingProfile.services = a
+
+function isInstalled(kind, ver) {
+  return (versionCache[kind]?.installed || []).includes(ver)
 }
-function addRuntimeSpec() {
-  editingProfile.runtimes = [...(editingProfile.runtimes || []), { runtimeId: '', version: '' }]
+
+async function ensureVersions(kind) {
+  if (versionCache[kind]) return
+  versionCache[kind] = { installed: [], available: [], loading: true }
+  const [installed, available] = await Promise.all([
+    withTimeout(api.getInstalledVersions(kind), 5000, []).catch(() => []),
+    withTimeout(api.getAvailableVersions(kind), 8000, []).catch(() => []),
+  ])
+  versionCache[kind] = {
+    installed: Array.isArray(installed) ? installed : [],
+    available: Array.isArray(available) ? available.map((r) => r.version) : [],
+    loading: false,
+  }
+  // 已选中但尚未选择版本的类型，自动补上第一个可用版本
+  if (editingEnv) {
+    let changed = false
+    const units = (editingEnv.units || []).map((u) => {
+      if (u.kind === kind && !u.version) {
+        changed = true
+        return { ...u, version: allVersions(kind)[0] || '' }
+      }
+      return u
+    })
+    if (changed) editingEnv.units = units
+  }
 }
-function removeRuntimeSpec(idx) {
-  const a = [...editingProfile.runtimes]
-  a.splice(idx, 1)
-  editingProfile.runtimes = a
+
+function preloadVersions() {
+  for (const c of catalog) ensureVersions(c.kind)
 }
-function updateRuntimeSpec(idx, field, value) {
-  const a = [...editingProfile.runtimes]
-  a[idx] = { ...a[idx], [field]: value }
-  editingProfile.runtimes = a
+
+// 切换组件类型：已添加则移除，未加入则加入并默认选中第一个版本
+function toggleKind(kind) {
+  const idx = (editingEnv.units || []).findIndex((u) => u.kind === kind)
+  if (idx >= 0) {
+    const a = [...editingEnv.units]
+    a.splice(idx, 1)
+    editingEnv.units = a
+    return
+  }
+  ensureVersions(kind)
+  const cached = versionCache[kind]
+  const def = cached && !cached.loading ? allVersions(kind)[0] || '' : ''
+  editingEnv.units = [...(editingEnv.units || []), { kind, version: def, name: '' }]
+}
+
+function selectVersion(kind, ver) {
+  editingEnv.units = (editingEnv.units || []).map((u) => (u.kind === kind ? { ...u, version: ver } : u))
+}
+
+// 展开/收起某类组件的版本列表
+function toggleMore(kind) {
+  expandedVersions = { ...expandedVersions, [kind]: !expandedVersions[kind] }
+}
+
+// 各软件对应的 iconfont 类名
+const iconMap = {
+  nginx: 'icon-nginx',
+  mysql: 'icon-mysql',
+  redis: 'icon-redis',
+  php: 'icon-php1',
+  node: 'icon-Nodejs',
+  python: 'icon-python',
 }
 
 $: svcEntries = Object.entries(env.services || {})
@@ -349,14 +498,6 @@ $: rtEntries = Object.entries(env.runtimes || {})
 const unsub = refreshSignal.subscribe(() => load())
 onMount(() => {
   load()
-  Promise.all([
-    withTimeout(api.getServices(), 3000, [])
-      .then((s) => (availableServices = Array.isArray(s) ? s : []))
-      .catch(() => {}),
-    withTimeout(api.getRuntimes(), 3000, [])
-      .then((r) => (availableRuntimes = Array.isArray(r) ? r : []))
-      .catch(() => {}),
-  ])
   return unsub
 })
 </script>
@@ -368,33 +509,30 @@ onMount(() => {
       <p class="text-sm text-base-content/60 mt-1">管理环境模板、当前状态和快照存档</p>
     </div>
     <div class="flex gap-2">
-      {#if activeTab === 'profiles'}
-        <button class="btn btn-primary btn-sm" on:click={openCreateProfile} disabled={busy}>新建环境</button>
-      {/if}
-      {#if activeTab === 'snapshots'}
-        <button class="btn btn-primary btn-sm" on:click={createSnapshot} disabled={busy}>{busy ? '创建中...' : '创建快照'}</button>
+      {#if activeTab === 'environments'}
+        <button class="btn btn-primary btn-sm" on:click={openCreateEnv} disabled={busy}>新建环境</button>
       {/if}
     </div>
   </div>
 
   <div role="tablist" class="tabs tabs-bordered">
-    <button class="tab" class:tab-active={activeTab === 'profiles'} on:click={() => activeTab = 'profiles'}>我的环境</button>
+    <button class="tab" class:tab-active={activeTab === 'environments'} on:click={() => activeTab = 'environments'}>我的环境</button>
     <button class="tab" class:tab-active={activeTab === 'overview'} on:click={() => activeTab = 'overview'}>运行状态</button>
     <button class="tab" class:tab-active={activeTab === 'snapshots'} on:click={() => activeTab = 'snapshots'}>快照存档</button>
   </div>
 
-  {#if activeTab === 'profiles'}
+  {#if activeTab === 'environments'}
     <!-- 当前环境操作栏 -->
     <div class="flex items-center justify-between px-4 py-3 bg-base-100 border border-base-300 rounded-lg">
       <div class="flex items-center gap-3">
         {#if envLoading}
           <span class="text-sm text-base-content/60">加载中...</span>
-        {:else if activeProfileID}
+        {:else if activeEnvID}
           <span class="w-2 h-2 rounded-full bg-success"></span>
           <span class="text-sm">
             当前环境：
             <span class="font-semibold text-primary">
-              {profiles.find((p) => p.id === activeProfileID)?.name || '自定义环境'}
+              {environments.find((e) => e.id === activeEnvID)?.name || '自定义环境'}
             </span>
           </span>
         {:else if hasRunningServices}
@@ -406,74 +544,98 @@ onMount(() => {
         {/if}
       </div>
       <div class="flex gap-2">
-        {#if !hasRunningServices}
-          <button class="btn btn-sm btn-primary" on:click={activateCurrent} disabled={busy || envLoading}>
-            {busy ? '处理中...' : '激活环境'}
-          </button>
-        {:else}
-          <button class="btn btn-sm btn-outline" on:click={deactivateCurrent} disabled={busy}>
+        {#if activeEnvID || hasRunningServices}
+          <button class="btn btn-sm btn-outline" on:click={deactivateCurrent} disabled={$operation.active || busy}>
             停止环境
           </button>
         {/if}
       </div>
     </div>
 
-    {#if profilesLoading}
-      <div class="text-center py-16 text-base-content/60">加载环境模板中...</div>
-    {:else if profiles.length === 0}
+    {#if envsLoading}
+      <div class="text-center py-16 text-base-content/60">加载环境中...</div>
+    {:else if environments.length === 0}
       <div class="flex flex-col items-center justify-center py-16 text-base-content/60 gap-2">
         <p class="text-base font-semibold">暂无环境</p>
         <p class="text-sm">新建一个环境，组合不同版本的软件和运行时</p>
         <p class="text-xs text-base-content/50">多个项目可共享同一个环境</p>
-        <div class="mt-4"><button class="btn btn-primary btn-sm" on:click={openCreateProfile} disabled={busy}>新建第一个环境</button></div>
+        <div class="mt-4"><button class="btn btn-primary btn-sm" on:click={openCreateEnv} disabled={busy}>新建第一个环境</button></div>
       </div>
     {:else}
       <div class="grid grid-cols-[repeat(auto-fill,minmax(320px,1fr))] gap-4">
-        {#each profiles as profile (profile.id)}
-          {@const isActive = activeProfileID === profile.id}
-          {@const installCheck = checkProfileInstalled(profile)}
-          <div class="card bg-base-100 border border-base-300 overflow-hidden transition-all hover:border-primary hover:-translate-y-0.5 {isActive ? 'border-primary shadow-md' : ''} {profile.isBuiltin ? 'bg-gradient-to-br from-base-100 to-base-200' : ''}">
+        {#each environments as env (env.id)}
+          {@const isActive = activeEnvID === env.id}
+          {@const installCheck = checkEnvInstalled(env)}
+          {@const envUnits = env.units ? (Array.isArray(env.units) ? env.units : Object.values(env.units)) : []}
+          <div class="card bg-base-100 border border-base-300 overflow-hidden transition-all hover:border-primary hover:-translate-y-0.5 {isActive ? 'border-primary shadow-md' : ''} {env.isBuiltin ? 'bg-gradient-to-br from-base-100 to-base-200' : ''}">
             <!-- 卡片头部 -->
             <div class="px-4 pt-4 pb-3 flex justify-between items-start gap-2">
               <div class="min-w-0 flex-1">
                 <div class="text-[15px] font-semibold flex items-center gap-2 flex-wrap">
-                  {profile.name}
-                  {#if profile.isBuiltin}<span class="badge badge-xs badge-ghost">预设</span>{/if}
+                  {env.name}
+                  {#if env.isBuiltin}<span class="badge badge-xs badge-ghost">预设</span>{/if}
                   {#if isActive}<span class="badge badge-xs badge-success">当前在用</span>{/if}
                 </div>
-                {#if profile.description}
-                  <div class="text-xs text-base-content/60 mt-1 leading-relaxed">{profile.description}</div>
+                {#if env.description}
+                  <div class="text-xs text-base-content/60 mt-1 leading-relaxed">{env.description}</div>
                 {/if}
               </div>
             </div>
 
             <!-- 卡片内容：组件摘要 + 安装状态 -->
             <div class="px-4 pb-3">
-              <div class="text-xs text-base-content/70 leading-relaxed bg-base-200 px-3 py-2.5 rounded-lg min-h-[40px]">
-                {profileSummary(profile)}
+              <div class="text-xs bg-base-200 px-3 py-2.5 rounded-lg min-h-[40px]">
+                {#if envUnits.length === 0}
+                  <span class="text-base-content/50">空环境</span>
+                {:else}
+                  <div class="flex flex-wrap gap-x-4 gap-y-1.5">
+                    {#each envUnits as u}
+                      <span class="inline-flex items-center gap-1.5">
+                        {#if iconMap[u.kind]}
+                          <span class="iconfont text-lg {iconMap[u.kind]}"></span>
+                        {:else}
+                          <span class="w-[18px] h-[18px] rounded-full bg-base-content/20 flex items-center justify-center text-[10px] font-bold text-base-content/50">{u.kind ? u.kind.charAt(0).toUpperCase() : '?'}</span>
+                        {/if}
+                        <span class="text-base-content/70">{unitNames[u.kind] || u.kind || '?'}</span>
+                        <span class="text-base-content/40 font-mono">{u.version}</span>
+                      </span>
+                    {/each}
+                  </div>
+                {/if}
               </div>
-              {#if installCheck.total > 0}
+              {#if installStatusReady}
+                {#if installCheck.total > 0}
+                  <div class="flex items-center gap-1.5 mt-2 text-xs">
+                    {#if installCheck.allInstalled}
+                      <span class="text-success">✓ 全部组件已安装</span>
+                    {:else}
+                      <span class="text-warning">⚠ {installCheck.missing.length} 项未安装: {installCheck.missing.slice(0, 3).join('，')}{installCheck.missing.length > 3 ? '...' : ''}</span>
+                    {/if}
+                  </div>
+                {/if}
+              {:else}
                 <div class="flex items-center gap-1.5 mt-2 text-xs">
-                  {#if installCheck.allInstalled}
-                    <span class="text-success">✓ 全部组件已安装</span>
-                  {:else}
-                    <span class="text-warning">⚠ {installCheck.missing.length} 项未安装: {installCheck.missing.slice(0, 3).join('，')}{installCheck.missing.length > 3 ? '...' : ''}</span>
-                  {/if}
+                  <span class="loading loading-dots loading-xs text-primary"></span>
+                  <span class="text-base-content/40">检查安装状态...</span>
                 </div>
               {/if}
             </div>
 
             <!-- 卡片底部：操作按钮 -->
-            <div class="px-4 pb-4 pt-1 flex gap-2 items-center">
-              {#if isActive}
+            <div class="px-4 pb-4 pt-1 flex gap-2 items-center flex-wrap">
+              {#if !installStatusReady}
+                <button class="btn btn-sm btn-disabled" disabled>检查中...</button>
+              {:else if isActive}
                 <button class="btn btn-sm btn-disabled" disabled>当前在用</button>
+              {:else if installCheck.allInstalled}
+                <button class="btn btn-sm btn-ghost" on:click={() => activateEnvOnly(env)} disabled={$operation.active || busy} title="仅切换当前环境标记，不启动组件">激活</button>
+                <button class="btn btn-sm btn-primary" on:click={() => activateEnv(env)} disabled={$operation.active || busy} title="切换标记并启动全部组件">激活并运行</button>
               {:else}
-                <button class="btn btn-sm btn-primary" on:click={() => activateProfile(profile)} disabled={busy}>激活</button>
+                <button class="btn btn-sm btn-warning" on:click={() => installEnvComponents(env)} disabled={$operation.active || busy}>安装</button>
+                <button class="btn btn-sm btn-ghost" on:click={() => activateEnvOnly(env)} disabled={$operation.active || busy} title="仅切换当前环境标记">激活</button>
               {/if}
-              {#if !profile.isBuiltin}
-                <button class="btn btn-sm btn-ghost" on:click={() => openEditProfile(profile)} disabled={busy}>编辑</button>
-                <button class="btn btn-sm btn-ghost text-error" on:click={() => confirmDeleteProfileId = profile.id} disabled={busy}>删除</button>
-              {/if}
+              <button class="btn btn-sm btn-ghost" on:click={() => openEditEnv(env)} disabled={$operation.active || busy}>编辑</button>
+              <button class="btn btn-sm btn-ghost text-error" on:click={() => confirmDeleteEnvId = env.id} disabled={$operation.active || busy}>删除</button>
             </div>
           </div>
         {/each}
@@ -554,8 +716,7 @@ onMount(() => {
       <div class="flex flex-col items-center justify-center py-16 text-base-content/60 gap-2">
         <p class="text-base font-semibold">暂无快照</p>
         <p class="text-sm">快照保存当前所有服务的运行状态和配置</p>
-        <p class="text-xs">创建快照后，您可以随时回滚到该状态</p>
-        <div class="mt-4"><button class="btn btn-primary btn-sm" on:click={createSnapshot} disabled={busy}>{busy ? '创建中...' : '创建第一个快照'}</button></div>
+        <p class="text-xs text-base-content/50">创建快照功能暂未迁移</p>
       </div>
     {:else}
       <div class="flex flex-col gap-2.5">
@@ -576,7 +737,6 @@ onMount(() => {
                   {/if}
                 </div>
                 <div class="flex gap-2 shrink-0">
-                  <button class="btn btn-sm btn-outline" on:click|stopPropagation={() => confirmRollbackId = snap} disabled={busy}>回滚</button>
                   <button class="btn btn-sm btn-ghost text-error" on:click|stopPropagation={() => confirmDeleteId = snap} disabled={busy}>删除</button>
                 </div>
               </div>
@@ -635,90 +795,192 @@ onMount(() => {
   {/if}
 </div>
 
-<!-- Profile Edit Modal -->
-<dialog class="modal" class:modal-open={profileModalOpen && !!editingProfile}>
-  <div class="modal-box max-w-[620px]">
-    <h3 class="font-bold text-lg mb-3">{editingProfile?.id ? '编辑环境' : '新建环境'}</h3>
-    {#if editingProfile}
-      <div class="grid grid-cols-2 gap-3 mb-3.5">
-        <label class="form-control col-span-2"><span class="label-text text-xs text-base-content/70 mb-1">名称 *</span><input class="input input-bordered input-sm" type="text" bind:value={editingProfile.name} placeholder="如：PHP7.4 + MySQL5.7" /></label>
-        <label class="form-control col-span-2"><span class="label-text text-xs text-base-content/70 mb-1">描述</span><input class="input input-bordered input-sm" type="text" bind:value={editingProfile.description} placeholder="可选，简要说明用途" /></label>
-      </div>
+<!-- 安装进度 Modal -->
+<dialog class="modal" class:modal-open={installModal}>
+  <div class="modal-box max-w-[520px]">
+    <h3 class="font-bold text-lg mb-1">安装环境组件</h3>
+    <p class="text-xs text-base-content/60 mb-4">{installingEnv?.name || ''}</p>
 
-      <div class="mb-3.5 p-3 bg-base-200 rounded-lg">
-        <div class="flex justify-between items-center mb-2.5 text-sm font-medium">
-          <span>软件服务</span>
-          <button class="btn btn-sm btn-outline" on:click={addServiceSpec} type="button">+ 添加</button>
-        </div>
-        {#if !editingProfile.services?.length}
-          <div class="text-xs text-base-content/50 py-1">暂无服务，可添加 nginx、mysql、redis 等</div>
-        {/if}
-        {#each editingProfile.services as spec, idx}
-          <div class="grid grid-cols-[1fr_auto] gap-2 mb-1.5">
-            <select class="select select-bordered select-xs" value={spec.id} on:change={(e) => { updateServiceSpec(idx, 'id', e.target.value); const found = availableServices.find(s => s.id === e.target.value); if (found) updateServiceSpec(idx, 'version', found.version) }}>
-              <option value="">选择服务</option>
-              {#each availableServices as s}<option value={s.id}>{s.name} ({s.version})</option>{/each}
-            </select>
-            <button class="btn btn-sm btn-ghost text-error btn-xs" on:click={() => removeServiceSpec(idx)} type="button">移除</button>
+    {#if installTasks.length === 0}
+      <div class="text-sm text-base-content/70 py-4">无需安装</div>
+    {:else}
+      <div class="flex flex-col gap-2.5 max-h-[360px] overflow-y-auto pr-1">
+        {#each installTasks as task}
+          <div class="flex items-center gap-3 px-3 py-2.5 bg-base-200 rounded-lg">
+            <div class="w-5 h-5 shrink-0 flex items-center justify-center">
+              {#if task.status === 'done'}
+                <span class="text-success text-sm">✓</span>
+              {:else if task.status === 'error'}
+                <span class="text-error text-sm">✕</span>
+              {:else if task.status === 'downloading'}
+                <span class="loading loading-spinner loading-xs text-primary"></span>
+              {:else}
+                <span class="w-2 h-2 rounded-full bg-base-content/30"></span>
+              {/if}
+            </div>
+            <div class="flex-1 min-w-0">
+              <div class="text-sm font-medium">{task.name}</div>
+              <div class="text-xs font-mono text-base-content/50">{task.version}</div>
+            </div>
+            <div class="text-right shrink-0 min-w-[60px]">
+              {#if task.status === 'downloading'}
+                <span class="text-xs font-mono text-primary">{task.progress}%</span>
+              {:else if task.status === 'done'}
+                <span class="text-xs text-success">已完成</span>
+              {:else if task.status === 'error'}
+                <span class="text-xs text-error">失败</span>
+              {:else}
+                <span class="text-xs text-base-content/40">等待中</span>
+              {/if}
+            </div>
           </div>
-        {/each}
-      </div>
-
-      <div class="mb-3.5 p-3 bg-base-200 rounded-lg">
-        <div class="flex justify-between items-center mb-2.5 text-sm font-medium">
-          <span>运行时</span>
-          <button class="btn btn-sm btn-outline" on:click={addRuntimeSpec} type="button">+ 添加</button>
-        </div>
-        {#if !editingProfile.runtimes?.length}
-          <div class="text-xs text-base-content/50 py-1">暂无运行时，可添加 php、node、python 等</div>
-        {/if}
-        {#if availableRuntimes.length === 0}
-          <div class="text-xs text-warning py-1">暂无已安装的运行时，请先在「安装软件」页面安装 PHP / Node / Python</div>
-        {/if}
-        {#each editingProfile.runtimes as spec, idx}
-          <div class="grid grid-cols-[1fr_auto] gap-2 mb-1.5">
-            <select class="select select-bordered select-xs" value={spec.runtimeId + '-' + spec.version} on:change={(e) => { const found = availableRuntimes.find(r => r.id === e.target.value); if (found) { updateRuntimeSpec(idx, 'runtimeId', found.type); updateRuntimeSpec(idx, 'version', found.version) } }}>
-              <option value="">选择运行时</option>
-              {#each availableRuntimes as r}<option value={r.id}>{r.name || r.type} ({r.version})</option>{/each}
-            </select>
-            <button class="btn btn-sm btn-ghost text-error btn-xs" on:click={() => removeRuntimeSpec(idx)} type="button">移除</button>
-          </div>
+          {#if task.status === 'downloading'}
+            <progress class="progress progress-primary w-full h-1 -mt-1.5" value={task.progress} max="100"></progress>
+          {/if}
         {/each}
       </div>
     {/if}
+
     <div class="modal-action">
-      <button class="btn btn-ghost" on:click={() => { profileModalOpen = false; editingProfile = null }} disabled={busy}>取消</button>
-      <button class="btn btn-primary" on:click={saveProfile} disabled={busy}>{busy ? '保存中...' : '保存'}</button>
+      {#if installTasks.every(t => t.status === 'done' || t.status === 'cancelled')}
+        <button class="btn btn-primary btn-sm" on:click={closeInstallModal}>完成</button>
+      {:else if installTasks.some(t => t.status === 'error')}
+        <button class="btn btn-ghost btn-sm" on:click={closeInstallModal}>关闭</button>
+      {:else}
+        <button class="btn btn-ghost btn-sm" on:click={cancelInstall}>取消</button>
+      {/if}
     </div>
   </div>
-  <form method="dialog" class="modal-backdrop"><button on:click={() => { profileModalOpen = false; editingProfile = null }}>关闭</button></form>
+  <!-- 安装中禁止点击外部关闭 -->
+  {#if installTasks.every(t => t.status === 'done' || t.status === 'cancelled') || installTasks.some(t => t.status === 'error')}
+    <form method="dialog" class="modal-backdrop"><button on:click={closeInstallModal}>关闭</button></form>
+  {:else}
+    <div class="modal-backdrop"></div>
+  {/if}
 </dialog>
 
-<!-- Delete Profile Confirm -->
-<dialog class="modal" class:modal-open={!!confirmDeleteProfileId}>
+<!-- Environment Edit Modal -->
+<dialog class="modal" class:modal-open={envModalOpen && !!editingEnv}>
+  <div class="modal-box max-w-[620px]">
+    <h3 class="font-bold text-lg mb-3">{editingEnv?.id ? '编辑环境' : '新建环境'}</h3>
+    {#if editingEnv}
+      <div class="grid grid-cols-2 gap-3 mb-3.5">
+        <label class="form-control col-span-2"><span class="label-text text-xs text-base-content/70 mb-1">名称 *</span><input class="input input-bordered input-sm" type="text" bind:value={editingEnv.name} placeholder="如：PHP7.4 + MySQL5.7" /></label>
+        <label class="form-control col-span-2"><span class="label-text text-xs text-base-content/70 mb-1">描述</span><input class="input input-bordered input-sm" type="text" bind:value={editingEnv.description} placeholder="可选，简要说明用途" /></label>
+      </div>
+
+      <div class="mb-3.5 p-3 bg-base-200 rounded-lg">
+        <div class="flex justify-between items-center mb-2.5 text-sm font-medium">
+          <span>组件</span>
+          <span class="text-xs font-normal text-base-content/50">点击卡片选择组件，点击版本或「更多」切换版本</span>
+        </div>
+
+        <!-- 组件类型卡片网格 -->
+        <div class="grid grid-cols-4 gap-2">
+          {#each catalog as c (c.kind)}
+            {@const selected = (editingEnv.units || []).some((u) => u.kind === c.kind)}
+            <button
+              type="button"
+              class="flex items-center gap-1.5 rounded-xl border px-2.5 py-2 transition-all select-none
+                {selected ? 'border-primary bg-primary/10 shadow-sm' : 'border-base-300 bg-base-100 hover:border-primary/60'}"
+              on:click={() => toggleKind(c.kind)}>
+              {#if c.icon}
+                <span class="iconfont text-xl leading-none {c.icon}"></span>
+              {:else}
+                <span class="w-6 h-6 shrink-0 rounded-full bg-base-content/20 flex items-center justify-center text-xs font-bold text-base-content/60">{c.name.charAt(0)}</span>
+              {/if}
+              <span class="text-xs font-medium text-base-content/80 leading-none truncate">{c.name}</span>
+              {#if selected}
+                <span class="ml-auto w-4 h-4 shrink-0 rounded-full bg-primary text-primary-content flex items-center justify-center text-[10px] leading-none">✓</span>
+              {/if}
+            </button>
+          {/each}
+        </div>
+
+        <!-- 已选组件的版本选择 -->
+        {#if (editingEnv.units || []).length > 0}
+          <div class="mt-3 flex flex-col gap-2">
+            {#each editingEnv.units as spec}
+              {@const c = catalog.find((x) => x.kind === spec.kind)}
+              {@const vcache = versionCache[spec.kind]}
+              {@const versions = allVersions(spec.kind)}
+              {@const expanded = !!expandedVersions[spec.kind]}
+              <div class="flex items-start gap-2.5 rounded-lg bg-base-100 border border-base-300 px-3 py-2.5">
+                <div class="flex items-center gap-1.5 w-28 shrink-0 pt-0.5">
+                  {#if c?.icon}
+                    <span class="iconfont text-lg leading-none {c.icon}"></span>
+                  {:else}
+                    <span class="w-4 h-4 rounded-full bg-base-content/20 flex items-center justify-center text-[9px] font-bold text-base-content/50">{(c?.name || spec.kind || '?').charAt(0)}</span>
+                  {/if}
+                  <span class="text-xs font-semibold">{c?.name || spec.kind}</span>
+                </div>
+                <div class="flex-1 min-w-0">
+                  {#if vcache?.loading}
+                    <div class="flex items-center gap-1.5 text-xs text-base-content/50">
+                      <span class="loading loading-dots loading-xs text-primary"></span> 加载版本...
+                    </div>
+                  {:else if versions.length === 0}
+                    <div class="text-xs text-warning">暂无可用版本，可先在「安装软件」页下载对应组件</div>
+                  {:else}
+                    <div class="flex items-center gap-1.5">
+                      <div class="flex-1 min-w-0 flex {expanded ? 'flex-wrap' : 'flex-nowrap overflow-hidden'} gap-1.5">
+                        {#if spec.version && !versions.includes(spec.version)}
+                          <button
+                            type="button"
+                            class="shrink-0 px-2 py-1 rounded-md text-xs font-mono border border-primary bg-primary text-primary-content"
+                            on:click={() => selectVersion(spec.kind, spec.version)}>
+                            {spec.version}（自定义）
+                          </button>
+                        {/if}
+                        {#each versions as ver (ver)}
+                          <button
+                            type="button"
+                            class="shrink-0 px-2 py-1 rounded-md text-xs font-mono border transition-colors
+                              {spec.version === ver
+                                ? 'border-primary bg-primary text-primary-content'
+                                : 'border-base-300 bg-base-100 text-base-content/70 hover:border-primary/60'}"
+                            on:click={() => selectVersion(spec.kind, ver)}>
+                            {ver}
+                            {#if isInstalled(spec.kind, ver)}
+                              <span class="{spec.version === ver ? 'text-primary-content' : 'text-success'}">✓</span>
+                            {/if}
+                          </button>
+                        {/each}
+                      </div>
+                      <button
+                        type="button"
+                        class="shrink-0 px-2 py-1 rounded-md text-xs border border-base-300 bg-base-100 text-base-content/60 hover:border-primary/60"
+                        on:click={() => toggleMore(spec.kind)}>{expanded ? '收起' : '更多'}</button>
+                    </div>
+                  {/if}
+                </div>
+              </div>
+            {/each}
+          </div>
+        {:else}
+          <div class="text-xs text-base-content/50 py-1">从上方卡片选择组件类型开始搭建环境</div>
+        {/if}
+      </div>
+    {/if}
+    <div class="modal-action">
+      <button class="btn btn-ghost" on:click={() => { envModalOpen = false; editingEnv = null }} disabled={busy}>取消</button>
+      <button class="btn btn-primary" on:click={saveEnv} disabled={busy}>{busy ? '保存中...' : '保存'}</button>
+    </div>
+  </div>
+  <form method="dialog" class="modal-backdrop"><button on:click={() => { envModalOpen = false; editingEnv = null }}>关闭</button></form>
+</dialog>
+
+<!-- Delete Environment Confirm -->
+<dialog class="modal" class:modal-open={!!confirmDeleteEnvId}>
   <div class="modal-box">
     <h3 class="font-bold text-lg">确认删除环境</h3>
     <p class="py-2 text-sm text-base-content/70">删除后无法恢复，正在使用该环境的项目将回退到独立配置。</p>
     <div class="modal-action">
-      <button class="btn btn-ghost" on:click={() => confirmDeleteProfileId = null}>取消</button>
-      <button class="btn btn-error" on:click={doDeleteProfile} disabled={busy}>确认删除</button>
+      <button class="btn btn-ghost" on:click={() => confirmDeleteEnvId = null}>取消</button>
+      <button class="btn btn-error" on:click={doDeleteEnv} disabled={busy}>确认删除</button>
     </div>
   </div>
-  <form method="dialog" class="modal-backdrop"><button on:click={() => confirmDeleteProfileId = null}>关闭</button></form>
-</dialog>
-
-<!-- Rollback Confirm -->
-<dialog class="modal" class:modal-open={!!confirmRollbackId}>
-  <div class="modal-box">
-    <h3 class="font-bold text-lg">确认回滚</h3>
-    <p class="py-2 text-sm text-base-content/70">确定要回滚到快照 <code class="bg-base-300 px-1.5 py-0.5 rounded text-xs font-mono">{confirmRollbackId}</code> 吗？</p>
-    <p class="text-xs text-warning">当前运行中的服务状态将被覆盖。</p>
-    <div class="modal-action">
-      <button class="btn btn-ghost" on:click={() => confirmRollbackId = null}>取消</button>
-      <button class="btn btn-error" on:click={doRollback} disabled={busy}>确认回滚</button>
-    </div>
-  </div>
-  <form method="dialog" class="modal-backdrop"><button on:click={() => confirmRollbackId = null}>关闭</button></form>
+  <form method="dialog" class="modal-backdrop"><button on:click={() => confirmDeleteEnvId = null}>关闭</button></form>
 </dialog>
 
 <!-- Delete Snapshot Confirm -->
@@ -729,7 +991,7 @@ onMount(() => {
     <p class="text-xs text-warning">删除后无法恢复。</p>
     <div class="modal-action">
       <button class="btn btn-ghost" on:click={() => confirmDeleteId = null}>取消</button>
-      <button class="btn btn-error" on:click={doDelete} disabled={busy}>确认删除</button>
+      <button class="btn btn-error" on:click={doDeleteSnapshot} disabled={busy}>确认删除</button>
     </div>
   </div>
   <form method="dialog" class="modal-backdrop"><button on:click={() => confirmDeleteId = null}>关闭</button></form>

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -87,51 +88,54 @@ func (m *Manager) registerReactiveRules() {
 	))
 }
 
+func kindFromID(id string) string {
+	if idx := strings.IndexByte(id, '@'); idx > 0 {
+		return id[:idx]
+	}
+	return id
+}
+
 func (m *Manager) registerDefaults() {
 	installDir := m.cfg.Get().InstallDir
 	manifest := registry.Builtin()
 
 	for _, pkg := range manifest.List("") {
 		svcType := serviceTypeFromPkg(pkg.Type)
-		if svcType == "" {
-			continue
-		}
-		// PHP 归 runtime 管理，不在 service 中注册
-		if svcType == core.TypePHP {
+		if svcType == "" || svcType == core.TypePHP {
 			continue
 		}
 		cat := serviceCategoryFromPkg(pkg.Category)
 
-		m.services[pkg.ID] = &ServiceInstance{
-			Info: core.ServiceInfo{
-				ID: pkg.ID, Name: pkg.Name, Type: svcType,
-				Category: cat,
-				Version:  pkg.DefaultVersion, Port: pkg.DefaultPort,
-				Status: core.StatusStopped,
-			},
+		svcDir := filepath.Join(installDir, "programs", string(svcType))
+		entries, err := os.ReadDir(svcDir)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			version := entry.Name()
+			verDir := filepath.Join(svcDir, version)
+			if !dirExists(verDir) {
+				continue
+			}
+			id := string(svcType) + "@" + version
+			m.services[id] = &ServiceInstance{
+				Info: core.ServiceInfo{
+					ID: id, Kind: string(svcType), Name: pkg.Name,
+					Type: svcType, Category: cat,
+					Version: version, Port: pkg.DefaultPort,
+					Status: core.StatusStopped, Installed: true,
+				},
+			}
 		}
 	}
 	for _, s := range m.services {
-		svcDir := filepath.Join(installDir, "programs", string(s.Info.Type))
-		entries, err := os.ReadDir(svcDir)
-		if err == nil {
-			for _, entry := range entries {
-				if entry.IsDir() {
-					verDir := filepath.Join(svcDir, entry.Name())
-					if dirExists(verDir) {
-						s.Info.Version = entry.Name()
-						s.Info.Installed = true
-						break
-					}
-				}
-			}
-		}
-		if s.Info.Installed {
-			pid := process.FindPIDByPort(s.Info.Port)
-			if pid > 0 {
-				s.Info.Status = core.StatusRunning
-				s.Info.PID = pid
-			}
+		pid := process.FindPIDByPort(s.Info.Port)
+		if pid > 0 {
+			s.Info.Status = core.StatusRunning
+			s.Info.PID = pid
 		}
 	}
 }
@@ -139,13 +143,9 @@ func (m *Manager) registerDefaults() {
 var serviceOrder = []string{"nginx", "apache", "mysql", "postgresql", "mongodb", "redis", "memcached", "node", "python", "composer"}
 
 func (m *Manager) matchConfigHandler(id string) ConfigHandler {
-	if h, ok := configHandlers[id]; ok {
+	kind := kindFromID(id)
+	if h, ok := configHandlers[kind]; ok {
 		return h
-	}
-	if idx := strings.IndexByte(id, '-'); idx > 0 {
-		if h, ok := configHandlers[id[:idx]]; ok {
-			return h
-		}
 	}
 	return nil
 }
@@ -212,17 +212,93 @@ func (m *Manager) List() []core.ServiceInfo {
 
 	portPIDMap := process.FindAllPIDsByPort()
 
-	result := make([]core.ServiceInfo, 0, len(servicesCopy))
-	for _, id := range serviceOrder {
-		s, ok := servicesCopy[id]
-		if !ok {
-			continue
-		}
+	orderMap := make(map[string]int, len(serviceOrder))
+	for i, kind := range serviceOrder {
+		orderMap[kind] = i
+	}
+	type entry struct {
+		info core.ServiceInfo
+		kind string
+	}
+	entries := make([]entry, 0, len(servicesCopy))
+	for _, s := range servicesCopy {
 		info := m.syncServiceState(s, portPIDMap)
-		result = append(result, info)
+		entries = append(entries, entry{info: info, kind: kindFromID(info.ID)})
+	}
+	sort.SliceStable(entries, func(i, j int) bool {
+		oi, oki := orderMap[entries[i].kind]
+		oj, okj := orderMap[entries[j].kind]
+		if !oki { oi = len(serviceOrder) }
+		if !okj { oj = len(serviceOrder) }
+		if oi != oj { return oi < oj }
+		return entries[i].info.ID < entries[j].info.ID
+	})
+	result := make([]core.ServiceInfo, len(entries))
+	for i, e := range entries {
+		result[i] = e.info
 	}
 
-	return result
+	// 同端口多个版本只会有一个真正在运行：通过监听进程的可执行文件路径判定归属版本。
+	return m.resolvePortConflicts(result, portPIDMap)
+}
+
+// resolvePortConflicts 同一端口被多个版本的服务实例占用时（如 nginx 1.20/1.24/1.26 共享 80 端口），
+// 只允许可执行文件路径匹配到安装目录的版本显示"运行中"，其余版本保持"已停止"。
+func (m *Manager) resolvePortConflicts(infos []core.ServiceInfo, portPIDMap map[int]int) []core.ServiceInfo {
+	type portGroup struct {
+		pid int
+		idx []int
+	}
+	groups := make(map[int]*portGroup)
+	for i := range infos {
+		info := &infos[i]
+		if info.Status != core.StatusRunning || info.Port <= 0 {
+			continue
+		}
+		g := groups[info.Port]
+		if g == nil {
+			g = &portGroup{pid: portPIDMap[info.Port]}
+			groups[info.Port] = g
+		}
+		g.idx = append(g.idx, i)
+	}
+
+	installDir := m.cfg.Get().InstallDir
+	for _, g := range groups {
+		if len(g.idx) < 2 || g.pid <= 0 {
+			continue
+		}
+		owner := -1
+		for _, i := range g.idx {
+			info := &infos[i]
+			if exePathMatchesPID(g.pid, installDir, info.Kind, info.Version) {
+				owner = i
+				break
+			}
+		}
+		if owner < 0 {
+			// 无法匹配（进程已退出或 wmic 失败）：保留排序靠前的版本
+			owner = g.idx[0]
+		}
+		for _, i := range g.idx {
+			if i == owner {
+				continue
+			}
+			infos[i].Status = core.StatusStopped
+			infos[i].PID = 0
+		}
+	}
+	return infos
+}
+
+// exePathMatchesPID 判断端口监听进程的 exe 路径是否落在 installDir/programs/<kind>/<version> 目录下。
+func exePathMatchesPID(pid int, installDir, kind, version string) bool {
+	exe := process.GetExecutablePath(pid)
+	if exe == "" {
+		return false
+	}
+	installPath := strings.ToLower(filepath.Join(installDir, "programs", kind, version))
+	return strings.Contains(strings.ToLower(exe), installPath)
 }
 
 func (m *Manager) Get(id string) (core.ServiceInfo, error) {
@@ -253,13 +329,13 @@ func (m *Manager) Start(id string) error {
 		return nil
 	}
 
-	providerName := id
-
+	kind := kindFromID(id)
 	version := s.Info.Version
 	port := s.Info.Port
+	s.Info.Status = core.StatusStarting
 	m.mu.Unlock()
 
-	p := provider.Get(providerName)
+	p := provider.Get(kind)
 	if p == nil {
 		return fmt.Errorf("不支持的的服务类型: %s", id)
 	}
@@ -270,9 +346,19 @@ func (m *Manager) Start(id string) error {
 	}
 	entity, err := p.NewInstance(context.Background(), config)
 	if err != nil {
+		m.mu.Lock()
+		if si, ok := m.services[id]; ok {
+			si.Info.Status = core.StatusStopped
+		}
+		m.mu.Unlock()
 		return err
 	}
 	if err := entity.Start(context.Background()); err != nil {
+		m.mu.Lock()
+		if si, ok := m.services[id]; ok {
+			si.Info.Status = core.StatusStopped
+		}
+		m.mu.Unlock()
 		return err
 	}
 	pid := process.FindPIDByPort(port)
@@ -323,9 +409,9 @@ func (m *Manager) Stop(id string) error {
 		s.stopped = nil
 	}
 
-	providerName := id
+	kind := kindFromID(id)
 
-	p := provider.Get(providerName)
+	p := provider.Get(kind)
 	if p != nil {
 		config := map[string]interface{}{
 			"version": s.Info.Version,
@@ -345,6 +431,23 @@ func (m *Manager) Stop(id string) error {
 		if pid > 0 {
 			s.Info.Status = core.StatusStopping
 			m.procMgr.Stop(pid)
+		}
+	}
+
+	// 兜底：端口仍被占用时强制终止，并校验停止确实生效，避免"报成功但进程仍在"
+	if s.Info.Port > 0 {
+		if pid := process.FindPIDByPort(s.Info.Port); pid > 0 {
+			m.procMgr.Stop(pid)
+		}
+		for j := 0; j < 6; j++ {
+			time.Sleep(500 * time.Millisecond)
+			if process.FindPIDByPort(s.Info.Port) == 0 {
+				break
+			}
+		}
+		if pid := process.FindPIDByPort(s.Info.Port); pid > 0 {
+			m.mu.Unlock()
+			return fmt.Errorf("服务 %s 停止失败: 端口 %d 仍被进程 %d 占用", id, s.Info.Port, pid)
 		}
 	}
 
@@ -498,7 +601,7 @@ func (m *Manager) Uninstall(id string) error {
 	}
 
 	installDir := m.cfg.Get().InstallDir
-	binPath := filepath.Join(installDir, "programs", id, s.Info.Version)
+	binPath := filepath.Join(installDir, "programs", kindFromID(id), s.Info.Version)
 	if dirExists(binPath) {
 		if err := removeAll(id, binPath); err != nil {
 			return fmt.Errorf("删除安装目录失败: %w", err)
@@ -510,51 +613,62 @@ func (m *Manager) Uninstall(id string) error {
 	return nil
 }
 
+// SetVersion registers a version for a given service kind.
+// In the kind@version model, this is effectively a no-op since
+// version is baked into the ID. Kept for compatibility with engine.
 func (m *Manager) SetVersion(id, version string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-
-	s, ok := m.services[id]
-	if !ok {
+	entryID := kindFromID(id) + "@" + version
+	if _, ok := m.services[entryID]; !ok {
 		return core.ErrServiceNotFound
 	}
-
-	installDir := m.cfg.Get().InstallDir
-	binPath := filepath.Join(installDir, id, version)
-	if !dirExists(binPath) {
-		return fmt.Errorf("版本 %s 未安装", version)
-	}
-
-	s.Info.Version = version
-	s.Info.Installed = true
 	return nil
+}
+
+var kindNames = map[string]string{
+	"nginx": "Nginx", "mysql": "MySQL", "redis": "Redis",
+	"memcached": "Memcached", "apache": "Apache", "mongodb": "MongoDB",
+	"postgresql": "PostgreSQL", "composer": "Composer",
 }
 
 func (m *Manager) MarkInstalled(id, version string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// PHP 归 runtime 管理，不在 service 中处理
-	if id == "php" {
+	kind := kindFromID(id)
+	if kind == "php" {
 		return
 	}
-
-	if s, ok := m.services[id]; ok {
-		s.Info.Version = version
+	entryID := kind + "@" + version
+	if s, ok := m.services[entryID]; ok {
 		s.Info.Installed = true
+		return
+	}
+	m.services[entryID] = &ServiceInstance{
+		Info: core.ServiceInfo{
+			ID: entryID, Kind: kind, Name: kindNames[kind],
+			Type: core.ServiceType(kind),
+			Version: version, Installed: true,
+			Status: core.StatusStopped,
+		},
 	}
 }
 
 func (m *Manager) SaveConfig(id string, values map[string]string) error {
+	handler := m.matchConfigHandler(id)
+	if handler == nil {
+		return nil
+	}
+	if kindFromID(id) == "php" {
+		// PHP 属运行时，配置为全局（PHPSettings），不依赖 ServiceInstance
+		return handler.SaveConfig(nil, m.cfg, values)
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	s, ok := m.services[id]
 	if !ok {
 		return core.ErrServiceNotFound
-	}
-	handler := m.matchConfigHandler(id)
-	if handler == nil {
-		return nil
 	}
 	return handler.SaveConfig(s, m.cfg, values)
 }
@@ -562,6 +676,16 @@ func (m *Manager) SaveConfig(id string, values map[string]string) error {
 func (m *Manager) Configure(id string) error {
 	m.mu.Lock()
 	s, ok := m.services[id]
+	if !ok {
+		kind := kindFromID(id)
+		for _, cand := range m.services {
+			if cand.Info.Kind == kind {
+				s = cand
+				ok = true
+				break
+			}
+		}
+	}
 	if !ok {
 		m.mu.Unlock()
 		return core.ErrServiceNotFound
@@ -578,7 +702,7 @@ func (m *Manager) Configure(id string) error {
 	txn := tx.NewTransaction("configure-" + id)
 
 	installDir := m.cfg.Get().InstallDir
-	configPath := filepath.Join(installDir, "programs", id, oldVersion, "conf")
+	configPath := filepath.Join(installDir, "programs", kindFromID(id), oldVersion, "conf")
 	backupPath := configPath + ".bak"
 
 	txn.
@@ -675,8 +799,14 @@ func (m *Manager) CheckMySQLRootAuth() (bool, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	s, ok := m.services["mysql"]
-	if !ok {
+	var s *ServiceInstance
+	for id, inst := range m.services {
+		if strings.HasPrefix(id, "mysql@") {
+			s = inst
+			break
+		}
+	}
+	if s == nil {
 		return false, fmt.Errorf("MySQL 服务未注册")
 	}
 
@@ -739,8 +869,9 @@ func (m *Manager) UninstallVersion(serviceType, version string) error {
 
 	m.mu.Unlock()
 
+	entryID := serviceType + "@" + version
 	compensator := tx.NewCompensator()
-	txn := tx.NewTransaction("uninstall-" + serviceType + "-" + version)
+	txn := tx.NewTransaction("uninstall-" + entryID)
 
 	binPath := filepath.Join(installDir, "programs", serviceType, version)
 	backupPath := binPath + ".backup"
@@ -749,8 +880,8 @@ func (m *Manager) UninstallVersion(serviceType, version string) error {
 		Step("stop-service", func(ctx context.Context) error {
 			m.mu.Lock()
 			defer m.mu.Unlock()
-			if s, ok := m.services[serviceType]; ok {
-				if s.Info.Version == version && s.Info.PID > 0 {
+			if s, ok := m.services[entryID]; ok {
+				if s.Info.PID > 0 {
 					if s.stopped != nil {
 						close(s.stopped)
 						s.stopped = nil
@@ -769,13 +900,11 @@ func (m *Manager) UninstallVersion(serviceType, version string) error {
 		Step("update-service-state", func(ctx context.Context) error {
 			m.mu.Lock()
 			defer m.mu.Unlock()
-			if s, ok := m.services[serviceType]; ok {
-				if s.Info.Version == version {
-					s.Info.Installed = false
-					s.Info.Status = core.StatusStopped
-					s.Info.PID = 0
-					s.process = nil
-				}
+			if s, ok := m.services[entryID]; ok {
+				s.Info.Installed = false
+				s.Info.Status = core.StatusStopped
+				s.Info.PID = 0
+				s.process = nil
 			}
 			return nil
 		}, compensator.Noop()).

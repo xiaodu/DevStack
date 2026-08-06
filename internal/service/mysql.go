@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"syscall"
 
 	"github.com/xiaodu/DevStack/internal/config"
@@ -30,6 +31,14 @@ skip-networking=0
 log-error=error.log
 general_log=0
 
+character-set-server=utf8mb4
+collation-server=utf8mb4_unicode_ci
+sql-mode=STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION
+skip-name-resolve=0
+
+slow_query_log=0
+long_query_time=2
+
 innodb_buffer_pool_size = 256M
 innodb_log_file_size = 64M
 innodb_flush_log_at_trx_commit = 2
@@ -38,6 +47,12 @@ tmp_table_size = 64M
 max_heap_table_size = 64M
 thread_cache_size = 8
 table_open_cache = 400
+
+max_allowed_packet = 16M
+key_buffer_size = 64M
+sort_buffer_size = 2M
+join_buffer_size = 2M
+wait_timeout = 28800
 `, mysqlDir, dataDir, s.Info.Port)
 		if err := os.WriteFile(myIni, []byte(ini), 0644); err != nil {
 			return err
@@ -117,6 +132,58 @@ func (h *MySQLHandler) SaveConfig(s *ServiceInstance, cfg *config.Config, values
 		mc.Port = n
 		changed = true
 	}
+	if v, ok := values["characterSet"]; ok {
+		mc.CharacterSet = v
+		changed = true
+	}
+	if v, ok := values["collation"]; ok {
+		mc.Collation = v
+		changed = true
+	}
+	if v, ok := values["sqlMode"]; ok {
+		mc.SQLMode = v
+		changed = true
+	}
+	if v, ok := values["skipNameResolve"]; ok {
+		mc.SkipNameResolve, _ = strconv.ParseBool(v)
+		changed = true
+	}
+	if v, ok := values["generalLog"]; ok {
+		mc.GeneralLog, _ = strconv.ParseBool(v)
+		changed = true
+	}
+	if v, ok := values["slowQueryLog"]; ok {
+		mc.SlowQueryLog, _ = strconv.ParseBool(v)
+		changed = true
+	}
+	if v, ok := values["longQueryTime"]; ok {
+		var n int
+		fmt.Sscanf(v, "%d", &n)
+		mc.LongQueryTime = n
+		changed = true
+	}
+	if v, ok := values["maxAllowedPacket"]; ok {
+		mc.MaxAllowedPacket = v
+		changed = true
+	}
+	if v, ok := values["keyBufferSize"]; ok {
+		mc.KeyBufferSize = v
+		changed = true
+	}
+	if v, ok := values["waitTimeout"]; ok {
+		var n int
+		fmt.Sscanf(v, "%d", &n)
+		mc.WaitTimeout = n
+		changed = true
+	}
+	if v, ok := values["sortBufferSize"]; ok {
+		mc.SortBufferSize = v
+		changed = true
+	}
+	if v, ok := values["joinBufferSize"]; ok {
+		mc.JoinBufferSize = v
+		changed = true
+	}
 
 	if changed {
 		settings.MySQLConfig = mc
@@ -133,7 +200,15 @@ port=%d
 bind-address=%s
 skip-networking=0
 log-error=error.log
-general_log=0
+general_log=%d
+
+character-set-server=%s
+collation-server=%s
+sql-mode=%s
+skip-name-resolve=%d
+
+slow_query_log=%d
+long_query_time=%d
 
 innodb_buffer_pool_size = %s
 innodb_log_file_size = %s
@@ -143,10 +218,21 @@ tmp_table_size = %s
 max_heap_table_size = %s
 thread_cache_size = %d
 table_open_cache = %d
+
+max_allowed_packet = %s
+key_buffer_size = %s
+sort_buffer_size = %s
+join_buffer_size = %s
+wait_timeout = %d
 `, mysqlDir, dataDir, mc.Port, mc.BindAddress,
+		boolInt(mc.GeneralLog),
+		mc.CharacterSet, mc.Collation, mc.SQLMode, boolInt(mc.SkipNameResolve),
+		boolInt(mc.SlowQueryLog), mc.LongQueryTime,
 		mc.InnoDBBufferPoolSize, mc.InnoDBLogFileSize, mc.InnoDBFlushLogAtTrxCommit,
 		mc.MaxConnections, mc.TmpTableSize, mc.MaxHeapTableSize,
-		mc.ThreadCacheSize, mc.TableOpenCache)
+		mc.ThreadCacheSize, mc.TableOpenCache,
+		mc.MaxAllowedPacket, mc.KeyBufferSize, mc.SortBufferSize, mc.JoinBufferSize,
+		mc.WaitTimeout)
 
 	if err := os.WriteFile(myIni, []byte(ini), 0644); err != nil {
 		return err

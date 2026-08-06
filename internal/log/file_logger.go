@@ -167,6 +167,18 @@ func (l *FileLogger) Close() {
 	l.writer.Close()
 }
 
+// Clear 清空当前日志文件内容（后续写入会自动重新打开文件）。
+func (l *FileLogger) Clear() error {
+	if l.writer == nil {
+		return nil
+	}
+	l.writer.Close()
+	if _, err := os.Stat(l.writer.Filename); os.IsNotExist(err) {
+		return nil
+	}
+	return os.Truncate(l.writer.Filename, 0)
+}
+
 func splitLines(s string) []string {
 	var lines []string
 	var current []byte

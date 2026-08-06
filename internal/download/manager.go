@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/xiaodu/DevStack/internal/registry"
@@ -30,12 +31,22 @@ type ProgressCallback func(downloaded, total int64)
 type Manager struct {
 	client     *http.Client
 	installDir string
+	cancels    sync.Map // key(string) -> context.CancelFunc
 }
 
 func NewManager(installDir string) *Manager {
 	return &Manager{
 		client:     &http.Client{Timeout: 30 * time.Minute},
 		installDir: installDir,
+	}
+}
+
+// Cancel 中止指定 key 的下载任务。若任务已结束则无操作。
+func (m *Manager) Cancel(key string) {
+	if v, ok := m.cancels.LoadAndDelete(key); ok {
+		if cancel, ok := v.(context.CancelFunc); ok {
+			cancel()
+		}
 	}
 }
 

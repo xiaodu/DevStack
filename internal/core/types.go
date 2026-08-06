@@ -34,16 +34,16 @@ const (
 )
 
 type ServiceInfo struct {
-	ID        string        `json:"id"`
-	Name      string        `json:"name"`
+	ID        string        `json:"id"`        // "nginx@1.24.0"
+	Kind      string        `json:"kind"`      // "nginx"
+	Name      string        `json:"name"`      // "Nginx"
 	Type      ServiceType   `json:"type"`
 	Category  string        `json:"category"`
-	Version   string        `json:"version"`
+	Version   string        `json:"version"`   // "1.24.0"
 	Status    ServiceStatus `json:"status"`
 	Port      int           `json:"port"`
 	PID       int           `json:"pid"`
 	Installed bool          `json:"installed"`
-	AutoStart bool          `json:"autoStart"`
 	Error     string        `json:"error,omitempty"`
 	Uptime    string        `json:"uptime,omitempty"`
 }
@@ -59,7 +59,8 @@ const (
 )
 
 type RuntimeInfo struct {
-	ID        string        `json:"id"`        // "php-8.3"
+	ID        string        `json:"id"`        // "php@7.4.33"
+	Kind      string        `json:"kind"`      // "php"
 	Type      RuntimeType   `json:"type"`
 	Version   string        `json:"version"`
 	Path      string        `json:"path"`
@@ -168,6 +169,17 @@ type PHPSettings struct {
 	DisplayErrors       bool   `json:"displayErrors"`
 	OPcacheEnabled      bool   `json:"opcacheEnabled"`
 	RealpathCacheSize   string `json:"realpathCacheSize"`
+
+	MaxInputTime         int    `json:"maxInputTime"`
+	MaxInputVars         int    `json:"maxInputVars"`
+	MaxFileUploads       int    `json:"maxFileUploads"`
+	Timezone             string `json:"timezone"`
+	DefaultCharset       string `json:"defaultCharset"`
+	FileUploads          bool   `json:"fileUploads"`
+	SessionGCMaxLifetime int    `json:"sessionGCMaxLifetime"`
+	LogErrors            bool   `json:"logErrors"`
+	ErrorLog             string `json:"errorLog"`
+	FixPathinfo          bool   `json:"fixPathinfo"`
 }
 
 type MySQLSettings struct {
@@ -181,6 +193,19 @@ type MySQLSettings struct {
 	TableOpenCache           int    `json:"tableOpenCache"`
 	BindAddress              string `json:"bindAddress"`
 	Port                     int    `json:"port"`
+
+	CharacterSet      string `json:"characterSet"`
+	Collation         string `json:"collation"`
+	SQLMode           string `json:"sqlMode"`
+	SkipNameResolve   bool   `json:"skipNameResolve"`
+	GeneralLog        bool   `json:"generalLog"`
+	SlowQueryLog      bool   `json:"slowQueryLog"`
+	LongQueryTime     int    `json:"longQueryTime"`
+	MaxAllowedPacket  string `json:"maxAllowedPacket"`
+	KeyBufferSize     string `json:"keyBufferSize"`
+	WaitTimeout       int    `json:"waitTimeout"`
+	SortBufferSize    string `json:"sortBufferSize"`
+	JoinBufferSize    string `json:"joinBufferSize"`
 }
 
 type SystemInfo struct {

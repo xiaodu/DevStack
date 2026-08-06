@@ -58,7 +58,7 @@ func (p *PHPProvider) NewInstance(ctx context.Context, config map[string]interfa
 	installDir := p.cfg.Get().InstallDir
 	phpDir := filepath.Join(installDir, "programs", "php", version)
 
-	instanceID := "php-" + version
+	instanceID := "php@" + version
 	if existing, ok := p.instances[instanceID]; ok {
 		return existing, nil
 	}
@@ -109,7 +109,7 @@ func (p *PHPProvider) Install(ctx context.Context, version string) error {
 }
 
 func (p *PHPProvider) Uninstall(ctx context.Context, version string) error {
-	instanceID := "php-" + version
+	instanceID := "php@" + version
 	if instance, ok := p.instances[instanceID]; ok {
 		instance.Stop(ctx)
 		if p.resMgr != nil {
@@ -228,21 +228,24 @@ func (i *PHPInstance) Start(ctx context.Context) error {
 }
 
 func (i *PHPInstance) Stop(ctx context.Context) error {
-	if i.pid <= 0 {
+	if i.pid <= 0 && process.FindPIDByPort(i.port) == 0 {
+		i.status = core.StatusStopped
 		return nil
 	}
 	i.status = core.StatusStopping
 
 	pid := i.pid
-	process.NewManager().Stop(pid)
+	if pid <= 0 {
+		pid = stopProcessByPort(i.port, "php-cgi.exe")
+	}
+	if pid > 0 {
+		process.NewManager().Stop(pid)
+	}
 
 	killAllByName("php-cgi.exe")
 
-	for j := 0; j < 6; j++ {
-		time.Sleep(500 * time.Millisecond)
-		if !process.NewManager().IsRunning(pid) {
-			break
-		}
+	if !waitPortReleased(i.port, 3*time.Second) {
+		return fmt.Errorf("PHP stop failed: port %d still listening", i.port)
 	}
 
 	i.pid = 0

@@ -55,7 +55,8 @@ func (r *SimpleRule) Execute(ctx context.Context, event *Event) error {
 }
 
 type RuleSet struct {
-	rules sync.Map
+	mu    sync.RWMutex
+	rules []Rule
 }
 
 func NewRuleSet() *RuleSet {
@@ -63,22 +64,37 @@ func NewRuleSet() *RuleSet {
 }
 
 func (rs *RuleSet) AddRule(rule Rule) {
-	rs.rules.Store(rule.Name(), rule)
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	for i, r := range rs.rules {
+		if r.Name() == rule.Name() {
+			rs.rules[i] = rule
+			return
+		}
+	}
+	rs.rules = append(rs.rules, rule)
 }
 
 func (rs *RuleSet) RemoveRule(name string) {
-	rs.rules.Delete(name)
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	for i, r := range rs.rules {
+		if r.Name() == name {
+			rs.rules = append(rs.rules[:i], rs.rules[i+1:]...)
+			return
+		}
+	}
 }
 
 func (rs *RuleSet) GetRules(eventType EventType) []Rule {
+	rs.mu.RLock()
+	defer rs.mu.RUnlock()
 	var rules []Rule
-	rs.rules.Range(func(key, value interface{}) bool {
-		rule := value.(Rule)
-		if rule.When(eventType) {
-			rules = append(rules, rule)
+	for _, r := range rs.rules {
+		if r.When(eventType) {
+			rules = append(rules, r)
 		}
-		return true
-	})
+	}
 	return rules
 }
 

@@ -1,12 +1,21 @@
 <script lang="ts">
 import { onMount } from 'svelte'
 import { api } from '../lib/api'
-import { addToast, globalLoading, nanoLoading, nanoStatusMsg, refreshSignal, statusMessage } from '../lib/stores'
+import { subscribeOperationEvents } from '../lib/events'
+import {
+  addToast,
+  globalLoading,
+  nanoLoading,
+  nanoRefresh,
+  nanoStatusMsg,
+  nanoSyncInfo,
+  refreshSignal,
+  statusMessage,
+} from '../lib/stores'
 
 let services = []
 let runtimes = []
 let sites = []
-let systemInfo = {}
 let hasLoaded = false
 let loadError = false
 let envSummary = {
@@ -28,22 +37,27 @@ const serviceMeta = {
   redis: { label: 'Redis', cls: 'icon-redis', color: '#DC382D' },
 }
 
-// 运行时颜色（用于卡片顶部色条和首字母圆标）
+// 运行时颜色（用于卡片顶部色条和图标背景）
 const runtimeMeta = {
-  php: { color: '#777BB4', label: 'PHP' },
-  node: { color: '#339933', label: 'Node.js' },
-  python: { color: '#3776AB', label: 'Python' },
+  php: { color: '#777BB4', label: 'PHP', cls: 'icon-php1' },
+  node: { color: '#339933', label: 'Node.js', cls: 'icon-Nodejs' },
+  python: { color: '#3776AB', label: 'Python', cls: 'icon-python' },
 }
 
-async function load() {
+async function load(silent = false) {
   // 并发去重：如果已经在加载中，跳过本次请求
   if (isLoading) {
     return
   }
   isLoading = true
   loadError = false
-  nanoLoading.set(true)
-  nanoStatusMsg.set('正在加载服务数据…')
+  // 仅在首次加载显示全屏遮罩；进入其他页面触发的同步在状态栏提示，避免遮罩打扰
+  const showOverlay = !silent || !hasLoaded
+  if (showOverlay) {
+    nanoLoading.set(true)
+    nanoStatusMsg.set('正在加载服务数据…')
+  }
+  nanoSyncInfo.set({ syncing: true, msg: '正在同步服务状态…', at: nanoSyncInfo.get().at })
 
   // 全局超时保护：确保 nanoLoading 不会被永久卡住
   let globalTimedOut = false
@@ -52,6 +66,7 @@ async function load() {
     console.warn('[Dashboard] load 全局超时(10s)，强制结束加载状态')
     nanoLoading.set(false)
     nanoStatusMsg.set('')
+    nanoSyncInfo.set({ syncing: false, msg: '同步超时', at: '' })
     loadError = true
     hasLoaded = true
     isLoading = false
@@ -60,15 +75,14 @@ async function load() {
   try {
     const timeout = (ms) => new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), ms))
     const wrap = (p, fallback) => Promise.race([p, timeout(8000)]).catch(() => fallback)
-    const [s, r, st, info, opEntries, env, snaps, profileList] = await Promise.all([
+    const [s, r, st, opEntries, env, snaps, profileList] = await Promise.all([
       wrap(api.getServices(), []),
       wrap(api.getRuntimes(), []),
       wrap(api.getProjects(), []),
-      wrap(api.getSystemInfo(), {}),
       wrap(api.getRecentOps(100), []),
       wrap(api.getEnvironment(), { services: {}, runtimes: {}, projects: {}, activeProfileID: '' }),
       wrap(api.getSnapshots(), []),
-      wrap(api.listEnvironmentProfiles(), []),
+      wrap(api.listEnvironments(), []),
     ])
 
     // 如果全局超时已触发，放弃本次结果
@@ -79,7 +93,6 @@ async function load() {
     services = s
     runtimes = r
     sites = st
-    systemInfo = info
     ops = opEntries || []
     activeEnv = env
     profiles = profileList || []
@@ -101,30 +114,21 @@ async function load() {
     clearTimeout(globalTimeout)
     if (!globalTimedOut) {
       isLoading = false
-      nanoLoading.set(false)
-      if (!loadError) nanoStatusMsg.set('就绪')
+      if (showOverlay) {
+        nanoLoading.set(false)
+        if (!loadError) nanoStatusMsg.set('就绪')
+      }
+      nanoSyncInfo.set({
+        syncing: false,
+        msg: loadError ? '同步失败' : '',
+        at: new Date().toLocaleTimeString('zh-CN', { hour12: false }),
+      })
     }
   }
 }
 
-// 将 profile.services / profile.runtimes 统一转换为数组
-// 后端返回 map[string]Spec，浏览器 mock 用数组，两种都兼容
-function toSpecArray(spec) {
-  if (!spec) return []
-  if (Array.isArray(spec)) return spec
-  if (typeof spec === 'object') {
-    // map 形式：key 是 id/runtimeId，value 是 { version, ... }
-    return Object.entries(spec).map(([key, val]) => ({
-      id: val.id || key,
-      runtimeId: val.runtimeId || key,
-      version: val.version,
-      default: val.default,
-    }))
-  }
-  return []
-}
-
 // 根据当前激活的环境模板，构建需要展示的卡片列表
+// 环境模板（profile.units）声明了组件清单，实际运行状态从服务/运行时列表匹配
 function buildActiveCards(env, profileList, svcList, rtList) {
   const cards = []
   if (!env || !env.activeProfileID || !profileList) return cards
@@ -132,38 +136,35 @@ function buildActiveCards(env, profileList, svcList, rtList) {
   const profile = profileList.find((p) => p.id === env.activeProfileID)
   if (!profile) return cards
 
-  const serviceSpecs = toSpecArray(profile.services)
-  const runtimeSpecs = toSpecArray(profile.runtimes)
-
-  // 服务卡片
-  for (const spec of serviceSpecs) {
-    const svc = svcList.find((s) => s.id === spec.id)
-    const name = svc?.name || spec.id
-    cards.push({
-      name,
-      initial: name.charAt(0).toUpperCase(),
-      version: svc?.version || spec.version,
-      status: svc?.status || 'stopped',
-      installed: svc?.installed ?? false,
-      color: (serviceMeta[spec.id] || {}).color || 'var(--p)',
-    })
-  }
-
-  // 运行时卡片
-  for (const spec of runtimeSpecs) {
-    const rt = rtList.find((r) => r.type === spec.runtimeId || r.id === spec.runtimeId + '-' + spec.version)
-    const meta = runtimeMeta[spec.runtimeId] || {}
-    const name = meta.label
-      ? meta.label + ' ' + (rt?.version || spec.version)
-      : rt?.name || spec.runtimeId + ' ' + spec.version
-    cards.push({
-      name,
-      initial: name.charAt(0).toUpperCase(),
-      version: rt?.version || spec.version,
-      status: rt?.running ? 'running' : 'stopped',
-      installed: rt?.installed ?? false,
-      color: (runtimeMeta[spec.runtimeId] || {}).color || 'var(--p)',
-    })
+  const units = Array.isArray(profile.units) ? profile.units : []
+  for (const u of units) {
+    const id = `${u.kind}@${u.version}`
+    if (u.kind === 'php' || u.kind === 'node' || u.kind === 'python') {
+      const rt = rtList.find((r) => r.id === id)
+      const meta = runtimeMeta[u.kind] || {}
+      const name = meta.label ? `${meta.label} ${u.version}` : u.name || `${u.kind} ${u.version}`
+      cards.push({
+        name,
+        initial: name.charAt(0).toUpperCase(),
+        iconCls: (runtimeMeta[u.kind] || {}).cls || '',
+        version: u.version,
+        status: rt?.status || (rt?.running ? 'running' : 'stopped'),
+        installed: rt?.installed ?? false,
+        color: (runtimeMeta[u.kind] || {}).color || 'var(--p)',
+      })
+    } else {
+      const svc = svcList.find((s) => s.id === id)
+      const name = svc?.name || u.name || u.kind
+      cards.push({
+        name,
+        initial: name.charAt(0).toUpperCase(),
+        iconCls: (serviceMeta[u.kind] || {}).cls || '',
+        version: svc?.version || u.version,
+        status: svc?.status || 'stopped',
+        installed: svc?.installed ?? false,
+        color: (serviceMeta[u.kind] || {}).color || 'var(--p)',
+      })
+    }
   }
 
   return cards
@@ -180,10 +181,41 @@ function statusLabel(s) {
   return '错误'
 }
 
-const unsub = refreshSignal.subscribe(() => load())
+function statusDotCls(s) {
+  if (s === 'running') return 'bg-success'
+  if (s === 'starting' || s === 'stopping') return 'bg-warning animate-pulse'
+  if (s === 'error') return 'bg-error'
+  return 'bg-base-content/40'
+}
+
+function statusTextCls(s) {
+  if (s === 'running') return 'text-success'
+  if (s === 'starting' || s === 'stopping') return 'text-warning'
+  if (s === 'error') return 'text-error'
+  return 'text-base-content/40'
+}
+
+function cardBorderCls(s) {
+  if (s === 'running') return 'border-success'
+  if (s === 'starting' || s === 'stopping') return 'border-warning'
+  if (s === 'error') return 'border-error'
+  return ''
+}
+
+const unsub = refreshSignal.subscribe(() => load(true))
+let lastOpRefresh = 0
+const unsubOp = subscribeOperationEvents((name, data) => {
+  if (name === 'step' && data?.state === 'done') {
+    const now = Date.now()
+    if (now - lastOpRefresh > 800) {
+      lastOpRefresh = now
+      refreshSignal.set(nanoRefresh.get() + 1)
+    }
+  }
+})
 onMount(() => {
   load()
-  return unsub
+  return () => { unsub(); unsubOp() }
 })
 </script>
 
@@ -216,22 +248,26 @@ onMount(() => {
           </div>
         {:else}
           {#each activeCards as card}
-            <div class="relative bg-base-200 rounded-lg border border-base-300 overflow-hidden {card.status === 'running' ? 'border-success' : ''}">
+            <div class="relative bg-base-200 rounded-lg border border-base-300 overflow-hidden {cardBorderCls(card.status)}">
               <div class="h-0.5 w-full" style="background:{card.color}"></div>
               <div class="flex items-center gap-3 p-3">
-                <div class="w-9 h-9 rounded-full flex items-center justify-center text-white text-sm font-bold shrink-0" style="background:{card.color}">
-                  {card.initial}
+                <div class="w-9 h-9 rounded-full flex items-center justify-center text-white shrink-0" style="background:{card.color}">
+                  {#if card.iconCls}
+                    <span class="iconfont text-lg {card.iconCls}"></span>
+                  {:else}
+                    <span class="text-sm font-bold">{card.initial}</span>
+                  {/if}
                 </div>
                 <div class="flex-1 min-w-0">
                   <div class="text-sm font-semibold truncate">{card.name}</div>
                   <div class="flex items-center gap-1.5 text-xs mt-1">
-                    <span class="w-1.5 h-1.5 rounded-full {card.status === 'running' ? 'bg-success' : 'bg-base-content/40'}"></span>
+                    <span class="w-1.5 h-1.5 rounded-full {statusDotCls(card.status)}"></span>
                     <span class="font-mono text-base-content/60">v{card.version}</span>
                     {#if !card.installed}
                       <span class="badge badge-xs badge-ghost text-base-content/40 ml-auto">未安装</span>
                     {:else}
                       <span class="text-base-content/40">·</span>
-                      <span class="{card.status === 'running' ? 'text-success' : 'text-base-content/40'}">{statusLabel(card.status)}</span>
+                      <span class="{statusTextCls(card.status)}">{statusLabel(card.status)}</span>
                     {/if}
                   </div>
                 </div>
@@ -306,60 +342,35 @@ onMount(() => {
     {/if}
   </div>
 
-  <!-- Bottom panel: System info + Ops -->
-  <div class="grid grid-cols-2 gap-5 flex-1 min-h-0">
-    <div class="card bg-base-100 border border-base-300 overflow-hidden">
-      <div class="px-4 py-3.5 border-b border-base-300"><h3 class="text-sm font-semibold">系统信息</h3></div>
-      <div class="grid grid-cols-2 gap-0">
-        <div class="p-4 flex flex-col gap-2.5 border-r border-base-300">
-          <div class="flex items-center justify-between gap-3"><span class="text-xs text-base-content/60 shrink-0">平台</span><span class="text-sm font-mono text-right">{systemInfo.platform || '-'} / {systemInfo.arch || '-'}</span></div>
-          <div class="flex items-center justify-between gap-3"><span class="text-xs text-base-content/60 shrink-0">Go 版本</span><span class="text-sm font-mono text-right">{systemInfo.goVersion || '-'}</span></div>
-          <div class="flex items-center justify-between gap-3"><span class="text-xs text-base-content/60 shrink-0">应用版本</span><span class="text-sm font-mono text-right">{systemInfo.appVersion || '-'}</span></div>
-        </div>
-        <div class="p-4 flex flex-col gap-2.5">
-          {#if !hasLoaded}
-            {#each [1,2,3] as _}<div class="flex items-center justify-between"><span class="text-xs text-base-content/60">-</span><span class="text-sm font-mono">-</span></div>{/each}
-          {:else}
-            {#each [...services, ...runtimes] as svc}
-              {#if svc.installed}
-                <div class="flex items-center justify-between gap-3">
-                  <span class="text-xs text-base-content/60 shrink-0">{svc.name}</span>
-                  <span class="text-sm font-mono text-right">
-                    {#if svc.status === 'running' || svc.running}
-                      PID: {svc.pid || '-'}　{svc.uptime || ''}
-                    {:else}
-                      {statusLabel(svc.status) || '已停止'}
-                    {/if}
-                  </span>
-                </div>
-              {/if}
-            {/each}
-          {/if}
-        </div>
-      </div>
+  <!-- Bottom panel: Ops（占满整行） -->
+  <div class="card bg-base-100 border border-base-300 overflow-hidden flex flex-col flex-1 min-h-0">
+    <div class="flex justify-between items-center px-4 py-3.5 border-b border-base-300 shrink-0">
+      <h3 class="text-sm font-semibold">操作日志</h3>
+      <span class="badge badge-sm">{ops.length} 条</span>
     </div>
-
-    <div class="card bg-base-100 border border-base-300 overflow-hidden flex flex-col min-h-0">
-      <div class="flex justify-between items-center px-4 py-3.5 border-b border-base-300 shrink-0">
-        <h3 class="text-sm font-semibold">操作日志</h3>
-        <span class="badge badge-sm">{ops.length} 条</span>
-      </div>
-      <div class="flex-1 overflow-y-auto py-2 min-h-0">
-        {#if !hasLoaded}
-          <div class="flex items-center justify-center py-5 text-base-content/60 text-sm">加载操作日志中...</div>
-        {:else if ops.length === 0}
-          <div class="flex items-center justify-center py-5 text-base-content/60 text-sm">暂无操作记录</div>
-        {:else}
-          {#each ops as op}
-            <div class="grid grid-cols-[80px_140px_1fr_52px] items-center gap-1.5 px-4 py-1.5 text-xs border-b border-base-200 last:border-none {op.status?.startsWith('失败') ? 'bg-error/5' : ''} hover:bg-base-200">
-              <span class="font-mono text-base-content/60">{op.time}</span>
-              <span class="font-semibold">{op.action} {op.service}</span>
-              <span class="text-base-content/70 truncate">{op.detail}</span>
-              <span class="text-right px-1.5 py-0.5 rounded bg-base-200 {op.status === '成功' ? 'text-success' : 'text-error'}">{op.status === '成功' ? '成功' : '失败'}</span>
-            </div>
-          {/each}
-        {/if}
-      </div>
+    <div class="flex-1 overflow-y-auto py-2 min-h-0">
+      {#if !hasLoaded}
+        <div class="flex items-center justify-center py-5 text-base-content/60 text-sm">加载操作日志中...</div>
+      {:else if ops.length === 0}
+        <div class="flex items-center justify-center py-5 text-base-content/60 text-sm">暂无操作记录</div>
+      {:else}
+        {#each ops as op}
+          <div class="grid grid-cols-[80px_140px_1fr_52px] items-center gap-1.5 px-4 py-1.5 text-xs border-b border-base-200 last:border-none {op.status === '失败' ? 'bg-error/5' : ''} hover:bg-base-200">
+            <span class="font-mono text-base-content/60">{op.time}</span>
+            <span class="font-semibold">{op.action} {op.service}</span>
+            <span class="text-base-content/70 truncate">{op.detail}</span>
+            {#if op.status === '成功'}
+              <span class="text-right px-1.5 py-0.5 rounded bg-base-200 text-success">成功</span>
+            {:else if op.status === '失败'}
+              <span class="text-right px-1.5 py-0.5 rounded bg-base-200 text-error">失败</span>
+            {:else if op.status === '警告'}
+              <span class="text-right px-1.5 py-0.5 rounded bg-base-200 text-warning">警告</span>
+            {:else}
+              <span class="text-right px-1.5 py-0.5 rounded bg-base-200 text-base-content/60">{op.status}</span>
+            {/if}
+          </div>
+        {/each}
+      {/if}
     </div>
   </div>
 </div>

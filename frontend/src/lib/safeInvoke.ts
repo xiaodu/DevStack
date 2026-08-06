@@ -3,18 +3,18 @@ import { nanoLoading, nanoStatusMsg, pushToast } from './stores'
 /*
  * ── Debounce map ──
  */
-const pendingCalls = new Map()
+const pendingCalls = new Map<string, { abort: boolean }>()
 
-function debounceKey(key) {
+function debounceKey(key: string): { abort: boolean } {
   if (pendingCalls.has(key)) {
-    pendingCalls.get(key).abort = true
+    pendingCalls.get(key)!.abort = true
   }
   const entry = { abort: false }
   pendingCalls.set(key, entry)
   return entry
 }
 
-function debounceCleanup(key) {
+function debounceCleanup(key: string) {
   pendingCalls.delete(key)
 }
 
@@ -41,13 +41,28 @@ function debounceCleanup(key) {
  * @param {Function} [opts.onError]      — Extra callback on error
  * @returns {Promise<any>}
  */
-export async function safeInvoke(key, fn, opts = {}) {
+export interface SafeInvokeOptions {
+  statusMsg?: string
+  successMsg?: string
+  errorPrefix?: string
+  timeoutMs?: number
+  suppressToast?: boolean
+  onSuccess?: (result: any) => void
+  onError?: (err: any) => void
+}
+
+export async function safeInvoke(
+  key: string | (() => Promise<any>),
+  fn: (() => Promise<any>) | SafeInvokeOptions,
+  opts: SafeInvokeOptions = {},
+): Promise<any> {
   // Backward compat: safeInvoke(fn, opts)  →  generate key from fn.name
   if (typeof key === 'function') {
-    opts = fn || {}
-    fn = key
-    key = fn.name || 'anonymous'
+    opts = (fn as SafeInvokeOptions) || {}
+    fn = key as () => Promise<any>
+    key = (fn as () => Promise<any>).name || 'anonymous'
   }
+  const callFn = fn as () => Promise<any>
   const { statusMsg, successMsg, errorPrefix, timeoutMs = 15000, suppressToast = false, onSuccess, onError } = opts
 
   // ── Debounce: abort if another call with same key is in-flight ──
@@ -69,14 +84,14 @@ export async function safeInvoke(key, fn, opts = {}) {
   }, timeoutMs)
 
   try {
-    const result = await fn()
+    const result = await callFn()
     clearTimeout(safetyTimeout)
     if (!suppressToast && successMsg) pushToast(successMsg, 'success')
     if (onSuccess) onSuccess(result)
     return result
   } catch (e) {
     clearTimeout(safetyTimeout)
-    const message = e?.message || String(e)
+    const message = (e as any)?.message || String(e)
     console.error(`[safeInvoke] "${key}" failed:`, message)
     if (!suppressToast) {
       pushToast(errorPrefix ? `${errorPrefix}: ${message}` : message, 'error')
@@ -99,14 +114,14 @@ export async function safeInvoke(key, fn, opts = {}) {
  *
  * Each method gets a default key based on its name + first arg.
  */
-export function wrapApi(apiObj, methodOpts = {}) {
-  const wrapped = {}
+export function wrapApi(apiObj: Record<string, any>, methodOpts: Record<string, any> = {}): Record<string, any> {
+  const wrapped: Record<string, any> = {}
   for (const [name, fn] of Object.entries(apiObj)) {
     if (typeof fn !== 'function') {
       wrapped[name] = fn
       continue
     }
-    wrapped[name] = (...args) => {
+    wrapped[name] = (...args: any[]) => {
       const opts = methodOpts[name] || {}
       const key = opts.key || `${name}:${args.map((a) => String(a).slice(0, 40)).join(':')}`
       return safeInvoke(key, () => fn(...args), opts)

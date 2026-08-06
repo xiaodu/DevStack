@@ -14,7 +14,7 @@
   --sidebar-avatar-text: #fff;
   --sidebar-user-name: #0f172a;
   --sidebar-user-plan: #94a3b8;
-  --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  --font: 'Microsoft YaHei', 'PingFang SC', 'Noto Sans SC', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
   --font-mono: 'Cascadia Code', 'Fira Code', 'JetBrains Mono', 'Consolas', monospace;
 }
 
@@ -53,7 +53,7 @@ html, body, #app {
 ::-webkit-scrollbar-thumb { background: var(--text-muted); border-radius: 3px; opacity: 0.5; }
 ::-webkit-scrollbar-thumb:hover { background: var(--text-secondary); }
 
-::selection { background: var(--accent); color: #fff; }
+::selection { background: var(--p); color: var(--pc); }
 
 button {
   cursor: pointer;

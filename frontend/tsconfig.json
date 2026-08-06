@@ -15,11 +15,7 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
-    "isolatedModules": true,
-    "baseUrl": ".",
-    "paths": {
-      "@/*": ["src/*"]
-    }
+    "isolatedModules": true
   },
   "include": ["src/**/*.ts", "src/**/*.svelte"],
   "exclude": ["node_modules", "dist", "wailsjs"]

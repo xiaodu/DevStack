@@ -3,6 +3,7 @@ package service
 import (
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/xiaodu/DevStack/internal/config"
@@ -10,6 +11,20 @@ import (
 )
 
 const phpWorkerCount = 4
+
+func allocatedPHPBasePorts(resMgr *resource.Manager) []int {
+	if resMgr == nil {
+		return nil
+	}
+	var ports []int
+	for port, owner := range resMgr.Ports().ListAllocated() {
+		if strings.HasPrefix(owner, "php:") {
+			ports = append(ports, port)
+		}
+	}
+	sort.Ints(ports)
+	return ports
+}
 
 // ConfigHandler 仅用于配置操作，所有启停逻辑已迁移到 Provider 架构
 type ConfigHandler interface {
@@ -21,6 +36,7 @@ var configHandlers = map[string]ConfigHandler{
 	"nginx": &NginxHandler{},
 	"mysql": &MySQLHandler{},
 	"redis": &RedisHandler{},
+	"php":   &PHPHandler{},
 }
 
 func updateIniValue(content, key, value string) string {
@@ -43,11 +59,24 @@ func updateConfValue(content, key, value string) string {
 	return content + "\n" + repl
 }
 
-func generatePHPUpstreamConfig(basePort int) string {
+// boolInt 输出 my.ini 使用的 1/0 布尔值
+func boolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+func generatePHPUpstreamConfig(basePorts []int) string {
+	if len(basePorts) == 0 {
+		basePorts = []int{9000}
+	}
 	var buf strings.Builder
 	buf.WriteString("upstream php_backend {\n")
-	for i := 0; i < phpWorkerCount; i++ {
-		fmt.Fprintf(&buf, "\tserver 127.0.0.1:%d;\n", basePort+i)
+	for _, base := range basePorts {
+		for i := 0; i < phpWorkerCount; i++ {
+			fmt.Fprintf(&buf, "\tserver 127.0.0.1:%d;\n", base+i)
+		}
 	}
 	buf.WriteString("}")
 	return buf.String()

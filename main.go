@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"log"
 
@@ -10,10 +11,17 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/options/linux"
 	"github.com/wailsapp/wails/v2/pkg/options/mac"
 	"github.com/wailsapp/wails/v2/pkg/options/windows"
+	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 //go:embed all:frontend/dist
 var assets embed.FS
+
+//go:embed build/windows/icon.ico
+var trayIcon []byte
+
+// appCtx 保存 Wails 上下文，供 SingleInstanceLock 回调在第二个实例启动时使用。
+var appCtx context.Context
 
 func main() {
 	log.Println("[WAILS] main() started")
@@ -22,6 +30,16 @@ func main() {
 
 	var err error
 	err = wails.Run(&options.App{
+		SingleInstanceLock: &options.SingleInstanceLock{
+			UniqueId: "DevStack-{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}",
+			OnSecondInstanceLaunch: func(secondInstanceData options.SecondInstanceData) {
+				log.Println("[WAILS] 第二个实例已启动，显示已有窗口")
+				if appCtx != nil {
+					runtime.WindowShow(appCtx)
+					runtime.WindowUnminimise(appCtx)
+				}
+			},
+		},
 		Title:     "DevStack",
 		Width:     1200,
 		Height:    800,
@@ -32,6 +50,12 @@ func main() {
 		},
 		BackgroundColour: &options.RGBA{R: 27, G: 38, B: 54, A: 255},
 		OnStartup:        app.startup,
+		OnShutdown: func(ctx context.Context) {
+			app.Shutdown()
+		},
+		OnBeforeClose: func(ctx context.Context) bool {
+			return app.HandleWindowClose(ctx)
+		},
 		Bind: []interface{}{
 			app,
 		},

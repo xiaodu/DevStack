@@ -49,10 +49,14 @@ func (s *OpStore) Add(action, service, detail, status string) {
 
 	if s.logger != nil {
 		logLevel := LevelInfo
-		if status == "failed" || status == "error" {
+		if status == "failed" || status == "error" || status == "失败" {
 			logLevel = LevelError
 		}
-		s.logger.log(logLevel, "[%s] %s | %s | %s", service, action, detail, status)
+		entry := fmt.Sprintf("%s | %s | %s", action, detail, status)
+		if service != "" {
+			entry = fmt.Sprintf("[%s] %s", service, entry)
+		}
+		s.logger.log(logLevel, entry)
 	}
 }
 
@@ -87,6 +91,17 @@ func (s *OpStore) Recent(n int) []OpEntry {
 		n = len(s.buf)
 	}
 	return append([]OpEntry{}, s.buf[len(s.buf)-n:]...)
+}
+
+// Clear 清空操作记录缓冲并清空日志文件内容。
+func (s *OpStore) Clear() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.buf = s.buf[:0]
+	if s.logger != nil {
+		return s.logger.Clear()
+	}
+	return nil
 }
 
 func (s *OpStore) GetLogFiles() ([]string, error) {

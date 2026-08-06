@@ -37,7 +37,7 @@ function EventsOff(eventName: string) {
  *     return unsub
  *   })
  */
-export function onWailsEvent(eventName, handler) {
+export function onWailsEvent(eventName: string, handler: (...args: any[]) => void) {
   EventsOn(eventName, handler)
   const unsub = () => EventsOff(eventName)
   return unsub
@@ -49,7 +49,7 @@ export function onWailsEvent(eventName, handler) {
  *
  *   useWailsEvent('reactive:service.started', (data) => updateUI(data))
  */
-export function useWailsEvent(eventName, handler) {
+export function useWailsEvent(eventName: string, handler: (...args: any[]) => void) {
   EventsOn(eventName, handler)
   onDestroy(() => EventsOff(eventName))
 }
@@ -94,7 +94,26 @@ export function subscribeReactiveEvents() {
  *
  *   useDownloadProgress(({ key, service, version, downloaded, total }) => ...)
  */
-export function useDownloadProgress(handler) {
+export function useDownloadProgress(handler: (data: any) => void) {
   EventsOn('download:progress', handler)
   onDestroy(() => EventsOff('download:progress'))
+}
+
+/*
+ * ── 环境编排进度事件（operation:begin / operation:step / operation:end） ──
+ *
+ * handler 收到 (eventName, data)：
+ *   'begin' → { action, title, steps: [{id,label,state,message}...] }
+ *   'step'  → { id, state: 'active'|'done'|'error', message }
+ *   'end'   → { action, ok, message }
+ */
+export function subscribeOperationEvents(handler: (eventName: string, data: any) => void) {
+  const names = ['operation:begin', 'operation:step', 'operation:end']
+  const unsubs = names.map((name) => {
+    EventsOn(name, (data: any) => {
+      handler(name.replace('operation:', ''), data)
+    })
+    return () => EventsOff(name)
+  })
+  return () => unsubs.forEach((fn) => fn())
 }

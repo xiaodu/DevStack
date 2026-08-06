@@ -203,12 +203,7 @@ async function remove() {
 async function toggleProject(id) {
   await safeInvoke(
     async () => {
-      const env = await api.getEnvironment()
-      const proj = env.projects[id]
-      if (proj) {
-        proj.enabled = !proj.enabled
-        await api.applyEnvironment(env)
-      }
+      await api.toggleProject(id)
       await load()
     },
     { errorPrefix: '切换失败' },

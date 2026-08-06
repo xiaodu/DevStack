@@ -2,17 +2,20 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	goruntime "runtime"
 	"strings"
+	"sync"
 	"time"
 
 	stdlog "log"
 
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 
+	"github.com/xiaodu/DevStack/internal/autostart"
 	"github.com/xiaodu/DevStack/internal/config"
 	"github.com/xiaodu/DevStack/internal/core"
 	"github.com/xiaodu/DevStack/internal/download"
@@ -26,6 +29,7 @@ import (
 	"github.com/xiaodu/DevStack/internal/resource"
 	"github.com/xiaodu/DevStack/internal/runtime"
 	"github.com/xiaodu/DevStack/internal/service"
+	"github.com/xiaodu/DevStack/internal/tray"
 )
 
 type App struct {
@@ -43,7 +47,9 @@ type App struct {
 	stateStore  *engine.StateStore
 	reconciler  *engine.ReconcilerImpl
 	reactiveEng *reactive.Engine
+	tray        *tray.Tray
 	AppVersion  string
+	envOpMu     sync.Mutex // 串行化环境启停操作，防止并发激活
 }
 
 var serviceNames = map[string]string{
@@ -160,13 +166,14 @@ func NewApp() *App {
 	opStore.LogInfo("[INIT] 注册服务提供者...")
 	provider.NewNginxProvider(cfg, procMgr, resMgr)
 	provider.NewMySQLProvider(cfg, procMgr)
+	provider.NewRedisProvider(cfg, procMgr)
 	provider.NewPHPProvider(cfg, procMgr, resMgr)
 	opStore.LogInfo("[INIT] 服务提供者注册完成")
 
 	opStore.LogInfo("[INIT] 注册内置响应式规则...")
 	reactive.RegisterBuiltinRules(reactiveEng,
 		func(serviceID string) error {
-			if strings.HasPrefix(serviceID, "php-") {
+			if strings.HasPrefix(serviceID, "php@") {
 				return rtMgr.Start(serviceID)
 			}
 			return svcMgr.Start(serviceID)
@@ -182,11 +189,8 @@ func NewApp() *App {
 	reactiveEng.Start()
 	opStore.LogInfo("[INIT] 响应式引擎启动完成")
 
-	elapsed := time.Since(startTime)
-	opStore.LogInfo("[INIT] NewApp 初始化完成, 耗时: %s", elapsed.String())
-	opStore.LogInfo("[INIT] 应用版本: 0.2.0")
-
-	return &App{
+	opStore.LogInfo("[INIT] 初始化系统托盘...")
+	app := &App{
 		cfg:         cfg,
 		procMgr:     procMgr,
 		resMgr:      resMgr,
@@ -202,13 +206,62 @@ func NewApp() *App {
 		reactiveEng: reactiveEng,
 		AppVersion:  "0.2.0",
 	}
+	app.tray = tray.New(
+		func() {
+			if app.ctx == nil {
+				return
+			}
+			wailsruntime.WindowShow(app.ctx)
+			wailsruntime.WindowUnminimise(app.ctx)
+		},
+		func() {
+			if app.ctx != nil {
+				wailsruntime.Quit(app.ctx)
+			}
+			app.tray.Quit()
+		},
+	)
+	opStore.LogInfo("[INIT] 系统托盘初始化完成")
+
+	elapsed := time.Since(startTime)
+	opStore.LogInfo("[INIT] NewApp 初始化完成, 耗时: %s", elapsed.String())
+	opStore.LogInfo("[INIT] 应用版本: 0.2.0")
+
+	return app
 }
 
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
+	appCtx = ctx
 	if a.opStore != nil {
 		a.opStore.LogInfo("[STARTUP] Wails 应用启动完成, context 已设置")
 		a.opStore.LogDebug("[STARTUP] 当前安装目录: %s", a.cfg.Get().InstallDir)
+	}
+
+	// ── 开机自启状态与注册表对齐 ──
+	if a.opStore != nil {
+		settings := a.cfg.Get()
+		if err := autostart.Sync(settings.StartOnBoot); err != nil {
+			a.opStore.LogWarn("[STARTUP] 开机自启状态同步失败: %v", err)
+		} else if settings.StartOnBoot != autostart.IsEnabled() {
+			a.opStore.LogWarn("[STARTUP] 开机自启状态未对齐, 配置: %v, 注册表: %v", settings.StartOnBoot, autostart.IsEnabled())
+		} else {
+			a.opStore.LogInfo("[STARTUP] 开机自启状态已同步: %v", settings.StartOnBoot)
+		}
+	}
+
+	// ── 系统托盘 ──
+	if a.tray != nil {
+		a.tray.SetContext(ctx)
+		a.tray.Start(trayIcon)
+		if a.opStore != nil {
+			a.opStore.LogInfo("[STARTUP] 系统托盘已启动")
+		}
+	}
+
+	// 环境编排进度 → 前端（全屏操作进度）
+	if a.reconciler != nil {
+		a.reconciler.SetReporter(a)
 	}
 
 	// ── Bridge reactive engine events → Wails frontend events ──
@@ -245,321 +298,139 @@ func (a *App) startup(ctx context.Context) {
 	}
 }
 
-// ==================== Declarative Environment APIs ====================
+// ==================== Environment APIs ====================
 
-func (a *App) ApplyEnvironment(env engine.EnvironmentState) error {
-	if a.opStore != nil {
-		serviceCount := 0
-		if env.Services != nil {
-			serviceCount = len(env.Services)
-		}
-		projectCount := 0
-		if env.Projects != nil {
-			projectCount = len(env.Projects)
-		}
-		runtimeCount := 0
-		if env.Runtimes != nil {
-			runtimeCount = len(env.Runtimes)
-		}
-		a.opStore.LogDebug("[API] ApplyEnvironment 调用, 服务数: %d, 项目数: %d, 运行时数: %d",
-			serviceCount, projectCount, runtimeCount)
-	}
-	err := a.reconciler.Apply(env)
-	if err != nil {
+// HandleWindowClose 返回是否阻止窗口关闭：启用"最小化到系统托盘"时隐藏窗口而不是退出。
+func (a *App) HandleWindowClose(ctx context.Context) bool {
+	settings := a.cfg.Get()
+	if settings.MinimizeToTray && a.tray != nil && a.tray.Running() {
+		wailsruntime.WindowHide(ctx)
 		if a.opStore != nil {
-			a.opStore.LogError("[API] ApplyEnvironment 失败: %v", err)
+			a.opStore.LogInfo("[TRAY] 窗口关闭, 最小化到系统托盘")
 		}
-		return err
+		return true
 	}
-	if a.opStore != nil {
-		a.opStore.LogInfo("[API] ApplyEnvironment 成功")
-	}
-	return nil
+	return false
 }
 
-func (a *App) GetEnvironment() (engine.EnvironmentState, error) {
-	if a.opStore != nil {
-		a.opStore.LogDebug("[API] GetEnvironment 调用")
+// Shutdown 应用退出前清理托盘图标。
+func (a *App) Shutdown() {
+	if a.tray != nil {
+		a.tray.Quit()
 	}
-	result, err := a.reconciler.GetCurrentState()
+}
+
+// ── 环境编排进度事件 → 前端（operation:begin / operation:step / operation:end） ──
+
+func (a *App) OnOperationBegin(action, title string, steps []engine.StepInfo) {
+	wailsruntime.EventsEmit(a.ctx, "operation:begin", map[string]interface{}{
+		"action": action,
+		"title":  title,
+		"steps":  steps,
+	})
+}
+
+func (a *App) OnOperationStep(step engine.StepInfo) {
+	wailsruntime.EventsEmit(a.ctx, "operation:step", step)
+}
+
+func (a *App) OnOperationEnd(action string, ok bool, message string) {
+	wailsruntime.EventsEmit(a.ctx, "operation:end", map[string]interface{}{
+		"action":  action,
+		"ok":      ok,
+		"message": message,
+	})
+}
+
+// ActivateEnvironment 激活指定环境：停旧的全部，启新的全部。
+// 全程在 envOpMu 内串行，配合 reconciler 的互斥锁，杜绝并发激活导致进程堆积。
+func (a *App) ActivateEnvironment(envID string) error {
+	a.envOpMu.Lock()
+	defer a.envOpMu.Unlock()
+
+	if a.opStore != nil {
+		a.opStore.LogInfo("[API] ActivateEnvironment 调用, envID: %q", envID)
+	}
+	if a.envMgr == nil {
+		return fmt.Errorf("环境管理器未初始化")
+	}
+	target, err := a.envMgr.Get(envID)
 	if err != nil {
-		if a.opStore != nil {
-			a.opStore.LogError("[API] GetEnvironment 失败: %v", err)
-		}
-		return result, err
+		return fmt.Errorf("环境 %q 未找到: %w", envID, err)
 	}
 
-	// 从持久化状态中读取当前激活的 profile ID
-	if stored, serr := a.stateStore.Load(); serr == nil {
-		result.ActiveProfileID = stored.ActiveProfileID
+	var oldEnv environment.Environment
+	oldActiveID, _ := a.getActiveEnvironmentID()
+	if oldActiveID != "" && oldActiveID != envID {
+		if e, err := a.envMgr.Get(oldActiveID); err == nil {
+			oldEnv = e
+			if a.opStore != nil {
+				a.opStore.LogInfo("[API] 停止旧环境 %q", oldActiveID)
+			}
+		}
 	}
+
 	if a.opStore != nil {
-		serviceCount := 0
-		if result.Services != nil {
-			serviceCount = len(result.Services)
-		}
-		projectCount := 0
-		if result.Projects != nil {
-			projectCount = len(result.Projects)
-		}
-		runtimeCount := 0
-		if result.Runtimes != nil {
-			runtimeCount = len(result.Runtimes)
-		}
-		a.opStore.LogDebug("[API] GetEnvironment 返回, 服务数: %d, 项目数: %d, 运行时数: %d",
-			serviceCount, projectCount, runtimeCount)
+		a.opStore.LogInfo("[API] 启动新环境 %q, 包含 %d 个组件", envID, len(target.Units))
 	}
-	return result, nil
+	return a.reconciler.Activate(oldEnv, target)
 }
 
-func (a *App) DiffEnvironment(env engine.EnvironmentState) ([]engine.Change, error) {
-	return a.reconciler.Diff(env)
-}
+// ActivateEnvironmentOnly 仅激活环境：切换 activeEnvironmentId 标记，不启动任何组件。
+func (a *App) ActivateEnvironmentOnly(envID string) error {
+	a.envOpMu.Lock()
+	defer a.envOpMu.Unlock()
 
-// ==================== Environment Activation APIs (内部走依赖图顺序) ====================
-
-// GetActiveEnvironment 返回当前活跃环境状态，等价于 GetEnvironment，命名更贴合核心概念
-func (a *App) GetActiveEnvironment() (engine.EnvironmentState, error) {
-	return a.GetEnvironment()
-}
-
-// ActivateEnvironment 按环境模板启动依赖的服务与运行时。
-// - profileID 非空：按指定 EnvironmentProfile 组合声明需要运行的软件
-// - profileID 为空：基于所有已启用项目联合所需的软件版本推导
-// 所有启动顺序由 reconciler 内部依赖图统一处理，禁止前端写死顺序。
-func (a *App) ActivateEnvironment(profileID string) error {
 	if a.opStore != nil {
-		a.opStore.LogInfo("[API] ActivateEnvironment 调用, profileID: %q", profileID)
+		a.opStore.LogInfo("[API] ActivateEnvironmentOnly 调用, envID: %q", envID)
 	}
+	if a.envMgr == nil {
+		return fmt.Errorf("环境管理器未初始化")
+	}
+	if _, err := a.envMgr.Get(envID); err != nil {
+		return fmt.Errorf("环境 %q 未找到: %w", envID, err)
+	}
+	return a.reconciler.ActivateOnly(envID)
+}
 
-	current, err := a.reconciler.GetCurrentState()
+// RunEnvironment 运行环境：启动环境内所有组件，不修改激活标记。
+func (a *App) RunEnvironment(envID string) error {
+	a.envOpMu.Lock()
+	defer a.envOpMu.Unlock()
+
+	if a.opStore != nil {
+		a.opStore.LogInfo("[API] RunEnvironment 调用, envID: %q", envID)
+	}
+	if a.envMgr == nil {
+		return fmt.Errorf("环境管理器未初始化")
+	}
+	target, err := a.envMgr.Get(envID)
 	if err != nil {
-		return fmt.Errorf("读取当前环境失败: %w", err)
+		return fmt.Errorf("环境 %q 未找到: %w", envID, err)
 	}
+	return a.reconciler.Run(target)
+}
 
-	desired := engine.EnvironmentState{
-		Services: make(map[string]engine.ServiceDesiredState),
-		Projects: make(map[string]engine.ProjectDesiredState),
-		Runtimes: make(map[string]engine.RuntimeDesiredState),
-	}
-	for pid, proj := range current.Projects {
-		desired.Projects[pid] = proj
-	}
-
-	collectFromProjects := func() {
-		for _, proj := range current.Projects {
-			if !proj.Enabled {
-				continue
-			}
-			p := proj
-			a.hydrateProjectVersionsFromCurrent(&p, proj.EnvironmentID)
-
-			if p.NginxVersion != "" {
-				svcID := "nginx"
-				if _, ok := current.Services[svcID]; !ok {
-					svcID = "nginx-" + p.NginxVersion
-				}
-				if cur, ok := current.Services[svcID]; ok {
-					desired.Services[svcID] = engine.ServiceDesiredState{
-						Version: cur.Version,
-						State:   core.StatusRunning,
-					}
-				}
-			}
-			if p.MySQLVersion != "" {
-				svcID := "mysql"
-				if _, ok := current.Services[svcID]; !ok {
-					svcID = "mysql-" + p.MySQLVersion
-				}
-				if cur, ok := current.Services[svcID]; ok {
-					desired.Services[svcID] = engine.ServiceDesiredState{
-						Version: cur.Version,
-						State:   core.StatusRunning,
-					}
-				}
-			}
-			if p.PHPVersion != "" {
-				rtID := "php-" + p.PHPVersion
-				if cur, ok := current.Runtimes[rtID]; ok {
-					desired.Runtimes[rtID] = engine.RuntimeDesiredState{
-						Version: cur.Version,
-						State:   core.StatusRunning,
-						Active:  cur.Active,
-					}
-				}
-			}
-			if p.NodeVersion != "" {
-				rtID := "node-" + p.NodeVersion
-				if cur, ok := current.Runtimes[rtID]; ok {
-					desired.Runtimes[rtID] = engine.RuntimeDesiredState{
-						Version: cur.Version,
-						State:   core.StatusRunning,
-						Active:  cur.Active,
-					}
-				}
-			}
-			if p.PythonVersion != "" {
-				rtID := "python-" + p.PythonVersion
-				if cur, ok := current.Runtimes[rtID]; ok {
-					desired.Runtimes[rtID] = engine.RuntimeDesiredState{
-						Version: cur.Version,
-						State:   core.StatusRunning,
-						Active:  cur.Active,
-					}
-				}
-			}
-			for capType, depID := range p.Dependencies {
-				if capType == "service" {
-					if cur, ok := current.Services[depID]; ok {
-						desired.Services[depID] = engine.ServiceDesiredState{
-							Version: cur.Version,
-							State:   core.StatusRunning,
-						}
-					}
-				} else if capType == "runtime" {
-					if cur, ok := current.Runtimes[depID]; ok {
-						desired.Runtimes[depID] = engine.RuntimeDesiredState{
-							Version: cur.Version,
-							State:   core.StatusRunning,
-							Active:  cur.Active,
-						}
-					}
-				} else if strings.HasPrefix(capType, "service:") {
-					svcID := depID
-					if cur, ok := current.Services[svcID]; ok {
-						desired.Services[svcID] = engine.ServiceDesiredState{
-							Version: cur.Version,
-							State:   core.StatusRunning,
-						}
-					}
-				}
-			}
-		}
-	}
-
-	collectFromProfile := func(profile environment.EnvironmentProfile) {
-		for _, spec := range profile.Services {
-			svcID := spec.ID
-			if _, ok := current.Services[svcID]; !ok {
-				svcID = spec.ID + "-" + spec.Version
-			}
-			if cur, ok := current.Services[svcID]; ok {
-				desired.Services[svcID] = engine.ServiceDesiredState{
-					Version: cur.Version,
-					State:   core.StatusRunning,
-				}
-			}
-		}
-		for _, spec := range profile.Runtimes {
-			rtID := spec.RuntimeID + "-" + spec.Version
-			if cur, ok := current.Runtimes[rtID]; ok {
-				desired.Runtimes[rtID] = engine.RuntimeDesiredState{
-					Version: cur.Version,
-					State:   core.StatusRunning,
-					Active:  cur.Active || spec.Default,
-				}
-			}
-		}
-		for capType, depID := range profile.Dependencies {
-			if strings.HasPrefix(capType, "service:") {
-				if cur, ok := current.Services[depID]; ok {
-					desired.Services[depID] = engine.ServiceDesiredState{
-						Version: cur.Version,
-						State:   core.StatusRunning,
-					}
-				}
-			} else if capType == "service" {
-				if cur, ok := current.Services[depID]; ok {
-					desired.Services[depID] = engine.ServiceDesiredState{
-						Version: cur.Version,
-						State:   core.StatusRunning,
-					}
-				}
-			}
-		}
-	}
-
-	if profileID != "" && a.envMgr != nil {
-		profile, err := a.envMgr.Get(profileID)
-		if err == nil {
-			collectFromProfile(profile)
-		} else {
-			collectFromProjects()
-		}
-	} else {
-		collectFromProjects()
-	}
-
-	for sid, svc := range current.Services {
-		if _, already := desired.Services[sid]; !already {
-			desired.Services[sid] = svc
-		}
-	}
-	for rid, rt := range current.Runtimes {
-		if _, already := desired.Runtimes[rid]; !already {
-			desired.Runtimes[rid] = rt
-		}
-	}
-
-	if err := a.ApplyEnvironment(desired); err != nil {
-		if a.opStore != nil {
-			a.opStore.LogError("[API] ActivateEnvironment 失败: %v", err)
-		}
-		return err
-	}
-
-	// 持久化当前激活的 profile ID，供前端显示"当前在用"标记
-	desired.ActiveProfileID = profileID
-	if saveErr := a.stateStore.Save(desired); saveErr != nil {
-		if a.opStore != nil {
-			a.opStore.LogWarn("[API] ActivateEnvironment 保存 activeProfileID 失败: %v", saveErr)
-		}
-	}
+// DeactivateEnvironment 停止当前激活的环境。
+func (a *App) DeactivateEnvironment() error {
+	a.envOpMu.Lock()
+	defer a.envOpMu.Unlock()
 
 	if a.opStore != nil {
-		a.opStore.LogInfo("[API] ActivateEnvironment 成功, 已声明需运行的服务数: %d, 运行时数: %d",
-			len(desired.Services), len(desired.Runtimes))
+		a.opStore.LogInfo("[API] DeactivateEnvironment 调用")
 	}
-	return nil
-}
-
-// hydrateProjectVersionsFromCurrent 把 engine.ProjectDesiredState 中声明的空版本字段按 profile 补齐
-func (a *App) hydrateProjectVersionsFromCurrent(p *engine.ProjectDesiredState, envID string) {
-	if p == nil || envID == "" || a.envMgr == nil {
-		return
+	activeID, _ := a.getActiveEnvironmentID()
+	if activeID == "" {
+		return nil
 	}
-	profile, err := a.envMgr.Get(envID)
+	env, err := a.envMgr.Get(activeID)
 	if err != nil {
-		return
+		return fmt.Errorf("环境 %q 未找到: %w", activeID, err)
 	}
-	if p.PHPVersion == "" {
-		if spec, ok := profile.Runtimes["php"]; ok {
-			p.PHPVersion = spec.Version
-		}
-	}
-	if p.NodeVersion == "" {
-		if spec, ok := profile.Runtimes["node"]; ok {
-			p.NodeVersion = spec.Version
-		}
-	}
-	if p.PythonVersion == "" {
-		if spec, ok := profile.Runtimes["python"]; ok {
-			p.PythonVersion = spec.Version
-		}
-	}
-	if p.NginxVersion == "" {
-		if spec, ok := profile.Services["nginx"]; ok {
-			p.NginxVersion = spec.Version
-		}
-	}
-	if p.MySQLVersion == "" {
-		if spec, ok := profile.Services["mysql"]; ok {
-			p.MySQLVersion = spec.Version
-		}
-	}
+	return a.reconciler.Deactivate(env)
 }
 
-// ActivateEnvironmentForProject 按单个项目关联的环境进行激活（供 Sites 页面按钮调用）
+// ActivateEnvironmentForProject 按项目关联的环境激活。
 func (a *App) ActivateEnvironmentForProject(projectID string) error {
 	if a.opStore != nil {
 		a.opStore.LogInfo("[API] ActivateEnvironmentForProject 调用, projectID: %q", projectID)
@@ -574,177 +445,149 @@ func (a *App) ActivateEnvironmentForProject(projectID string) error {
 	if proj.EnvironmentID != "" {
 		return a.ActivateEnvironment(proj.EnvironmentID)
 	}
-	// 未设置环境的项目，退化为走"所有已启用项目联合推导"（此时会启用本项目所需）
-	if !proj.Enabled {
-		_ = a.projMgr.Toggle(projectID)
-	}
-	return a.ActivateEnvironment("")
+	return fmt.Errorf("项目 %q 未关联环境", projectID)
 }
 
-// DeactivateEnvironment 停止当前所有运行中的服务/运行时（逆向顺序，由 reconciler 负责）。
-func (a *App) DeactivateEnvironment() error {
-	if a.opStore != nil {
-		a.opStore.LogInfo("[API] DeactivateEnvironment 调用")
+func (a *App) getActiveEnvironmentID() (string, error) {
+	type activeState struct {
+		ActiveEnvironmentID string `json:"activeEnvironmentId"`
 	}
-	current, err := a.reconciler.GetCurrentState()
+	var s activeState
+	dataDir := a.cfg.Get().InstallDir
+	path := filepath.Join(dataDir, "config", "environment.json")
+	data, err := os.ReadFile(path)
 	if err != nil {
-		return fmt.Errorf("读取当前环境失败: %w", err)
+		return "", nil
 	}
-	desired := engine.EnvironmentState{
-		Services: make(map[string]engine.ServiceDesiredState),
-		Projects: make(map[string]engine.ProjectDesiredState),
-		Runtimes: make(map[string]engine.RuntimeDesiredState),
-	}
-	for pid, proj := range current.Projects {
-		desired.Projects[pid] = proj
-	}
-	for sid, svc := range current.Services {
-		desired.Services[sid] = engine.ServiceDesiredState{
-			Version: svc.Version,
-			State:   core.StatusStopped,
-		}
-	}
-	for rid, rt := range current.Runtimes {
-		desired.Runtimes[rid] = engine.RuntimeDesiredState{
-			Version: rt.Version,
-			State:   core.StatusStopped,
-			Active:  rt.Active,
-		}
-	}
-	if err := a.ApplyEnvironment(desired); err != nil {
-		if a.opStore != nil {
-			a.opStore.LogError("[API] DeactivateEnvironment 失败: %v", err)
-		}
-		return err
-	}
-
-	// 清除当前激活的 profile ID
-	desired.ActiveProfileID = ""
-	if saveErr := a.stateStore.Save(desired); saveErr != nil {
-		if a.opStore != nil {
-			a.opStore.LogWarn("[API] DeactivateEnvironment 清除 activeProfileID 失败: %v", saveErr)
-		}
-	}
-
-	if a.opStore != nil {
-		a.opStore.LogInfo("[API] DeactivateEnvironment 成功")
-	}
-	return nil
+	json.Unmarshal(data, &s)
+	return s.ActiveEnvironmentID, nil
 }
 
-// ==================== EnvironmentProfile APIs ====================
+// ==================== Environment CRUD APIs ====================
 
-// hydrateProjectVersions 当项目引用了 EnvironmentProfile 且自身版本字段为空时，
-// 用 Profile 中声明的版本填充，保持与旧版散字段的一致性。
-func (a *App) hydrateProjectVersions(p *core.Project) {
-	if p == nil || p.EnvironmentID == "" || a.envMgr == nil {
-		return
-	}
-	profile, err := a.envMgr.Get(p.EnvironmentID)
-	if err != nil {
-		return
-	}
-	if p.PHPVersion == "" {
-		if spec, ok := profile.Runtimes["php"]; ok {
-			p.PHPVersion = spec.Version
-		}
-	}
-	if p.NodeVersion == "" {
-		if spec, ok := profile.Runtimes["node"]; ok {
-			p.NodeVersion = spec.Version
-		}
-	}
-	if p.PythonVersion == "" {
-		if spec, ok := profile.Runtimes["python"]; ok {
-			p.PythonVersion = spec.Version
-		}
-	}
-	if p.NginxVersion == "" {
-		if spec, ok := profile.Services["nginx"]; ok {
-			p.NginxVersion = spec.Version
-		}
-	}
-	if p.MySQLVersion == "" {
-		if spec, ok := profile.Services["mysql"]; ok {
-			p.MySQLVersion = spec.Version
-		}
-	}
-	if len(p.Dependencies) == 0 && len(profile.Dependencies) > 0 {
-		p.Dependencies = make(map[string]string)
-		for k, v := range profile.Dependencies {
-			p.Dependencies[k] = v
-		}
-	}
+type EnvironmentWithUsage struct {
+	environment.Environment
+	ProjectCount int `json:"projectCount"`
 }
 
-// profileProjectUsage 统计每个 profile 被多少项目引用，用于 UI 展示 & 删除校验
-func (a *App) profileProjectUsage(profileID string) int {
+func (a *App) environmentProjectUsage(envID string) int {
 	if a.projMgr == nil {
 		return 0
 	}
 	cnt := 0
 	for _, proj := range a.projMgr.List() {
-		if proj.EnvironmentID == profileID {
+		if proj.EnvironmentID == envID {
 			cnt++
 		}
 	}
 	return cnt
 }
 
-// EnvironmentProfileWithUsage 给前端返回带引用计数的 Profile 列表
-type EnvironmentProfileWithUsage struct {
-	environment.EnvironmentProfile
-	ProjectCount int `json:"projectCount"`
-}
-
-func (a *App) ListEnvironmentProfiles() ([]EnvironmentProfileWithUsage, error) {
+func (a *App) ListEnvironments() ([]EnvironmentWithUsage, error) {
 	if a.envMgr == nil {
 		return nil, nil
 	}
-	raw := a.envMgr.List(nil)
-	result := make([]EnvironmentProfileWithUsage, 0, len(raw))
-	for _, p := range raw {
-		result = append(result, EnvironmentProfileWithUsage{
-			EnvironmentProfile: p,
-			ProjectCount:        a.profileProjectUsage(p.ID),
+	raw := a.envMgr.List()
+	result := make([]EnvironmentWithUsage, 0, len(raw))
+	for _, e := range raw {
+		result = append(result, EnvironmentWithUsage{
+			Environment:  e,
+			ProjectCount: a.environmentProjectUsage(e.ID),
 		})
 	}
 	return result, nil
 }
 
-func (a *App) GetEnvironmentProfile(id string) (EnvironmentProfileWithUsage, error) {
+func (a *App) GetEnvironment(id string) (EnvironmentWithUsage, error) {
 	if a.envMgr == nil {
-		return EnvironmentProfileWithUsage{}, core.ErrNotFound
+		return EnvironmentWithUsage{}, core.ErrNotFound
 	}
-	p, err := a.envMgr.Get(id)
+	e, err := a.envMgr.Get(id)
 	if err != nil {
-		return EnvironmentProfileWithUsage{}, err
+		return EnvironmentWithUsage{}, err
 	}
-	return EnvironmentProfileWithUsage{
-		EnvironmentProfile: p,
-		ProjectCount:        a.profileProjectUsage(id),
+	return EnvironmentWithUsage{
+		Environment:  e,
+		ProjectCount: a.environmentProjectUsage(id),
 	}, nil
 }
 
-func (a *App) CreateEnvironmentProfile(profile environment.EnvironmentProfile) (environment.EnvironmentProfile, error) {
-	if a.envMgr == nil {
-		return environment.EnvironmentProfile{}, fmt.Errorf("环境管理器未初始化")
+// GetEnvironmentState 返回当前运行状态快照（服务/项目/运行时 + 当前激活环境），
+// 供前端环境页与仪表盘读取，替代不再适用的 GetEnvironment 模板形状。
+func (a *App) GetEnvironmentState() engine.EnvironmentState {
+	state := engine.EnvironmentState{
+		Services: make(map[string]engine.ServiceDesiredState),
+		Projects: make(map[string]engine.ProjectDesiredState),
+		Runtimes: make(map[string]engine.RuntimeDesiredState),
 	}
-	return a.envMgr.Create(profile)
+	activeID, _ := a.getActiveEnvironmentID()
+	state.ActiveProfileID = activeID
+	state.ActiveEnvironmentID = activeID
+
+	if a.svcMgr != nil {
+		for _, s := range a.svcMgr.List() {
+			state.Services[s.ID] = engine.ServiceDesiredState{
+				Version: s.Version,
+				State:   s.Status,
+			}
+		}
+	}
+	if a.rtMgr != nil {
+		for _, rt := range a.rtMgr.List() {
+			state.Runtimes[rt.ID] = engine.RuntimeDesiredState{
+				Version: rt.Version,
+				State:   rt.Status,
+				Active:  rt.Active,
+			}
+		}
+	}
+	if a.projMgr != nil {
+		for _, p := range a.projMgr.List() {
+			state.Projects[p.ID] = engine.ProjectDesiredState{
+				Name:          p.Name,
+				Type:          p.Type,
+				Root:          p.Root,
+				Domain:        p.Domain,
+				Port:          p.Port,
+				HTTPSPort:     p.HTTPSPort,
+				SSL:           p.SSL,
+				EnvironmentID: p.EnvironmentID,
+				PHPVersion:    p.PHPVersion,
+				MySQLVersion:  p.MySQLVersion,
+				NginxVersion:  p.NginxVersion,
+				NodeVersion:   p.NodeVersion,
+				PythonVersion: p.PythonVersion,
+				ProxyPass:     p.ProxyPass,
+				TargetPort:    p.TargetPort,
+				Rewrite:       p.Rewrite,
+				Notes:         p.Notes,
+				Enabled:       p.Enabled,
+				Dependencies:  p.Dependencies,
+			}
+		}
+	}
+	return state
 }
 
-func (a *App) UpdateEnvironmentProfile(profile environment.EnvironmentProfile) (environment.EnvironmentProfile, error) {
+func (a *App) CreateEnvironment(env environment.Environment) (environment.Environment, error) {
 	if a.envMgr == nil {
-		return environment.EnvironmentProfile{}, fmt.Errorf("环境管理器未初始化")
+		return environment.Environment{}, fmt.Errorf("环境管理器未初始化")
 	}
-	return a.envMgr.Update(profile)
+	return a.envMgr.Create(env)
 }
 
-func (a *App) DeleteEnvironmentProfile(id string) error {
+func (a *App) UpdateEnvironment(env environment.Environment) (environment.Environment, error) {
+	if a.envMgr == nil {
+		return environment.Environment{}, fmt.Errorf("环境管理器未初始化")
+	}
+	return a.envMgr.Update(env)
+}
+
+func (a *App) DeleteEnvironment(id string) error {
 	if a.envMgr == nil {
 		return nil
 	}
-	if a.profileProjectUsage(id) > 0 {
+	if a.environmentProjectUsage(id) > 0 {
 		return core.ErrEnvProfileInUse
 	}
 	return a.envMgr.Delete(id)
@@ -757,53 +600,96 @@ type SaveProjectAsEnvironmentArgs struct {
 	Description string `json:"description"`
 }
 
-func (a *App) SaveProjectAsEnvironment(args SaveProjectAsEnvironmentArgs) (environment.EnvironmentProfile, error) {
+func (a *App) SaveProjectAsEnvironment(args SaveProjectAsEnvironmentArgs) (environment.Environment, error) {
 	if a.envMgr == nil {
-		return environment.EnvironmentProfile{}, fmt.Errorf("环境管理器未初始化")
+		return environment.Environment{}, fmt.Errorf("环境管理器未初始化")
 	}
 	if a.projMgr == nil {
-		return environment.EnvironmentProfile{}, fmt.Errorf("项目管理器未初始化")
+		return environment.Environment{}, fmt.Errorf("项目管理器未初始化")
 	}
 	proj, err := a.projMgr.Get(args.ProjectID)
 	if err != nil {
-		return environment.EnvironmentProfile{}, err
+		return environment.Environment{}, err
 	}
-	a.hydrateProjectVersions(&proj)
 
-	serviceVersions := make(map[string]string)
+	units := make([]environment.UnitSpec, 0)
 	if proj.NginxVersion != "" {
-		serviceVersions["nginx"] = proj.NginxVersion
+		units = append(units, environment.UnitSpec{Kind: "nginx", Version: proj.NginxVersion, Name: "Nginx"})
 	}
 	if proj.MySQLVersion != "" {
-		serviceVersions["mysql"] = proj.MySQLVersion
+		units = append(units, environment.UnitSpec{Kind: "mysql", Version: proj.MySQLVersion, Name: "MySQL"})
 	}
-	for capType, depID := range proj.Dependencies {
-		if strings.HasPrefix(capType, "service:") {
-			svcID := strings.TrimPrefix(capType, "service:")
-			if serviceVersions[svcID] == "" {
-				serviceVersions[svcID] = "latest"
-			}
-			_ = depID
-		}
-	}
-
-	runtimeVersions := make(map[string]string)
 	if proj.PHPVersion != "" {
-		runtimeVersions["php"] = proj.PHPVersion
+		units = append(units, environment.UnitSpec{Kind: "php", Version: proj.PHPVersion, Name: "PHP"})
 	}
 	if proj.NodeVersion != "" {
-		runtimeVersions["node"] = proj.NodeVersion
+		units = append(units, environment.UnitSpec{Kind: "node", Version: proj.NodeVersion, Name: "Node.js"})
 	}
 	if proj.PythonVersion != "" {
-		runtimeVersions["python"] = proj.PythonVersion
+		units = append(units, environment.UnitSpec{Kind: "python", Version: proj.PythonVersion, Name: "Python"})
 	}
 
 	name := args.Name
 	if name == "" {
 		name = proj.Name + " 的环境"
 	}
-	return a.envMgr.SaveProjectAsEnvironment(args.ProjectID, name, args.Description, serviceVersions, runtimeVersions)
+	env := environment.Environment{
+		Name:        name,
+		Description: args.Description,
+		Units:       units,
+	}
+	return a.envMgr.Create(env)
 }
+
+// downloadServiceVersion 下载并安装指定 kind@version 的软件
+func (a *App) downloadServiceVersion(kind, version string) error {
+	var urls []string
+	releases, err := a.dlMgr.GetAvailableVersions(kind)
+	if err != nil {
+		return err
+	}
+	for _, r := range releases {
+		if r.Version == version {
+			if r.URL != "" {
+				urls = append(urls, r.URL)
+			}
+			if r.MirrorURL != "" {
+				urls = append(urls, r.MirrorURL)
+			}
+			break
+		}
+	}
+	if len(urls) == 0 {
+		return fmt.Errorf("未找到 %s@%s 的下载地址", kind, version)
+	}
+
+	destDir := filepath.Join(a.cfg.Get().InstallDir, "programs", kind, version)
+	if err := a.dlMgr.TryDownloadAndExtract(urls, destDir, nil); err != nil {
+		return err
+	}
+
+	if !isRuntime(kind) {
+		a.svcMgr.MarkInstalled(kind, version)
+		if cfgErr := a.svcMgr.Configure(kind + "@" + version); cfgErr != nil {
+			if a.opStore != nil {
+				a.opStore.LogWarn("[ENV] 安装后配置 %s 失败: %v", kind, cfgErr)
+			}
+		}
+	}
+
+	return nil
+}
+
+func isRuntime(kind string) bool {
+	return kind == "php" || kind == "node" || kind == "python"
+}
+
+// 保留旧 API 别名，兼容前端
+func (a *App) ListEnvironmentProfiles() ([]EnvironmentWithUsage, error) { return a.ListEnvironments() }
+func (a *App) GetEnvironmentProfile(id string) (EnvironmentWithUsage, error) { return a.GetEnvironment(id) }
+func (a *App) CreateEnvironmentProfile(env environment.Environment) (environment.Environment, error) { return a.CreateEnvironment(env) }
+func (a *App) UpdateEnvironmentProfile(env environment.Environment) (environment.Environment, error) { return a.UpdateEnvironment(env) }
+func (a *App) DeleteEnvironmentProfile(id string) error { return a.DeleteEnvironment(id) }
 
 
 
@@ -908,6 +794,16 @@ func (a *App) GetServiceConfig(serviceType string) map[string]string {
 		result["displayErrors"] = fmt.Sprintf("%v", pc.DisplayErrors)
 		result["opcacheEnabled"] = fmt.Sprintf("%v", pc.OPcacheEnabled)
 		result["realpathCacheSize"] = pc.RealpathCacheSize
+		result["maxInputTime"] = fmt.Sprintf("%d", pc.MaxInputTime)
+		result["maxInputVars"] = fmt.Sprintf("%d", pc.MaxInputVars)
+		result["maxFileUploads"] = fmt.Sprintf("%d", pc.MaxFileUploads)
+		result["timezone"] = pc.Timezone
+		result["defaultCharset"] = pc.DefaultCharset
+		result["fileUploads"] = fmt.Sprintf("%v", pc.FileUploads)
+		result["sessionGCMaxLifetime"] = fmt.Sprintf("%d", pc.SessionGCMaxLifetime)
+		result["logErrors"] = fmt.Sprintf("%v", pc.LogErrors)
+		result["errorLog"] = pc.ErrorLog
+		result["fixPathinfo"] = fmt.Sprintf("%v", pc.FixPathinfo)
 	case "mysql":
 		mc := settings.MySQLConfig
 		result["innodbBufferPoolSize"] = mc.InnoDBBufferPoolSize
@@ -920,6 +816,18 @@ func (a *App) GetServiceConfig(serviceType string) map[string]string {
 		result["tableOpenCache"] = fmt.Sprintf("%d", mc.TableOpenCache)
 		result["bindAddress"] = mc.BindAddress
 		result["port"] = fmt.Sprintf("%d", mc.Port)
+		result["characterSet"] = mc.CharacterSet
+		result["collation"] = mc.Collation
+		result["sqlMode"] = mc.SQLMode
+		result["skipNameResolve"] = fmt.Sprintf("%v", mc.SkipNameResolve)
+		result["generalLog"] = fmt.Sprintf("%v", mc.GeneralLog)
+		result["slowQueryLog"] = fmt.Sprintf("%v", mc.SlowQueryLog)
+		result["longQueryTime"] = fmt.Sprintf("%d", mc.LongQueryTime)
+		result["maxAllowedPacket"] = mc.MaxAllowedPacket
+		result["keyBufferSize"] = mc.KeyBufferSize
+		result["waitTimeout"] = fmt.Sprintf("%d", mc.WaitTimeout)
+		result["sortBufferSize"] = mc.SortBufferSize
+		result["joinBufferSize"] = mc.JoinBufferSize
 	}
 
 	return result
@@ -951,6 +859,46 @@ func (a *App) GetRuntimes() []core.RuntimeInfo {
 	return result
 }
 
+func (a *App) StartRuntime(id string) error {
+	if a.opStore != nil {
+		a.opStore.LogInfo("[API] StartRuntime 调用, id: %q", id)
+	}
+	name := runtimeNames[id]
+	if name == "" {
+		name = id
+	}
+	if err := a.rtMgr.Start(id); err != nil {
+		if a.opStore != nil {
+			a.opStore.Add("启动", name, "", "失败: "+err.Error())
+		}
+		return err
+	}
+	if a.opStore != nil {
+		a.opStore.Add("启动", name, "", "成功")
+	}
+	return nil
+}
+
+func (a *App) StopRuntime(id string) error {
+	if a.opStore != nil {
+		a.opStore.LogInfo("[API] StopRuntime 调用, id: %q", id)
+	}
+	name := runtimeNames[id]
+	if name == "" {
+		name = id
+	}
+	if err := a.rtMgr.Stop(id); err != nil {
+		if a.opStore != nil {
+			a.opStore.Add("停止", name, "", "失败: "+err.Error())
+		}
+		return err
+	}
+	if a.opStore != nil {
+		a.opStore.Add("停止", name, "", "成功")
+	}
+	return nil
+}
+
 func (a *App) GetPHPRegistry() []runtime.PHPVersionInfo {
 	return a.rtMgr.GetPHPRegistryVersions()
 }
@@ -965,6 +913,34 @@ func (a *App) GetPHPExtensions(version string) ([]runtime.PHPExtensionInfo, erro
 
 func (a *App) SavePHPExtensions(version string, extensions []string) error {
 	return a.rtMgr.SaveExtensions(version, extensions)
+}
+
+// hydrateProjectVersions 当项目引用了 Environment 且自身版本字段为空时，从 Environment 的 Unit 列表中填充
+func (a *App) hydrateProjectVersions(p *core.Project) {
+	if p == nil || p.EnvironmentID == "" || a.envMgr == nil {
+		return
+	}
+	env, err := a.envMgr.Get(p.EnvironmentID)
+	if err != nil {
+		return
+	}
+	for _, u := range env.Units {
+		if p.PHPVersion == "" && u.Kind == "php" {
+			p.PHPVersion = u.Version
+		}
+		if p.NodeVersion == "" && u.Kind == "node" {
+			p.NodeVersion = u.Version
+		}
+		if p.PythonVersion == "" && u.Kind == "python" {
+			p.PythonVersion = u.Version
+		}
+		if p.NginxVersion == "" && u.Kind == "nginx" {
+			p.NginxVersion = u.Version
+		}
+		if p.MySQLVersion == "" && u.Kind == "mysql" {
+			p.MySQLVersion = u.Version
+		}
+	}
 }
 
 // ==================== Project APIs ====================
@@ -1080,6 +1056,31 @@ func (a *App) GetRecentLogLines(count int) ([]string, error) {
 	return a.opStore.ReadRecentLines(count)
 }
 
+// LogToast 将前端 toast 消息写入操作日志与日志文件，保证所有可见消息可被查询。
+func (a *App) LogToast(message, toastType string) {
+	if a.opStore == nil || message == "" {
+		return
+	}
+	status := "成功"
+	switch toastType {
+	case "error":
+		status = "失败"
+	case "warning":
+		status = "警告"
+	case "info":
+		status = "提示"
+	}
+	a.opStore.Add("前端提示", "", message, status)
+}
+
+// ClearLogs 清空操作记录缓冲与当前日志文件。
+func (a *App) ClearLogs() error {
+	if a.opStore == nil {
+		return nil
+	}
+	return a.opStore.Clear()
+}
+
 func (a *App) GetSettings() core.AppSettings {
 	if a.opStore != nil {
 		a.opStore.LogDebug("[API] GetSettings 调用")
@@ -1092,6 +1093,22 @@ func (a *App) GetSettings() core.AppSettings {
 }
 
 func (a *App) SaveSettings(s core.AppSettings) error {
+	old := a.cfg.Get()
+	if old.StartOnBoot != s.StartOnBoot {
+		if s.StartOnBoot {
+			if err := autostart.Enable(); err != nil {
+				a.opStore.Add("设置", "开机自启", "", "启用失败: "+err.Error())
+				return fmt.Errorf("启用开机自启失败: %w", err)
+			}
+			a.opStore.Add("设置", "开机自启", "", "已启用")
+		} else {
+			if err := autostart.Disable(); err != nil {
+				a.opStore.Add("设置", "开机自启", "", "关闭失败: "+err.Error())
+				return fmt.Errorf("关闭开机自启失败: %w", err)
+			}
+			a.opStore.Add("设置", "开机自启", "", "已关闭")
+		}
+	}
 	return a.cfg.Update(s)
 }
 
@@ -1132,11 +1149,11 @@ func (a *App) DownloadService(serviceType, version, url string) error {
 	}
 	for _, r := range releases {
 		if r.Version == version {
-			if r.MirrorURL != "" {
-				urls = append(urls, r.MirrorURL)
-			}
 			if url == "" && r.URL != "" {
 				urls = append(urls, r.URL)
+			}
+			if r.MirrorURL != "" {
+				urls = append(urls, r.MirrorURL)
 			}
 			break
 		}
@@ -1172,7 +1189,7 @@ func (a *App) DownloadService(serviceType, version, url string) error {
 	if svcNames, ok := serviceNames[serviceType]; ok && svcNames != "" {
 		a.svcMgr.MarkInstalled(serviceType, version)
 		a.opStore.Add("下载", serviceNames[serviceType], version, "成功")
-		return a.svcMgr.Configure(serviceType)
+		return a.svcMgr.Configure(serviceType + "@" + version)
 	}
 
 	a.opStore.Add("下载", runtimeNames[serviceType], version, "成功")
@@ -1308,13 +1325,11 @@ func (a *App) GetLogs(serviceID string) ([]log.LogEntry, error) {
 		if svc != nil {
 			logPath = joinPath(installDir, "programs", "mysql", svc.Info.Version, "error.log")
 		}
-	} else if serviceID == "redis" {
-		svc := a.svcMgr.GetService(serviceID)
-		if svc != nil {
-			logPath = joinPath(installDir, "programs", "redis", svc.Info.Version, "redis.log")
-		}
-	} else if strings.HasPrefix(serviceID, "php-") {
-		version := strings.TrimPrefix(serviceID, "php-")
+	} else if strings.HasPrefix(serviceID, "redis@") {
+		version := strings.TrimPrefix(serviceID, "redis@")
+		logPath = joinPath(installDir, "programs", "redis", version, "redis.log")
+	} else if strings.HasPrefix(serviceID, "php@") {
+		version := strings.TrimPrefix(serviceID, "php@")
 		logPath = joinPath(installDir, "programs", "php", version, "php_errors.log")
 	}
 	if logPath == "" {
@@ -1351,14 +1366,6 @@ func joinPath(elem ...string) string {
 
 // ==================== Snapshot APIs ====================
 
-func (a *App) TakeSnapshot() (string, error) {
-	current, err := a.reconciler.GetCurrentState()
-	if err != nil {
-		return "", err
-	}
-	return a.reconciler.SnapshotManager().TakeSnapshot(a.ctx, current)
-}
-
 func (a *App) GetSnapshots() ([]string, error) {
 	if a.opStore != nil {
 		a.opStore.LogDebug("[API] GetSnapshots 调用")
@@ -1374,14 +1381,6 @@ func (a *App) GetSnapshots() ([]string, error) {
 		a.opStore.LogDebug("[API] GetSnapshots 返回, 数量: %d", len(result))
 	}
 	return result, nil
-}
-
-func (a *App) RollbackSnapshot(snapshotID string) error {
-	env, err := a.reconciler.SnapshotManager().LoadSnapshot(a.ctx, snapshotID)
-	if err != nil {
-		return err
-	}
-	return a.reconciler.Apply(env)
 }
 
 func (a *App) GetSnapshotDetail(snapshotID string) (engine.EnvironmentState, error) {

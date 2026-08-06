@@ -42,8 +42,11 @@ type Config struct {
 }
 
 func NewConfig() *Config {
-	installDir := readBootstrap()
+	return NewConfigForDir(readBootstrap())
+}
 
+// NewConfigForDir 以指定安装目录创建配置，不读写用户 bootstrap 文件（用于测试/嵌入式场景）。
+func NewConfigForDir(installDir string) *Config {
 	v := viper.New()
 	v.SetConfigName("settings")
 	v.SetConfigType("toml")
@@ -62,13 +65,12 @@ func NewConfig() *Config {
 
 	filePath := filepath.Join(cfgDir, "settings.toml")
 
-	cfg := &Config{
+	return &Config{
 		viper:      v,
 		installDir: installDir,
 		filePath:   filePath,
 		Settings:   settings,
 	}
-	return cfg
 }
 
 func setViperDefaults(v *viper.Viper) {
@@ -91,6 +93,16 @@ func setViperDefaults(v *viper.Viper) {
 	v.SetDefault("phpConfig.displayErrors", def.PHPConfig.DisplayErrors)
 	v.SetDefault("phpConfig.opcacheEnabled", def.PHPConfig.OPcacheEnabled)
 	v.SetDefault("phpConfig.realpathCacheSize", def.PHPConfig.RealpathCacheSize)
+	v.SetDefault("phpConfig.maxInputTime", def.PHPConfig.MaxInputTime)
+	v.SetDefault("phpConfig.maxInputVars", def.PHPConfig.MaxInputVars)
+	v.SetDefault("phpConfig.maxFileUploads", def.PHPConfig.MaxFileUploads)
+	v.SetDefault("phpConfig.timezone", def.PHPConfig.Timezone)
+	v.SetDefault("phpConfig.defaultCharset", def.PHPConfig.DefaultCharset)
+	v.SetDefault("phpConfig.fileUploads", def.PHPConfig.FileUploads)
+	v.SetDefault("phpConfig.sessionGCMaxLifetime", def.PHPConfig.SessionGCMaxLifetime)
+	v.SetDefault("phpConfig.logErrors", def.PHPConfig.LogErrors)
+	v.SetDefault("phpConfig.errorLog", def.PHPConfig.ErrorLog)
+	v.SetDefault("phpConfig.fixPathinfo", def.PHPConfig.FixPathinfo)
 	v.SetDefault("mysqlConfig.innodbBufferPoolSize", def.MySQLConfig.InnoDBBufferPoolSize)
 	v.SetDefault("mysqlConfig.innodbLogFileSize", def.MySQLConfig.InnoDBLogFileSize)
 	v.SetDefault("mysqlConfig.innodbFlushLogAtTrxCommit", def.MySQLConfig.InnoDBFlushLogAtTrxCommit)
@@ -101,6 +113,18 @@ func setViperDefaults(v *viper.Viper) {
 	v.SetDefault("mysqlConfig.tableOpenCache", def.MySQLConfig.TableOpenCache)
 	v.SetDefault("mysqlConfig.bindAddress", def.MySQLConfig.BindAddress)
 	v.SetDefault("mysqlConfig.port", def.MySQLConfig.Port)
+	v.SetDefault("mysqlConfig.characterSet", def.MySQLConfig.CharacterSet)
+	v.SetDefault("mysqlConfig.collation", def.MySQLConfig.Collation)
+	v.SetDefault("mysqlConfig.sqlMode", def.MySQLConfig.SQLMode)
+	v.SetDefault("mysqlConfig.skipNameResolve", def.MySQLConfig.SkipNameResolve)
+	v.SetDefault("mysqlConfig.generalLog", def.MySQLConfig.GeneralLog)
+	v.SetDefault("mysqlConfig.slowQueryLog", def.MySQLConfig.SlowQueryLog)
+	v.SetDefault("mysqlConfig.longQueryTime", def.MySQLConfig.LongQueryTime)
+	v.SetDefault("mysqlConfig.maxAllowedPacket", def.MySQLConfig.MaxAllowedPacket)
+	v.SetDefault("mysqlConfig.keyBufferSize", def.MySQLConfig.KeyBufferSize)
+	v.SetDefault("mysqlConfig.waitTimeout", def.MySQLConfig.WaitTimeout)
+	v.SetDefault("mysqlConfig.sortBufferSize", def.MySQLConfig.SortBufferSize)
+	v.SetDefault("mysqlConfig.joinBufferSize", def.MySQLConfig.JoinBufferSize)
 }
 
 func defaultSettings(installDir string) core.AppSettings {
@@ -126,6 +150,16 @@ func defaultSettings(installDir string) core.AppSettings {
 			DisplayErrors:       false,
 			OPcacheEnabled:      true,
 			RealpathCacheSize:   "4096K",
+			MaxInputTime:        60,
+			MaxInputVars:        3000,
+			MaxFileUploads:      20,
+			Timezone:            "Asia/Shanghai",
+			DefaultCharset:      "UTF-8",
+			FileUploads:         true,
+			SessionGCMaxLifetime: 7200,
+			LogErrors:           true,
+			ErrorLog:            "php_errors.log",
+			FixPathinfo:         true,
 		},
 		MySQLConfig: core.MySQLSettings{
 			InnoDBBufferPoolSize:      "256M",
@@ -138,6 +172,18 @@ func defaultSettings(installDir string) core.AppSettings {
 			TableOpenCache:            400,
 			BindAddress:               "127.0.0.1",
 			Port:                      3306,
+			CharacterSet:              "utf8mb4",
+			Collation:                 "utf8mb4_unicode_ci",
+			SQLMode:                   "STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION",
+			SkipNameResolve:           false,
+			GeneralLog:                false,
+			SlowQueryLog:              false,
+			LongQueryTime:             2,
+			MaxAllowedPacket:          "16M",
+			KeyBufferSize:             "64M",
+			WaitTimeout:               28800,
+			SortBufferSize:            "2M",
+			JoinBufferSize:            "2M",
 		},
 	}
 }

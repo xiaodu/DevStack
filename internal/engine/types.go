@@ -10,6 +10,8 @@ type EnvironmentState struct {
 	Runtimes map[string]RuntimeDesiredState `json:"runtimes"`
 	// ActiveProfileID 记录当前激活的环境模板 ID（空表示基于项目推导）
 	ActiveProfileID string `json:"activeProfileID,omitempty"`
+	// ActiveEnvironmentID 与 SaveActive 写入的 activeEnvironmentId 对称（v4：系统仅持久化此一条运行时信息）
+	ActiveEnvironmentID string `json:"activeEnvironmentId,omitempty"`
 }
 
 type ServiceDesiredState struct {
@@ -45,33 +47,4 @@ type RuntimeDesiredState struct {
 	Active  bool                 `json:"active"`
 }
 
-type ChangeType string
 
-const (
-	ChangeStart     ChangeType = "start"
-	ChangeStop      ChangeType = "stop"
-	ChangeConfigure ChangeType = "configure"
-	ChangeCreate    ChangeType = "create"
-	ChangeDelete    ChangeType = "delete"
-	ChangeUpdate    ChangeType = "update"
-)
-
-const (
-	EntityService  = "service"
-	EntityProject  = "project"
-	EntityRuntime  = "runtime"
-)
-
-type Change struct {
-	Type      ChangeType        `json:"type"`
-	EntityID  string            `json:"entityId"`
-	EntityType string           `json:"entityType"`
-	From      interface{}       `json:"from,omitempty"`
-	To        interface{}       `json:"to,omitempty"`
-}
-
-type Reconciler interface {
-	Apply(env EnvironmentState) error
-	Diff(env EnvironmentState) ([]Change, error)
-	GetCurrentState() (EnvironmentState, error)
-}

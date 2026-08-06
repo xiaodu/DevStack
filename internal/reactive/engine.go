@@ -3,6 +3,7 @@ package reactive
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 )
 
 type EventHandler func(event *Event)
@@ -12,21 +13,36 @@ type Engine struct {
 	subscribers  map[EventType][]EventHandler
 	ruleSet      *RuleSet
 	eventBuffer  chan *Event
-	running      bool
+	running      atomic.Bool
+	dropped      atomic.Uint64
+	onDropped    func(event *Event)
 	ctx          context.Context
 	cancel       context.CancelFunc
 }
 
 func NewEngine(bufferSize int) *Engine {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Engine{
+	e := &Engine{
 		subscribers: make(map[EventType][]EventHandler),
 		ruleSet:     NewRuleSet(),
 		eventBuffer: make(chan *Event, bufferSize),
-		running:     true,
 		ctx:         ctx,
 		cancel:      cancel,
 	}
+	e.running.Store(true)
+	return e
+}
+
+// SetOnDropped 注册缓冲满时被丢弃事件的回调，用于可观测化（日志/指标）。
+func (e *Engine) SetOnDropped(fn func(event *Event)) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.onDropped = fn
+}
+
+// DroppedCount 返回因缓冲满而丢弃的事件数。
+func (e *Engine) DroppedCount() uint64 {
+	return e.dropped.Load()
 }
 
 func (e *Engine) Start() {
@@ -34,11 +50,8 @@ func (e *Engine) Start() {
 }
 
 func (e *Engine) Stop() {
-	e.mu.Lock()
-	e.running = false
-	e.mu.Unlock()
+	e.running.Store(false)
 	e.cancel()
-	close(e.eventBuffer)
 }
 
 func (e *Engine) processEvents() {
@@ -74,13 +87,20 @@ func (e *Engine) executeRules(event *Event) {
 }
 
 func (e *Engine) Publish(event *Event) {
-	if !e.running {
+	if !e.running.Load() {
 		return
 	}
 
 	select {
 	case e.eventBuffer <- event:
 	default:
+		e.dropped.Add(1)
+		e.mu.RLock()
+		cb := e.onDropped
+		e.mu.RUnlock()
+		if cb != nil {
+			go cb(event)
+		}
 	}
 }
 

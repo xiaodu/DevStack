@@ -1,534 +1,256 @@
 package engine
 
 import (
-	"context"
 	"fmt"
+	"sort"
+	"strings"
+	"sync"
 
-	"github.com/xiaodu/DevStack/internal/core"
+	"github.com/xiaodu/DevStack/internal/environment"
 	"github.com/xiaodu/DevStack/internal/graph"
 	"github.com/xiaodu/DevStack/internal/project"
 	"github.com/xiaodu/DevStack/internal/runtime"
 	"github.com/xiaodu/DevStack/internal/service"
-	"github.com/xiaodu/DevStack/internal/tx"
 )
 
 type ReconcilerImpl struct {
-	stateStore    *StateStore
-	svcMgr        *service.Manager
-	projMgr       *project.Manager
-	rtMgr         *runtime.Manager
-	resolver      *graph.Resolver
-	snapshotMgr   *SnapshotManager
+	stateStore  *StateStore
+	svcMgr      *service.Manager
+	projMgr     *project.Manager
+	rtMgr       *runtime.Manager
+	resolver    *graph.Resolver
+	snapshotMgr *SnapshotManager
+	reporter    OperationReporter
+	mu          sync.Mutex
 }
 
 func NewReconciler(stateStore *StateStore, svcMgr *service.Manager, projMgr *project.Manager, rtMgr *runtime.Manager) *ReconcilerImpl {
 	return &ReconcilerImpl{
-		stateStore:   stateStore,
-		svcMgr:       svcMgr,
-		projMgr:      projMgr,
-		rtMgr:        rtMgr,
-		resolver:     graph.NewResolver(),
-		snapshotMgr:  NewSnapshotManager(stateStore.dataDir),
+		stateStore:  stateStore,
+		svcMgr:      svcMgr,
+		projMgr:     projMgr,
+		rtMgr:       rtMgr,
+		resolver:    graph.NewResolver(),
+		snapshotMgr: NewSnapshotManager(stateStore.dataDir),
 	}
 }
 
-func (r *ReconcilerImpl) Apply(env EnvironmentState) error {
-	current, err := r.stateStore.Load()
-	if err != nil {
-		return fmt.Errorf("加载当前状态失败: %w", err)
+// SetReporter 注入编排进度上报器（由 App 实现，桥接到前端）。
+func (r *ReconcilerImpl) SetReporter(reporter OperationReporter) {
+	r.reporter = reporter
+}
+
+func kindFromID(id string) string {
+	if idx := strings.IndexByte(id, '@'); idx > 0 {
+		return id[:idx]
+	}
+	return id
+}
+
+func isRuntime(kind string) bool {
+	return kind == "php" || kind == "node" || kind == "python"
+}
+
+var unitKindNames = map[string]string{
+	"nginx": "Nginx", "apache": "Apache", "mysql": "MySQL", "postgresql": "PostgreSQL",
+	"mongodb": "MongoDB", "redis": "Redis", "memcached": "Memcached",
+	"php": "PHP", "node": "Node.js", "python": "Python", "composer": "Composer",
+}
+
+// unitStartRank 描述组件启动依赖序：数据库/缓存 → 运行时 → Web 服务器。
+// Web 服务器（nginx）需要运行时（php）的端口生成上游配置，因此必须最后启动。
+var unitStartRank = map[string]int{
+	"mysql": 0, "postgresql": 0, "mongodb": 0, "redis": 0, "memcached": 0,
+	"php": 1, "node": 1, "python": 1, "composer": 1,
+	"nginx": 2, "apache": 2,
+}
+
+func unitRank(kind string) int {
+	if r, ok := unitStartRank[kind]; ok {
+		return r
+	}
+	return 1
+}
+
+func unitLabel(u environment.UnitSpec) string {
+	name := unitKindNames[u.Kind]
+	if name == "" {
+		name = u.Kind
+	}
+	if u.Version != "" {
+		return fmt.Sprintf("%s %s", name, u.Version)
+	}
+	return name
+}
+
+// ── 编排进度上报 ──
+
+func (r *ReconcilerImpl) beginPlan(action, title string, stops, starts []environment.UnitSpec) {
+	if r.reporter == nil {
+		return
+	}
+	steps := make([]StepInfo, 0, len(stops)+len(starts))
+	for _, u := range stops {
+		steps = append(steps, StepInfo{
+			ID: u.Kind + "@" + u.Version, Kind: u.Kind, Version: u.Version,
+			Label: unitLabel(u), Phase: "stop", State: StepPending,
+		})
+	}
+	for _, u := range starts {
+		steps = append(steps, StepInfo{
+			ID: u.Kind + "@" + u.Version, Kind: u.Kind, Version: u.Version,
+			Label: unitLabel(u), Phase: "start", State: StepPending,
+		})
+	}
+	r.reporter.OnOperationBegin(action, title, steps)
+}
+
+func (r *ReconcilerImpl) step(id string, state StepState, message string) {
+	if r.reporter == nil {
+		return
+	}
+	r.reporter.OnOperationStep(StepInfo{ID: id, State: state, Message: message})
+}
+
+func (r *ReconcilerImpl) end(action string, ok bool, message string) {
+	if r.reporter == nil {
+		return
+	}
+	r.reporter.OnOperationEnd(action, ok, message)
+}
+
+// Activate 从旧环境切换到新环境：先停旧的全部，再启新的全部。
+// 分两阶段展示：停止阶段和启动阶段各自独立遮罩，避免混淆。
+func (r *ReconcilerImpl) Activate(oldEnv, newEnv environment.Environment) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// ── 阶段 1：停止旧环境 ──
+	if len(oldEnv.Units) > 0 {
+		r.beginPlan("activate-stop", "停止旧环境", oldEnv.Units, nil)
+		r.stopUnits(oldEnv.Units)
+		r.end("activate-stop", true, "")
 	}
 
-	changes := computeDiff(current, env)
-	if len(changes) == 0 {
-		return nil
+	// ── 阶段 2：启动新环境 ──
+	title := "启动环境"
+	if newEnv.Name != "" {
+		title = fmt.Sprintf("启动「%s」", newEnv.Name)
 	}
-
-	sortedChanges := r.sortChangesByDependency(changes, env)
-
-	txn := tx.NewTransaction("apply-environment")
-
-	snapStep, _ := r.snapshotMgr.CreateSnapshotStep(current)
-	txn.Step("snapshot-before-apply", snapStep, func(ctx context.Context) error {
-		return r.snapshotMgr.RestoreLastSnapshot()
-	})
-
-	for _, change := range sortedChanges {
-		compensate := r.createCompensator(change, current)
-		txn.Step(
-			fmt.Sprintf("%s-%s-%s", change.EntityType, change.EntityID, change.Type),
-			func(ctx context.Context) error {
-				return r.executeChange(change, env)
-			},
-			compensate,
-		)
+	r.beginPlan("activate-start", title, nil, newEnv.Units)
+	if err := r.startUnits(newEnv.Units); err != nil {
+		r.end("activate-start", false, err.Error())
+		return err
 	}
-
-	txn.Step("save-state", func(ctx context.Context) error {
-		return r.stateStore.Save(env)
-	}, func(ctx context.Context) error {
-		return r.stateStore.Save(current)
-	})
-
-	if err := txn.Commit(); err != nil {
-		return fmt.Errorf("应用环境事务失败: %w", err)
+	if err := r.stateStore.SaveActive(newEnv.ID); err != nil {
+		r.end("activate-start", false, err.Error())
+		return err
 	}
-
+	r.end("activate-start", true, "")
 	return nil
 }
 
-func (r *ReconcilerImpl) createCompensator(change Change, current EnvironmentState) func(ctx context.Context) error {
-	switch change.EntityType {
-	case EntityService:
-		return r.createServiceCompensator(change, current)
-	case EntityProject:
-		return r.createProjectCompensator(change, current)
-	case EntityRuntime:
-		return r.createRuntimeCompensator(change, current)
-	default:
-		return tx.NewCompensator().Noop()
+// ActivateOnly 仅切换 activeEnvironmentId，不启停任何组件。
+func (r *ReconcilerImpl) ActivateOnly(envID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.beginPlan("activate-only", "切换激活标记", nil, nil)
+	if err := r.stateStore.SaveActive(envID); err != nil {
+		r.end("activate-only", false, err.Error())
+		return err
+	}
+	r.end("activate-only", true, "")
+	return nil
+}
+
+// Run 启动指定环境的所有组件，不修改 activeEnvironmentId。
+func (r *ReconcilerImpl) Run(env environment.Environment) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	title := "运行环境"
+	if env.Name != "" {
+		title = fmt.Sprintf("运行环境「%s」", env.Name)
+	}
+	r.beginPlan("run", title, nil, env.Units)
+	if err := r.startUnits(env.Units); err != nil {
+		r.end("run", false, err.Error())
+		return err
+	}
+	r.end("run", true, "")
+	return nil
+}
+
+// Deactivate 停止环境中的所有 Unit 并清除激活标记。
+func (r *ReconcilerImpl) Deactivate(env environment.Environment) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.beginPlan("deactivate", "停止环境", env.Units, nil)
+	r.stopUnits(env.Units)
+	if err := r.stateStore.SaveActive(""); err != nil {
+		r.end("deactivate", false, err.Error())
+		return err
+	}
+	r.end("deactivate", true, "")
+	return nil
+}
+
+// stopUnits 逆依赖序停止：Web → 运行时 → 数据库/缓存。
+func (r *ReconcilerImpl) stopUnits(units []environment.UnitSpec) {
+	ordered := append([]environment.UnitSpec{}, units...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		return unitRank(ordered[i].Kind) > unitRank(ordered[j].Kind)
+	})
+	for _, u := range ordered {
+		id := u.Kind + "@" + u.Version
+		name := unitLabel(u)
+		r.step(id, StepActive, fmt.Sprintf("正在停止 %s", name))
+		if isRuntime(u.Kind) {
+			_ = r.rtMgr.Stop(id)
+		} else {
+			_ = r.svcMgr.Stop(id)
+		}
+		r.step(id, StepDone, fmt.Sprintf("%s 已停止", name))
 	}
 }
 
-func (r *ReconcilerImpl) createServiceCompensator(change Change, current EnvironmentState) func(ctx context.Context) error {
-	switch change.Type {
-	case ChangeStart:
-		return func(ctx context.Context) error {
-			return r.svcMgr.Stop(change.EntityID)
-		}
-	case ChangeStop:
-		return func(ctx context.Context) error {
-			return r.svcMgr.Start(change.EntityID)
-		}
-	case ChangeCreate:
-		return func(ctx context.Context) error {
-			return r.svcMgr.Stop(change.EntityID)
-		}
-	case ChangeDelete:
-		return func(ctx context.Context) error {
-			if _, ok := current.Services[change.EntityID]; ok {
-				return r.svcMgr.Start(change.EntityID)
+// startUnits 按依赖序启动：数据库/缓存 → 运行时 → Web 服务器。
+// 服务在启动前先落盘最新配置（nginx 的 php 上游、mysql 的 my.ini、redis 的 conf）。
+func (r *ReconcilerImpl) startUnits(units []environment.UnitSpec) error {
+	ordered := append([]environment.UnitSpec{}, units...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		return unitRank(ordered[i].Kind) < unitRank(ordered[j].Kind)
+	})
+	for _, u := range ordered {
+		id := u.Kind + "@" + u.Version
+		name := unitLabel(u)
+		if isRuntime(u.Kind) {
+			r.step(id, StepActive, fmt.Sprintf("正在启动 %s", name))
+			if err := r.rtMgr.Start(id); err != nil {
+				r.step(id, StepError, fmt.Sprintf("%s 启动失败", name))
+				return fmt.Errorf("启动 %s 失败: %w", id, err)
 			}
-			return nil
-		}
-	default:
-		return tx.NewCompensator().Noop()
-	}
-}
-
-func (r *ReconcilerImpl) createProjectCompensator(change Change, current EnvironmentState) func(ctx context.Context) error {
-	switch change.Type {
-	case ChangeStart:
-		return func(ctx context.Context) error {
-			return r.projMgr.Disable(change.EntityID)
-		}
-	case ChangeStop:
-		return func(ctx context.Context) error {
-			return r.projMgr.Enable(change.EntityID)
-		}
-	case ChangeCreate:
-		return func(ctx context.Context) error {
-			return r.projMgr.Delete(change.EntityID)
-		}
-	case ChangeDelete:
-		return func(ctx context.Context) error {
-			if proj, ok := current.Projects[change.EntityID]; ok {
-				p := core.Project{
-					ID:           change.EntityID,
-					Name:         proj.Name,
-					Type:         proj.Type,
-					Root:         proj.Root,
-					Domain:       proj.Domain,
-					Port:         proj.Port,
-					HTTPSPort:    proj.HTTPSPort,
-					SSL:          proj.SSL,
-					PHPVersion:   proj.PHPVersion,
-					ProxyPass:    proj.ProxyPass,
-					TargetPort:   proj.TargetPort,
-					Rewrite:      proj.Rewrite,
-					Notes:        proj.Notes,
-					Enabled:      proj.Enabled,
-					Dependencies: proj.Dependencies,
-				}
-				r.projMgr.Create(p)
-				return nil
-			}
-			return nil
-		}
-	default:
-		return tx.NewCompensator().Noop()
-	}
-}
-
-func (r *ReconcilerImpl) createRuntimeCompensator(change Change, current EnvironmentState) func(ctx context.Context) error {
-	switch change.Type {
-	case ChangeStart:
-		return func(ctx context.Context) error {
-			return r.rtMgr.Stop(change.EntityID)
-		}
-	case ChangeStop:
-		return func(ctx context.Context) error {
-			return r.rtMgr.Start(change.EntityID)
-		}
-	case ChangeCreate:
-		return func(ctx context.Context) error {
-			return r.rtMgr.Stop(change.EntityID)
-		}
-	case ChangeDelete:
-		return func(ctx context.Context) error {
-			if rt, ok := current.Runtimes[change.EntityID]; ok {
-				if rt.State == core.StatusRunning {
-					return r.rtMgr.Start(change.EntityID)
-				}
-			}
-			return nil
-		}
-	default:
-		return tx.NewCompensator().Noop()
-	}
-}
-
-func (r *ReconcilerImpl) Diff(env EnvironmentState) ([]Change, error) {
-	return r.stateStore.Diff(env)
-}
-
-func (r *ReconcilerImpl) GetCurrentState() (EnvironmentState, error) {
-	storedEnv, _ := r.stateStore.Load()
-
-	env := EnvironmentState{
-		Services: make(map[string]ServiceDesiredState),
-		Projects: make(map[string]ProjectDesiredState),
-		Runtimes: make(map[string]RuntimeDesiredState),
-	}
-
-	for _, svc := range r.svcMgr.List() {
-		if !svc.Installed {
+			r.step(id, StepDone, fmt.Sprintf("%s 已运行", name))
 			continue
 		}
-		state := svc.Status
-		if storedSvc, ok := storedEnv.Services[svc.ID]; ok {
-			if storedSvc.State != "" {
-				state = storedSvc.State
-			}
+		r.step(id, StepActive, fmt.Sprintf("正在生成 %s 配置", name))
+		if err := r.svcMgr.Configure(id); err != nil {
+			r.step(id, StepError, fmt.Sprintf("%s 配置失败", name))
+			return fmt.Errorf("配置 %s 失败: %w", id, err)
 		}
-		env.Services[svc.ID] = ServiceDesiredState{
-			Version: svc.Version,
-			State:   state,
+		r.step(id, StepActive, fmt.Sprintf("正在启动 %s", name))
+		if err := r.svcMgr.Start(id); err != nil {
+			r.step(id, StepError, fmt.Sprintf("%s 启动失败", name))
+			return fmt.Errorf("启动 %s 失败: %w", id, err)
 		}
+		r.step(id, StepDone, fmt.Sprintf("%s 已运行", name))
 	}
-
-	for _, proj := range r.projMgr.List() {
-		enabled := proj.Enabled
-		if storedProj, ok := storedEnv.Projects[proj.ID]; ok {
-			enabled = storedProj.Enabled
-		}
-		env.Projects[proj.ID] = ProjectDesiredState{
-			Name:          proj.Name,
-			Type:          proj.Type,
-			Root:          proj.Root,
-			Domain:        proj.Domain,
-			Port:          proj.Port,
-			HTTPSPort:     proj.HTTPSPort,
-			SSL:           proj.SSL,
-			EnvironmentID: proj.EnvironmentID,
-			PHPVersion:    proj.PHPVersion,
-			MySQLVersion:  proj.MySQLVersion,
-			NginxVersion:  proj.NginxVersion,
-			NodeVersion:   proj.NodeVersion,
-			PythonVersion: proj.PythonVersion,
-			ProxyPass:     proj.ProxyPass,
-			TargetPort:    proj.TargetPort,
-			Rewrite:       proj.Rewrite,
-			Notes:         proj.Notes,
-			Enabled:       enabled,
-			Dependencies:  proj.Dependencies,
-		}
-	}
-
-	for _, rt := range r.rtMgr.List() {
-		if !rt.Installed {
-			continue
-		}
-		state := rt.Status
-		active := rt.Active
-		if storedRt, ok := storedEnv.Runtimes[rt.ID]; ok {
-			if storedRt.State != "" {
-				state = storedRt.State
-			}
-			active = storedRt.Active
-		}
-		env.Runtimes[rt.ID] = RuntimeDesiredState{
-			Version: rt.Version,
-			State:   state,
-			Active:  active,
-		}
-	}
-
-	return env, nil
+	return nil
 }
 
-// BuildGraph 基于当前已持久化的期望状态构建依赖图。
-// 用于前端可视化、依赖分析、操作前的顺序推导。
-func (r *ReconcilerImpl) BuildGraph() (*graph.DependencyGraph, error) {
-	env, err := r.stateStore.Load()
-	if err != nil {
-		return nil, fmt.Errorf("加载期望状态失败: %w", err)
-	}
-	snap := r.toSnapshot(env)
-	return r.resolver.Resolve(snap)
-}
-
-func (r *ReconcilerImpl) GetDependents(entityType, entityID string) ([]string, error) {
-	g, err := r.BuildGraph()
-	if err != nil {
-		return nil, err
-	}
-	return g.DependentsOf(entityType + ":" + entityID), nil
-}
-
-func (r *ReconcilerImpl) GetDependencies(entityType, entityID string) ([]string, error) {
-	g, err := r.BuildGraph()
-	if err != nil {
-		return nil, err
-	}
-	return g.DependenciesOf(entityType + ":" + entityID), nil
-}
-
-func (r *ReconcilerImpl) GetStartOrder() ([]string, error) {
-	env, err := r.stateStore.Load()
-	if err != nil {
-		return nil, fmt.Errorf("加载期望状态失败: %w", err)
-	}
-	snap := r.toSnapshot(env)
-	return r.resolver.GetStartOrder(snap)
-}
-
-func (r *ReconcilerImpl) GetStopOrder() ([]string, error) {
-	env, err := r.stateStore.Load()
-	if err != nil {
-		return nil, fmt.Errorf("加载期望状态失败: %w", err)
-	}
-	snap := r.toSnapshot(env)
-	return r.resolver.GetStopOrder(snap)
-}
-
+// SnapshotManager exposes the snapshot manager for save/restore operations.
 func (r *ReconcilerImpl) SnapshotManager() *SnapshotManager {
 	return r.snapshotMgr
-}
-
-func (r *ReconcilerImpl) sortChangesByDependency(changes []Change, env EnvironmentState) []Change {
-	var stops []Change
-	var starts []Change
-	var others []Change
-
-	for _, change := range changes {
-		switch change.Type {
-		case ChangeStop:
-			stops = append(stops, change)
-		case ChangeStart:
-			starts = append(starts, change)
-		default:
-			others = append(others, change)
-		}
-	}
-
-	snapshot := r.toSnapshot(env)
-	startOrder, err := r.resolver.GetStartOrder(snapshot)
-	if err != nil {
-		result := append(stops, others...)
-		result = append(result, starts...)
-		return result
-	}
-
-	priority := make(map[string]int)
-	for i, id := range startOrder {
-		priority[id] = i
-	}
-
-	sortByPriority := func(list []Change) {
-		for i := 1; i < len(list); i++ {
-			for j := i; j > 0; j-- {
-				curPrio := priority[changeNodeID(list[j])]
-				prevPrio := priority[changeNodeID(list[j-1])]
-				if curPrio < prevPrio {
-					list[j], list[j-1] = list[j-1], list[j]
-				} else {
-					break
-				}
-			}
-		}
-	}
-
-	sortByPriority(stops)
-	sortByPriority(starts)
-
-	result := append(stops, others...)
-	result = append(result, starts...)
-	return result
-}
-
-func (r *ReconcilerImpl) toSnapshot(env EnvironmentState) graph.EnvironmentSnapshot {
-	snap := graph.EnvironmentSnapshot{
-		Services: make(map[string]graph.ServiceDesiredState),
-		Projects: make(map[string]graph.ProjectDesiredState),
-		Runtimes: make(map[string]graph.RuntimeDesiredState),
-	}
-
-	for id, svc := range env.Services {
-		snap.Services[id] = graph.ServiceDesiredState{
-			Version: svc.Version,
-			State:   string(svc.State),
-		}
-	}
-
-	for id, rt := range env.Runtimes {
-		snap.Runtimes[id] = graph.RuntimeDesiredState{
-			Version: rt.Version,
-			State:   string(rt.State),
-			Active:  rt.Active,
-		}
-	}
-
-	for id, proj := range env.Projects {
-		snap.Projects[id] = graph.ProjectDesiredState{
-			Name:          proj.Name,
-			Domain:        proj.Domain,
-			Enabled:       proj.Enabled,
-			PHPVersion:    proj.PHPVersion,
-			MySQLVersion:  proj.MySQLVersion,
-			NginxVersion:  proj.NginxVersion,
-			NodeVersion:   proj.NodeVersion,
-			PythonVersion: proj.PythonVersion,
-			Dependencies:  proj.Dependencies,
-		}
-	}
-
-	return snap
-}
-
-func changeNodeID(c Change) string {
-	return c.EntityType + ":" + c.EntityID
-}
-
-func (r *ReconcilerImpl) executeChange(change Change, env EnvironmentState) error {
-	switch change.EntityType {
-	case "service":
-		return r.executeServiceChange(change, env)
-	case "project":
-		return r.executeProjectChange(change, env)
-	case "runtime":
-		return r.executeRuntimeChange(change, env)
-	default:
-		return fmt.Errorf("未知实体类型: %s", change.EntityType)
-	}
-}
-
-func (r *ReconcilerImpl) executeServiceChange(change Change, env EnvironmentState) error {
-	switch change.Type {
-	case ChangeStart:
-		return r.svcMgr.Start(change.EntityID)
-	case ChangeStop:
-		return r.svcMgr.Stop(change.EntityID)
-	case ChangeConfigure:
-		if desired, ok := env.Services[change.EntityID]; ok {
-			return r.svcMgr.SetVersion(change.EntityID, desired.Version)
-		}
-		return fmt.Errorf("未找到服务 %s 的期望状态", change.EntityID)
-	case ChangeCreate:
-		if desired, ok := env.Services[change.EntityID]; ok {
-			if err := r.svcMgr.SetVersion(change.EntityID, desired.Version); err != nil {
-				return err
-			}
-			if desired.State == core.StatusRunning {
-				return r.svcMgr.Start(change.EntityID)
-			}
-		}
-		return fmt.Errorf("未找到服务 %s 的期望状态", change.EntityID)
-	case ChangeDelete:
-		return r.svcMgr.Uninstall(change.EntityID)
-	default:
-		return fmt.Errorf("未知服务变更类型: %s", change.Type)
-	}
-}
-
-func (r *ReconcilerImpl) executeProjectChange(change Change, env EnvironmentState) error {
-	switch change.Type {
-	case ChangeStart:
-		return r.projMgr.Enable(change.EntityID)
-	case ChangeStop:
-		return r.projMgr.Disable(change.EntityID)
-	case ChangeCreate:
-		if desired, ok := env.Projects[change.EntityID]; ok {
-			p := core.Project{
-				ID:           change.EntityID,
-				Name:         desired.Name,
-				Type:         desired.Type,
-				Root:         desired.Root,
-				Domain:       desired.Domain,
-				Port:         desired.Port,
-				HTTPSPort:    desired.HTTPSPort,
-				SSL:          desired.SSL,
-				PHPVersion:   desired.PHPVersion,
-				ProxyPass:    desired.ProxyPass,
-				TargetPort:   desired.TargetPort,
-				Rewrite:      desired.Rewrite,
-				Notes:        desired.Notes,
-				Enabled:      desired.Enabled,
-				Dependencies: desired.Dependencies,
-			}
-			_, err := r.projMgr.Create(p)
-			return err
-		}
-		return fmt.Errorf("未找到项目 %s 的期望状态", change.EntityID)
-	case ChangeDelete:
-		return r.projMgr.Delete(change.EntityID)
-	case ChangeUpdate:
-		if desired, ok := env.Projects[change.EntityID]; ok {
-			p := core.Project{
-				ID:           change.EntityID,
-				Name:         desired.Name,
-				Type:         desired.Type,
-				Root:         desired.Root,
-				Domain:       desired.Domain,
-				Port:         desired.Port,
-				HTTPSPort:    desired.HTTPSPort,
-				SSL:          desired.SSL,
-				PHPVersion:   desired.PHPVersion,
-				ProxyPass:    desired.ProxyPass,
-				TargetPort:   desired.TargetPort,
-				Rewrite:      desired.Rewrite,
-				Notes:        desired.Notes,
-				Enabled:      desired.Enabled,
-				Dependencies: desired.Dependencies,
-			}
-			return r.projMgr.Update(p)
-		}
-		return fmt.Errorf("未找到项目 %s 的期望状态", change.EntityID)
-	default:
-		return fmt.Errorf("未知项目变更类型: %s", change.Type)
-	}
-}
-
-func (r *ReconcilerImpl) executeRuntimeChange(change Change, env EnvironmentState) error {
-	switch change.Type {
-	case ChangeStart:
-		return r.rtMgr.Start(change.EntityID)
-	case ChangeStop:
-		return r.rtMgr.Stop(change.EntityID)
-	case ChangeConfigure:
-		if _, ok := env.Runtimes[change.EntityID]; ok {
-			return r.rtMgr.Start(change.EntityID)
-		}
-		return fmt.Errorf("未找到运行时 %s 的期望状态", change.EntityID)
-	case ChangeCreate:
-		if desired, ok := env.Runtimes[change.EntityID]; ok {
-			if desired.State == core.StatusRunning {
-				return r.rtMgr.Start(change.EntityID)
-			}
-		}
-		return fmt.Errorf("未找到运行时 %s 的期望状态", change.EntityID)
-	case ChangeDelete:
-		return r.rtMgr.Stop(change.EntityID)
-	default:
-		return fmt.Errorf("未知运行时变更类型: %s", change.Type)
-	}
 }

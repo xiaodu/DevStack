@@ -1,6 +1,7 @@
 <script lang="ts">
-import { onMount } from 'svelte'
+import { onDestroy, onMount } from 'svelte'
 import { api } from '../lib/api'
+import { useDownloadProgress } from '../lib/events'
 import { safeInvoke } from '../lib/safeInvoke'
 import { addToast } from '../lib/stores'
 
@@ -9,6 +10,10 @@ let selected = 'all'
 let installing = {}
 let uninstalling = {}
 let loading = true
+let installProgress = {} // { 'nginx-1.24.0': { downloaded: 0, total: 0 } }
+let installElapsed = {} // { 'nginx-1.24.0': seconds }
+let elapsedTimer = null
+const cancelledInstalls = new Set() // 已取消的安装，下载结束后不再弹成功/失败提示
 
 const categories = [
   { id: 'all', label: '全部' },
@@ -32,6 +37,18 @@ const serviceNames = {
   composer: 'Composer',
 }
 
+// 监听下载进度（后端 key 格式 "download:nginx:1.24.0"）
+useDownloadProgress((data) => {
+  if (!data || !data.key) return
+  const shortKey = data.key.replace('download:', '').replace(':', '-')
+  installProgress[shortKey] = { downloaded: data.downloaded, total: data.total }
+  installProgress = { ...installProgress }
+})
+
+onDestroy(() => {
+  if (elapsedTimer) clearInterval(elapsedTimer)
+})
+
 async function load() {
   loading = true
   packages = []
@@ -47,9 +64,20 @@ async function load() {
           version: rel.version,
           category: svc.category,
           installed,
-          isCurrent: svc.version === rel.version && svc.installed,
         })
       }
+    }
+    // PHP 作为运行时管理，不在服务列表中，需要额外加载
+    const phpReleases = (await api.getAvailableVersions('php')) || []
+    for (const rel of phpReleases) {
+      const installed = await api.checkVersionInstalled('php', rel.version)
+      packages.push({
+        id: 'php',
+        name: serviceNames.php,
+        version: rel.version,
+        category: 'runtime',
+        installed,
+      })
     }
     packages = [...packages]
   } catch (e) {
@@ -59,19 +87,75 @@ async function load() {
   }
 }
 
+function formatBytes(bytes) {
+  if (!bytes || bytes <= 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB']
+  let i = 0
+  let size = bytes
+  while (size >= 1024 && i < units.length - 1) {
+    size /= 1024
+    i++
+  }
+  return `${size.toFixed(i === 0 ? 0 : 1)} ${units[i]}`
+}
+
+function formatElapsed(seconds) {
+  if (seconds < 60) return `${seconds}s`
+  return `${Math.floor(seconds / 60)}m ${seconds % 60}s`
+}
+
 async function install(pkg) {
   const key = `${pkg.id}-${pkg.version}`
+  if (installing[key]) return
+  cancelledInstalls.delete(key)
   installing[key] = true
+  installProgress[key] = { downloaded: 0, total: 0 }
+  installElapsed[key] = 0
   packages = [...packages]
-  await safeInvoke(
-    async () => {
-      await api.downloadService(pkg.id, pkg.version)
-      await load()
-    },
-    { successMsg: `${pkg.name} ${pkg.version} 安装成功`, errorPrefix: `安装失败` },
-  )
+
+  // 计时器
+  if (!elapsedTimer) {
+    elapsedTimer = setInterval(() => {
+      for (const k of Object.keys(installing)) {
+        if (installing[k]) {
+          installElapsed[k] = (installElapsed[k] || 0) + 1
+          installElapsed = { ...installElapsed }
+        }
+      }
+    }, 1000)
+  }
+
+  try {
+    await api.downloadService(pkg.id, pkg.version)
+    if (cancelledInstalls.has(key)) return
+    await load()
+    addToast(`${pkg.name} ${pkg.version} 安装成功`, 'success')
+  } catch (e) {
+    if (cancelledInstalls.has(key)) return
+    addToast(`安装 ${pkg.name} ${pkg.version} 失败: ${e.message || e}`, 'error')
+  } finally {
+    installing[key] = false
+    delete installProgress[key]
+    delete installElapsed[key]
+    installProgress = { ...installProgress }
+    packages = [...packages]
+  }
+}
+
+function cancelInstall(pkg) {
+  const key = `${pkg.id}-${pkg.version}`
+  if (!installing[key]) return
   installing[key] = false
+  cancelledInstalls.add(key)
+  delete installProgress[key]
+  delete installElapsed[key]
+  installProgress = { ...installProgress }
   packages = [...packages]
+  addToast(`已取消安装 ${pkg.name} ${pkg.version}`, 'warning')
+}
+
+function getProgress(key) {
+  return installProgress[key] || { downloaded: 0, total: 0 }
 }
 
 async function uninstall(pkg) {
@@ -121,25 +205,36 @@ onMount(load)
             <th class="text-sm">包名称</th>
             <th class="text-sm">版本</th>
             <th class="text-sm">状态</th>
-            <th class="text-sm">下载</th>
+            <th class="text-sm">操作</th>
           </tr>
         </thead>
         <tbody>
           {#each filtered as pkg}
             {@const key = `${pkg.id}-${pkg.version}`}
-            <tr class={pkg.isCurrent ? 'bg-primary/5' : ''}>
+            {@const prog = getProgress(key)}
+            <tr>
               <td class="font-medium text-sm">{pkg.name}</td>
               <td class="font-mono text-sm text-base-content/70">
                 {pkg.version}
-                {#if pkg.isCurrent}
-                  <span class="badge badge-xs badge-primary ml-1.5">当前使用</span>
-                {/if}
               </td>
-              <td class="text-sm">
+              <td class="text-sm min-w-[160px]">
                 {#if pkg.installed}
                   <span class="badge badge-success badge-sm">已安装</span>
                 {:else if installing[key]}
-                  <span class="badge badge-warning badge-sm">安装中...</span>
+                  <div class="flex flex-col gap-1">
+                    <span class="badge badge-warning badge-sm self-start">安装中...</span>
+                    {#if prog.total > 0}
+                      <div class="flex items-center gap-1.5 text-xs text-base-content/60">
+                        <progress class="progress progress-primary w-24 h-1.5" value={prog.downloaded} max={prog.total}></progress>
+                        <span>{Math.round((prog.downloaded / prog.total) * 100)}%</span>
+                      </div>
+                    {:else}
+                      <div class="flex items-center gap-1.5 text-xs text-base-content/60">
+                        <span class="loading loading-spinner loading-xs"></span>
+                        <span>{formatElapsed(installElapsed[key] || 0)}</span>
+                      </div>
+                    {/if}
+                  </div>
                 {:else if uninstalling[key]}
                   <span class="badge badge-warning badge-sm">卸载中...</span>
                 {:else}
@@ -155,7 +250,7 @@ onMount(load)
                       <button class="btn btn-ghost btn-sm text-error" on:click={() => uninstall(pkg)} title="卸载">🗑 卸载</button>
                     {/if}
                   {:else if installing[key]}
-                    <span class="loading loading-spinner loading-xs"></span>
+                    <button class="btn btn-ghost btn-sm text-warning" on:click={() => cancelInstall(pkg)} title="取消安装">取消</button>
                   {:else}
                     <button class="btn btn-primary btn-sm" on:click={() => install(pkg)} title="安装">下载</button>
                   {/if}

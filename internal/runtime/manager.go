@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -66,6 +67,21 @@ func (m *Manager) GetPHPVersionPort(version string) int {
 	return GetPHPVersionPort(m.cfg, version)
 }
 
+// nodePort 返回 Node 版本对应的持久化端口；首次调用时从端口池分配。
+func (m *Manager) nodePort(version string) int {
+	allocated := m.resMgr.Ports().ListAllocated()
+	for port, owner := range allocated {
+		if owner == "node:"+version {
+			return port
+		}
+	}
+	port, err := m.resMgr.Ports().Allocate("node:"+version, 0)
+	if err != nil {
+		return 0
+	}
+	return port
+}
+
 func (m *Manager) scan() {
 	installDir := m.cfg.Get().InstallDir
 	if installDir == "" {
@@ -104,7 +120,7 @@ func (m *Manager) scan() {
 			version := entry.Name()
 			rPath := filepath.Join(dir, version)
 
-			id := string(rt) + "-" + version
+			id := string(rt) + "@" + version
 
 			displayName := typeNames[rt]
 			if displayName == "" {
@@ -113,6 +129,7 @@ func (m *Manager) scan() {
 
 			info := core.RuntimeInfo{
 				ID:        id,
+				Kind:      string(rt),
 				Type:      rt,
 				Version:   version,
 				Path:      rPath,
@@ -127,6 +144,10 @@ func (m *Manager) scan() {
 				if port, ok := phpPorts[version]; ok {
 					info.Port = port
 				}
+			}
+
+			if rt == core.RuntimeNode {
+				info.Port = m.nodePort(version)
 			}
 
 			inst := &Instance{Info: info}
@@ -151,6 +172,8 @@ func (m *Manager) Start(id string) error {
 	switch inst.Info.Type {
 	case core.RuntimePHP:
 		return m.startPHP(inst)
+	case core.RuntimeNode:
+		return m.startNode(inst)
 	default:
 		return fmt.Errorf("不支持的运行时类型: %s", inst.Info.Type)
 	}
@@ -171,9 +194,19 @@ func (m *Manager) Stop(id string) error {
 	switch inst.Info.Type {
 	case core.RuntimePHP:
 		return m.stopPHP(inst)
+	case core.RuntimeNode:
+		return m.stopNode(inst)
 	default:
 		return fmt.Errorf("不支持的运行时类型: %s", inst.Info.Type)
 	}
+}
+
+func (m *Manager) Scan() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.instances = make(map[string]*Instance)
+	m.idByType = make(map[core.RuntimeType][]string)
+	m.scan()
 }
 
 func (m *Manager) startPHP(inst *Instance) error {
@@ -191,11 +224,34 @@ func (m *Manager) startPHP(inst *Instance) error {
 		os.WriteFile(phpIni, []byte(ini), 0644)
 	}
 
-	inst.Info.Status = core.StatusStarting
-
 	AutoAssignPorts(m.cfg, installDir, m.resMgr.Ports())
 	port := GetPHPVersionPort(m.cfg, version)
 	inst.Info.Port = port
+
+	// 幂等：基端口已被同版本 php-cgi 占用时（上次启动残留）直接接管，避免重复拉起
+	basePID := process.FindPIDByPort(port)
+	if basePID > 0 {
+		exe := strings.ToLower(process.GetExecutablePath(basePID))
+		if strings.Contains(exe, "php-cgi.exe") && strings.Contains(exe, strings.ToLower(version)) {
+			var adopt []int
+			for i := 0; i < phpWorkerCount; i++ {
+				if p := process.FindPIDByPort(port + i); p > 0 {
+					adopt = append(adopt, p)
+				}
+			}
+			inst.process = &process.ProcessHandle{
+				PID:       basePID,
+				ExtraPIDs: adopt,
+				Started:   time.Now(),
+			}
+			inst.Info.Status = core.StatusRunning
+			inst.Info.Running = true
+			inst.Info.PID = basePID
+			return nil
+		}
+	}
+
+	inst.Info.Status = core.StatusStarting
 
 	phpEnv := []string{
 		"PHP_FCGI_MAX_REQUESTS=300",

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -142,17 +143,8 @@ func (p *NginxProvider) applyConfig(instance *NginxInstance) error {
 		serverTokensOn = "off"
 	}
 
-	phpPort := 9000
-	if p.resMgr != nil {
-		allocated := p.resMgr.Ports().ListAllocated()
-		for port, owner := range allocated {
-			if strings.HasPrefix(owner, "php:") {
-				phpPort = port
-				break
-			}
-		}
-	}
-	phpUpstream := generatePHPUpstreamConfig(phpPort)
+	phpPorts := allocatedPHPBasePorts(p.resMgr)
+	phpUpstream := generatePHPUpstreamConfig(phpPorts)
 
 	content := fmt.Sprintf(`worker_processes auto;
 error_log logs/error.log;
@@ -320,6 +312,24 @@ func (i *NginxInstance) Start(ctx context.Context) error {
 		return fmt.Errorf("Nginx executable not found: %s", i.nginxExe)
 	}
 
+	// 幂等：本实例已在运行则直接返回，避免重复拉起新实例
+	if i.pid > 0 && process.NewManager().IsRunning(i.pid) {
+		i.status = core.StatusRunning
+		return nil
+	}
+
+	// 端口已被 nginx 占用（如上次激活残留的实例）：接管而非再起一份
+	if pid := process.FindPIDByPort(i.port); pid > 0 {
+		exe := strings.ToLower(process.GetExecutablePath(pid))
+		if strings.Contains(exe, "nginx.exe") {
+			i.mpid = pid
+			i.pid = pid
+			i.status = core.StatusRunning
+			i.startedAt = time.Now()
+			return nil
+		}
+	}
+
 	i.status = core.StatusStarting
 
 	pid, err := process.NewManager().Start("nginx", i.nginxExe, nil, nil, i.nginxDir)
@@ -351,25 +361,27 @@ func (i *NginxInstance) Start(ctx context.Context) error {
 }
 
 func (i *NginxInstance) Stop(ctx context.Context) error {
-	if i.pid <= 0 {
+	if i.pid <= 0 && process.FindPIDByPort(i.port) == 0 {
+		i.status = core.StatusStopped
 		return nil
 	}
 	i.status = core.StatusStopping
 
 	pid := i.pid
-
-	if i.mpid > 0 {
+	if pid <= 0 {
+		pid = stopProcessByPort(i.port, "nginx.exe")
+	}
+	if pid > 0 {
+		process.NewManager().Stop(pid)
+	}
+	if i.mpid > 0 && i.mpid != pid {
 		process.NewManager().Stop(i.mpid)
 	}
-	process.NewManager().Stop(pid)
 
 	killAllByName("nginx.exe")
 
-	for j := 0; j < 6; j++ {
-		time.Sleep(500 * time.Millisecond)
-		if !process.NewManager().IsRunning(pid) {
-			break
-		}
+	if !waitPortReleased(i.port, 3*time.Second) {
+		return fmt.Errorf("Nginx stop failed: port %d still listening", i.port)
 	}
 
 	i.pid = 0
@@ -433,11 +445,37 @@ func killAllByName(name string) {
 	cmd.Run()
 }
 
-func generatePHPUpstreamConfig(port int) string {
-	return fmt.Sprintf(`upstream php_backend {
-		server 127.0.0.1:%d;
-		keepalive 32;
-	}`, port)
+// allocatedPHPBasePorts 返回资源池中所有已分配的 PHP 基端口（每个 PHP 版本一个基端口）。
+// 排序保证生成的上游配置确定且稳定。
+func allocatedPHPBasePorts(resMgr *resource.Manager) []int {
+	if resMgr == nil {
+		return nil
+	}
+	var ports []int
+	for port, owner := range resMgr.Ports().ListAllocated() {
+		if strings.HasPrefix(owner, "php:") {
+			ports = append(ports, port)
+		}
+	}
+	sort.Ints(ports)
+	return ports
+}
+
+// generatePHPUpstreamConfig 为每个 PHP 基端口展开 php-cgi 工作进程端口（基端口起 4 个）。
+// 若资源池无 PHP 端口则回退 9000，保证配置始终合法。
+func generatePHPUpstreamConfig(basePorts []int) string {
+	if len(basePorts) == 0 {
+		basePorts = []int{9000}
+	}
+	var buf strings.Builder
+	buf.WriteString("upstream php_backend {\n")
+	for _, base := range basePorts {
+		for i := 0; i < 4; i++ {
+			fmt.Fprintf(&buf, "\tserver 127.0.0.1:%d;\n", base+i)
+		}
+	}
+	buf.WriteString("\tkeepalive 32;\n}")
+	return buf.String()
 }
 
 func fileExists(path string) bool {

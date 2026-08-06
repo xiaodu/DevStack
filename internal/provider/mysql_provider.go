@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/xiaodu/DevStack/internal/config"
@@ -66,7 +68,7 @@ func (p *MySQLProvider) NewInstance(ctx context.Context, config map[string]inter
 		port:     port,
 		mysqlDir: mysqlDir,
 		mysqlExe: filepath.Join(mysqlDir, "bin", "mysqld.exe"),
-		dataDir:  filepath.Join(installDir, "data", "mysql"),
+		dataDir:  filepath.Join(installDir, "data", "mysql", version),
 	}
 	p.instance = instance
 	return instance, nil
@@ -199,8 +201,12 @@ func (i *MySQLInstance) Start(ctx context.Context) error {
 	i.status = core.StatusStarting
 
 	myiniPath := filepath.Join(i.mysqlDir, "conf", "my.ini")
+	if !fileExists(myiniPath) {
+		myiniPath = filepath.Join(i.mysqlDir, "my.ini")
+	}
 
-	if !fileExists(i.dataDir) {
+	// 数据目录不存在或为空时，先执行初始化，否则 mysqld 会立即退出
+	if !dirExists(i.dataDir) || isEmptyDir(i.dataDir) {
 		initCmd := &initCommand{mysqlExe: i.mysqlExe, dataDir: i.dataDir}
 		if err := initCmd.run(); err != nil {
 			i.status = core.StatusError
@@ -231,7 +237,7 @@ func (i *MySQLInstance) Start(ctx context.Context) error {
 	if i.pid <= 0 && !process.NewManager().IsRunning(pid) {
 		process.NewManager().Stop(pid)
 		i.status = core.StatusError
-		return fmt.Errorf("MySQL start failed: port %d not responding", i.port)
+		return fmt.Errorf("MySQL 启动失败: 端口 %d 无响应，请检查配置或查看错误日志", i.port)
 	}
 
 	if i.pid <= 0 {
@@ -244,21 +250,24 @@ func (i *MySQLInstance) Start(ctx context.Context) error {
 }
 
 func (i *MySQLInstance) Stop(ctx context.Context) error {
-	if i.pid <= 0 {
+	if i.pid <= 0 && process.FindPIDByPort(i.port) == 0 {
+		i.status = core.StatusStopped
 		return nil
 	}
 	i.status = core.StatusStopping
 
 	pid := i.pid
-	process.NewManager().Stop(pid)
+	if pid <= 0 {
+		pid = stopProcessByPort(i.port, "mysqld.exe")
+	}
+	if pid > 0 {
+		process.NewManager().Stop(pid)
+	}
 
 	killAllByName("mysqld.exe")
 
-	for j := 0; j < 6; j++ {
-		time.Sleep(500 * time.Millisecond)
-		if !process.NewManager().IsRunning(pid) {
-			break
-		}
+	if !waitPortReleased(i.port, 3*time.Second) {
+		return fmt.Errorf("MySQL stop failed: port %d still listening", i.port)
 	}
 
 	i.pid = 0
@@ -305,5 +314,31 @@ type initCommand struct {
 }
 
 func (c *initCommand) run() error {
+	if err := os.MkdirAll(c.dataDir, 0755); err != nil {
+		return fmt.Errorf("创建 MySQL 数据目录失败: %w", err)
+	}
+	args := []string{
+		"--initialize-insecure",
+		"--datadir=" + c.dataDir,
+	}
+	cmd := exec.Command(c.mysqlExe, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("MySQL 数据目录初始化失败: %v\n%s", err, string(out))
+	}
 	return nil
+}
+
+func dirExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
+
+func isEmptyDir(path string) bool {
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return true
+	}
+	return len(entries) == 0
 }

@@ -69,10 +69,12 @@ onMount(load)
             <input type="checkbox" class="toggle toggle-primary" bind:checked={settings.startOnBoot} />
             <span class="text-sm">开机自启</span>
           </label>
+          <p class="text-xs text-base-content/50 -mt-1">登录 Windows 后自动启动 DevStack</p>
           <label class="flex items-center gap-2 cursor-pointer">
             <input type="checkbox" class="toggle toggle-primary" bind:checked={settings.minimizeToTray} />
             <span class="text-sm">最小化到系统托盘</span>
           </label>
+          <p class="text-xs text-base-content/50 -mt-1">关闭窗口时最小化到系统托盘，可从托盘图标恢复或退出</p>
         </div>
       </div>
 

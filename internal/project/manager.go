@@ -198,7 +198,7 @@ func (m *Manager) Enable(id string) error {
 		if m.svcMgr != nil {
 			m.svcMgr.RegisterDependent(providerID, id)
 		}
-		if strings.HasPrefix(providerID, "php-") {
+		if strings.HasPrefix(providerID, "php@") {
 			if m.rtMgr != nil {
 				if err := m.rtMgr.Start(providerID); err != nil {
 					return fmt.Errorf("启动运行时依赖 %s (%s) 失败: %w", capability, providerID, err)

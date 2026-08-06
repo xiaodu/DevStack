@@ -38,18 +38,23 @@ func (ss *StateStore) Load() (EnvironmentState, error) {
 }
 
 func (ss *StateStore) Save(env EnvironmentState) error {
+	return ss.saveJSON(env)
+}
+
+func (ss *StateStore) SaveActive(activeID string) error {
+	return ss.saveJSON(map[string]string{"activeEnvironmentId": activeID})
+}
+
+func (ss *StateStore) saveJSON(v interface{}) error {
 	if err := os.MkdirAll(ss.dataDir, 0755); err != nil {
 		return fmt.Errorf("创建数据目录失败: %w", err)
 	}
-
-	data, err := json.MarshalIndent(env, "", "  ")
+	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
-		return fmt.Errorf("序列化环境状态失败: %w", err)
+		return fmt.Errorf("序列化数据失败: %w", err)
 	}
-
 	if err := os.WriteFile(ss.filePath, data, 0644); err != nil {
-		return fmt.Errorf("写入环境状态文件失败: %w", err)
+		return fmt.Errorf("写入文件失败: %w", err)
 	}
-
 	return nil
 }

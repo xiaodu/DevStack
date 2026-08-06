@@ -158,6 +158,27 @@ func FindPIDByPort(port int) int {
 	return 0
 }
 
+// GetExecutablePath 返回指定 PID 进程的可执行文件完整路径。
+// 查询失败（进程已退出 / wmic 不可用）时返回空字符串。
+func GetExecutablePath(pid int) string {
+	if pid <= 0 {
+		return ""
+	}
+	cmd := exec.Command("wmic", "process", "where", fmt.Sprintf("ProcessId=%d", pid), "get", "ExecutablePath", "/format:value")
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "ExecutablePath=") {
+			return strings.TrimPrefix(line, "ExecutablePath=")
+		}
+	}
+	return ""
+}
+
 // portPIDCache 缓存 netstat 扫描结果，避免短时间内重复执行 netstat -ano
 // 一次 Dashboard.load() 中 GetServices 和 GetEnvironment 都会调用 svcMgr.List()，
 // 进而调用 FindAllPIDsByPort()，缓存可以避免重复的 netstat 调用

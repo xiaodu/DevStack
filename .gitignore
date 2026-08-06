@@ -3,6 +3,9 @@ build/bin/
 *.exe
 *.exe~
 *.dll
+
+# E2E test data
+.e2e/
 *.so
 *.dylib
 

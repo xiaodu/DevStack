@@ -70,8 +70,14 @@ async function loadRecentAppLogs() {
   }
 }
 
-function clearLogs() {
+async function clearLogs() {
   logEntries = []
+  try {
+    await api.clearLogs()
+    await loadAppLogs()
+  } catch (e) {
+    console.error(e)
+  }
 }
 
 function switchTab(tab) {
