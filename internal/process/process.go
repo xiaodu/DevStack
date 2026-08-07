@@ -2,6 +2,7 @@ package process
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +12,8 @@ import (
 	"syscall"
 	"time"
 )
+
+const maxOutputSize = 1024 * 1024 // 1MB per process
 
 type ProcessInfo struct {
 	PID     int
@@ -35,11 +38,49 @@ type ProcessHandle struct {
 	Started   time.Time
 }
 
+// ProcessOutput stores captured stdout/stderr from a process
+type ProcessOutput struct {
+	mu     sync.RWMutex
+	stdout []byte
+	stderr []byte
+}
+
+func (po *ProcessOutput) Stdout() []byte {
+	po.mu.RLock()
+	defer po.mu.RUnlock()
+	return po.stdout
+}
+
+func (po *ProcessOutput) Stderr() []byte {
+	po.mu.RLock()
+	defer po.mu.RUnlock()
+	return po.stderr
+}
+
+func (po *ProcessOutput) appendStdout(data []byte) {
+	po.mu.Lock()
+	defer po.mu.Unlock()
+	if len(po.stdout)+len(data) > maxOutputSize {
+		po.stdout = po.stdout[len(data):]
+	}
+	po.stdout = append(po.stdout, data...)
+}
+
+func (po *ProcessOutput) appendStderr(data []byte) {
+	po.mu.Lock()
+	defer po.mu.Unlock()
+	if len(po.stderr)+len(data) > maxOutputSize {
+		po.stderr = po.stderr[len(data):]
+	}
+	po.stderr = append(po.stderr, data...)
+}
+
 type Manager struct {
-	mu         sync.Mutex
-	processes  map[int]*exec.Cmd
-	exitChans  map[int]chan struct{}
+	mu           sync.Mutex
+	processes    map[int]*exec.Cmd
+	exitChans    map[int]chan struct{}
 	processTrees map[int]*ProcessTree
+	outputs      map[int]*ProcessOutput
 }
 
 func NewManager() *Manager {
@@ -47,20 +88,35 @@ func NewManager() *Manager {
 		processes:    make(map[int]*exec.Cmd),
 		exitChans:    make(map[int]chan struct{}),
 		processTrees: make(map[int]*ProcessTree),
+		outputs:      make(map[int]*ProcessOutput),
 	}
+}
+
+// GetOutput returns captured output for a process
+func (m *Manager) GetOutput(pid int) *ProcessOutput {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.outputs[pid]
 }
 
 func (m *Manager) Start(name, executable string, args []string, env []string, workdir string) (int, error) {
 	cmd := exec.Command(executable, args...)
 	cmd.Dir = workdir
-	cmd.Stdout = nil
-	cmd.Stderr = nil
+
+	output := &ProcessOutput{}
+	stdoutReader, stdoutWriter := io.Pipe()
+	stderrReader, stderrWriter := io.Pipe()
+	cmd.Stdout = stdoutWriter
+	cmd.Stderr = stderrWriter
+
 	if len(env) > 0 {
 		cmd.Env = append(os.Environ(), env...)
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 
 	if err := cmd.Start(); err != nil {
+		stdoutWriter.Close()
+		stderrWriter.Close()
 		return 0, fmt.Errorf("启动 %s 失败: %w", name, err)
 	}
 
@@ -69,10 +125,41 @@ func (m *Manager) Start(name, executable string, args []string, env []string, wo
 	m.mu.Lock()
 	m.processes[pid] = cmd
 	m.exitChans[pid] = exitCh
+	m.outputs[pid] = output
 	m.mu.Unlock()
+
+	// 异步捕获 stdout
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, err := stdoutReader.Read(buf)
+			if n > 0 {
+				output.appendStdout(buf[:n])
+			}
+			if err != nil {
+				break
+			}
+		}
+	}()
+
+	// 异步捕获 stderr
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, err := stderrReader.Read(buf)
+			if n > 0 {
+				output.appendStderr(buf[:n])
+			}
+			if err != nil {
+				break
+			}
+		}
+	}()
 
 	go func() {
 		cmd.Wait()
+		stdoutWriter.Close()
+		stderrWriter.Close()
 		m.mu.Lock()
 		delete(m.processes, pid)
 		close(exitCh)

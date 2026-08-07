@@ -323,7 +323,7 @@ func (m *Manager) Start(id string) error {
 		m.mu.Unlock()
 		return core.ErrServiceNotFound
 	}
-	if s.Info.Status == core.StatusRunning {
+	if s.Info.Status == core.StatusRunning || s.Info.Status == core.StatusStarting {
 		m.mu.Unlock()
 		return nil
 	}
@@ -719,9 +719,13 @@ func (m *Manager) Configure(id string) error {
 			return copyDir(configPath, backupPath)
 		}, compensator.RestoreBackup(backupPath, configPath)).
 		Step("apply-config", func(ctx context.Context) error {
-			m.mu.Lock()
-			defer m.mu.Unlock()
-			return handler.Configure(m.services[id], m.cfg, m.resMgr)
+			m.mu.RLock()
+			si := m.services[id]
+			m.mu.RUnlock()
+			if si == nil {
+				return core.ErrServiceNotFound
+			}
+			return handler.Configure(si, m.cfg, m.resMgr)
 		}, compensator.RestoreBackup(backupPath, configPath))
 
 	if err := txn.Commit(); err != nil {

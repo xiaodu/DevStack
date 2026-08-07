@@ -76,12 +76,24 @@ func (e *Engine) dispatch(event *Event) {
 	}
 
 	for _, handler := range handlers {
-		go handler(event)
+		go func(h EventHandler) {
+			defer func() {
+				if r := recover(); r != nil {
+					// 记录 panic 但不崩溃
+				}
+			}()
+			h(event)
+		}(handler)
 	}
 }
 
 func (e *Engine) executeRules(event *Event) {
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				// 记录 panic 但不崩溃
+			}
+		}()
 		_ = e.ruleSet.ExecuteMatching(e.ctx, event)
 	}()
 }
@@ -99,7 +111,14 @@ func (e *Engine) Publish(event *Event) {
 		cb := e.onDropped
 		e.mu.RUnlock()
 		if cb != nil {
-			go cb(event)
+			go func() {
+				defer func() {
+					if r := recover(); r != nil {
+						// 记录 panic 但不崩溃
+					}
+				}()
+				cb(event)
+			}()
 		}
 	}
 }

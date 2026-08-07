@@ -1284,6 +1284,12 @@ func (a *App) GetLogs(serviceID string) ([]log.LogEntry, error) {
 	} else if strings.HasPrefix(serviceID, "php@") {
 		version := strings.TrimPrefix(serviceID, "php@")
 		logPath = joinPath(installDir, "programs", "php", version, "php_errors.log")
+	} else if strings.HasPrefix(serviceID, "node@") {
+		version := strings.TrimPrefix(serviceID, "node@")
+		logPath = joinPath(installDir, "programs", "node", version, "node.log")
+	} else if strings.HasPrefix(serviceID, "python@") {
+		version := strings.TrimPrefix(serviceID, "python@")
+		logPath = joinPath(installDir, "programs", "python", version, "python.log")
 	}
 	if logPath == "" {
 		return []log.LogEntry{}, nil
