@@ -68,7 +68,8 @@ func newE2EApp(t *testing.T, dir string) *App {
 	opStore := log.NewOpStore(200)
 	procMgr := process.NewManager()
 	resMgr := resource.NewManager(filepath.Join(dir, "config"))
-	svcMgr := service.NewManager(cfg, procMgr, resMgr)
+	reactiveEng := reactive.NewEngine(100)
+	svcMgr := service.NewManager(cfg, procMgr, resMgr, reactiveEng)
 	rtMgr := runtime.NewManager(cfg, procMgr, resMgr)
 	projMgr := project.NewManager(dir, "1.26.0", rtMgr, resMgr)
 	projMgr.SetServiceManager(svcMgr)
@@ -77,7 +78,6 @@ func newE2EApp(t *testing.T, dir string) *App {
 	dlMgr := download.NewManager(dir)
 	stateStore := engine.NewStateStore(filepath.Join(dir, "config"))
 	reconciler := engine.NewReconciler(stateStore, svcMgr, projMgr, rtMgr)
-	reactiveEng := reactive.NewEngine(100)
 
 	app := &App{
 		cfg:         cfg,

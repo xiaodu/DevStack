@@ -4,6 +4,7 @@ import (
 	"context"
 	"embed"
 	"log"
+	"os"
 
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
@@ -22,6 +23,11 @@ var trayIcon []byte
 
 // appCtx 保存 Wails 上下文，供 SingleInstanceLock 回调在第二个实例启动时使用。
 var appCtx context.Context
+
+// isDevMode 检测是否为开发模式（通过环境变量 WAILS_DEV=1 或 MODE=dev 启用）
+func isDevMode() bool {
+	return os.Getenv("WAILS_DEV") == "1" || os.Getenv("MODE") == "dev"
+}
 
 func main() {
 	log.Println("[WAILS] main() started")
@@ -64,7 +70,7 @@ func main() {
 			WindowIsTranslucent:  false,
 		},
 		Debug: options.Debug{
-			OpenInspectorOnStartup: true,
+			OpenInspectorOnStartup: isDevMode(),
 		},
 		Mac: &mac.Options{
 			TitleBar:             mac.TitleBarHiddenInset(),

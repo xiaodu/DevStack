@@ -40,16 +40,15 @@ type ServiceInstance struct {
 	restartCount int
 }
 
-func NewManager(cfg *config.Config, procMgr *process.Manager, resMgr *resource.Manager) *Manager {
+func NewManager(cfg *config.Config, procMgr *process.Manager, resMgr *resource.Manager, reactiveEng *reactive.Engine) *Manager {
 	m := &Manager{
 		cfg:        cfg,
 		procMgr:    procMgr,
 		resMgr:     resMgr,
 		services:   make(map[string]*ServiceInstance),
 		dependents: make(map[string][]string),
-		reactive:   reactive.NewEngine(100),
+		reactive:   reactiveEng,
 	}
-	m.reactive.Start()
 	m.registerDefaults()
 	m.registerReactiveRules()
 	return m
@@ -410,50 +409,60 @@ func (m *Manager) Stop(id string) error {
 	}
 
 	kind := kindFromID(id)
+	version := s.Info.Version
+	port := s.Info.Port
 
+	m.mu.Unlock()
+
+	// 在锁外执行外部进程停止操作
 	p := provider.Get(kind)
 	if p != nil {
 		config := map[string]interface{}{
-			"version": s.Info.Version,
-			"port":    s.Info.Port,
+			"version": version,
+			"port":    port,
 		}
 		entity, err := p.NewInstance(context.Background(), config)
 		if err != nil {
-			m.mu.Unlock()
 			return err
 		}
 		if err := entity.Stop(context.Background()); err != nil {
-			m.mu.Unlock()
 			return err
 		}
 	} else {
-		pid := process.FindPIDByPort(s.Info.Port)
+		pid := process.FindPIDByPort(port)
 		if pid > 0 {
-			s.Info.Status = core.StatusStopping
+			m.mu.Lock()
+			if si, ok := m.services[id]; ok {
+				si.Info.Status = core.StatusStopping
+			}
+			m.mu.Unlock()
 			m.procMgr.Stop(pid)
 		}
 	}
 
-	// 兜底：端口仍被占用时强制终止，并校验停止确实生效，避免"报成功但进程仍在"
-	if s.Info.Port > 0 {
-		if pid := process.FindPIDByPort(s.Info.Port); pid > 0 {
+	// 兜底：端口仍被占用时强制终止
+	if port > 0 {
+		if pid := process.FindPIDByPort(port); pid > 0 {
 			m.procMgr.Stop(pid)
 		}
 		for j := 0; j < 6; j++ {
 			time.Sleep(500 * time.Millisecond)
-			if process.FindPIDByPort(s.Info.Port) == 0 {
+			if process.FindPIDByPort(port) == 0 {
 				break
 			}
 		}
-		if pid := process.FindPIDByPort(s.Info.Port); pid > 0 {
-			m.mu.Unlock()
-			return fmt.Errorf("服务 %s 停止失败: 端口 %d 仍被进程 %d 占用", id, s.Info.Port, pid)
+		if pid := process.FindPIDByPort(port); pid > 0 {
+			return fmt.Errorf("服务 %s 停止失败: 端口 %d 仍被进程 %d 占用", id, port, pid)
 		}
 	}
 
-	s.process = nil
-	s.Info.Status = core.StatusStopped
-	s.Info.PID = 0
+	// 更新状态
+	m.mu.Lock()
+	if si, ok := m.services[id]; ok {
+		si.process = nil
+		si.Info.Status = core.StatusStopped
+		si.Info.PID = 0
+	}
 	m.mu.Unlock()
 	return nil
 }

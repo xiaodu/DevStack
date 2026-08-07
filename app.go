@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -121,8 +120,12 @@ func NewApp() *App {
 	resMgr := resource.NewManager(filepath.Join(installDir, "config"))
 	opStore.LogInfo("[INIT] 资源管理器初始化完成")
 
+	opStore.LogInfo("[INIT] 初始化响应式引擎...")
+	reactiveEng := reactive.NewEngine(100)
+	opStore.LogInfo("[INIT] 响应式引擎创建完成")
+
 	opStore.LogInfo("[INIT] 初始化服务管理器...")
-	svcMgr := service.NewManager(cfg, procMgr, resMgr)
+	svcMgr := service.NewManager(cfg, procMgr, resMgr, reactiveEng)
 	services := svcMgr.List()
 	opStore.LogInfo("[INIT] 服务管理器初始化完成, 已注册服务数: %d", len(services))
 
@@ -158,10 +161,6 @@ func NewApp() *App {
 	opStore.LogInfo("[INIT] 初始化协调器(Reconciler)...")
 	reconciler := engine.NewReconciler(stateStore, svcMgr, projMgr, rtMgr)
 	opStore.LogInfo("[INIT] 协调器初始化完成")
-
-	opStore.LogInfo("[INIT] 初始化响应式引擎...")
-	reactiveEng := reactive.NewEngine(100)
-	opStore.LogInfo("[INIT] 响应式引擎创建完成")
 
 	opStore.LogInfo("[INIT] 注册服务提供者...")
 	provider.NewNginxProvider(cfg, procMgr, resMgr)
@@ -449,18 +448,11 @@ func (a *App) ActivateEnvironmentForProject(projectID string) error {
 }
 
 func (a *App) getActiveEnvironmentID() (string, error) {
-	type activeState struct {
-		ActiveEnvironmentID string `json:"activeEnvironmentId"`
-	}
-	var s activeState
-	dataDir := a.cfg.Get().InstallDir
-	path := filepath.Join(dataDir, "config", "environment.json")
-	data, err := os.ReadFile(path)
+	state, err := a.stateStore.Load()
 	if err != nil {
-		return "", nil
+		return "", err
 	}
-	json.Unmarshal(data, &s)
-	return s.ActiveEnvironmentID, nil
+	return state.ActiveEnvironmentID, nil
 }
 
 // ==================== Environment CRUD APIs ====================
@@ -639,45 +631,6 @@ func (a *App) SaveProjectAsEnvironment(args SaveProjectAsEnvironmentArgs) (envir
 		Units:       units,
 	}
 	return a.envMgr.Create(env)
-}
-
-// downloadServiceVersion 下载并安装指定 kind@version 的软件
-func (a *App) downloadServiceVersion(kind, version string) error {
-	var urls []string
-	releases, err := a.dlMgr.GetAvailableVersions(kind)
-	if err != nil {
-		return err
-	}
-	for _, r := range releases {
-		if r.Version == version {
-			if r.URL != "" {
-				urls = append(urls, r.URL)
-			}
-			if r.MirrorURL != "" {
-				urls = append(urls, r.MirrorURL)
-			}
-			break
-		}
-	}
-	if len(urls) == 0 {
-		return fmt.Errorf("未找到 %s@%s 的下载地址", kind, version)
-	}
-
-	destDir := filepath.Join(a.cfg.Get().InstallDir, "programs", kind, version)
-	if err := a.dlMgr.TryDownloadAndExtract(urls, destDir, nil); err != nil {
-		return err
-	}
-
-	if !isRuntime(kind) {
-		a.svcMgr.MarkInstalled(kind, version)
-		if cfgErr := a.svcMgr.Configure(kind + "@" + version); cfgErr != nil {
-			if a.opStore != nil {
-				a.opStore.LogWarn("[ENV] 安装后配置 %s 失败: %v", kind, cfgErr)
-			}
-		}
-	}
-
-	return nil
 }
 
 func isRuntime(kind string) bool {
