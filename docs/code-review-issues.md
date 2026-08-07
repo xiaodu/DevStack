@@ -379,3 +379,39 @@ flowchart TB
 3. **最后清偿 P2**：以 P2-3（补 `service.Manager` 单测）为底座，再推进依赖升级（P2-1）、文档（P2-2）、可观测性（P2-4、P2-5）。
 
 > 说明：本文档的问题清单与行号基于 2026-08-07 的代码快照。重构后行号会偏移，建议以函数名/符号作为长期锚点。
+
+---
+
+# 复查结论（2026-08-07 第二轮）
+
+> 方法：对每一项"特征代码"做 grep / 精读核实，不依赖声明。锚点以函数名/符号为准（行号为复查时快照）。
+
+## 逐项状态
+
+| 编号 | 问题 | 状态 | 复查证据 |
+|------|------|------|----------|
+| P0-1 | 双 reactive 引擎事件孤岛 | ✅ 已修复 | `app.go:124` 单点 `reactive.NewEngine(100)`；`:128` 注入 `service.NewManager(..., reactiveEng)`；`manager.go:43` 形参 `reactiveEng *reactive.Engine`；前端桥接 `app.go:286` 订阅同一引擎。崩溃/健康检查事件现经共享引擎到达前端。 |
+| P0-2 | `Stop` 持全局锁阻塞 | ✅ 已修复 | `manager.go:415` 在外部 `entity.Stop` 与端口轮询（`:449` `time.Sleep`）之前 `m.mu.Unlock()`；状态更新在 `:460` 重新短暂加锁。睡眠已移至锁外。 |
+| P0-3 | `Start` 并发无防护 | ✅ 已修复 | `manager.go:326` 守卫扩展为 `StatusRunning \|\| StatusStarting`，并发启动被拦在转换态。 |
+| P0-4 | `dispatch` 无 panic recovery | ✅ 已修复 | `reactive/engine.go:81 / 93 / 116` 三处 goroutine 均含 `if r := recover(); r != nil {...}`（`dispatch`/`executeRules`/`onDropped`）。 |
+| P0-5 | 生产构建弹 DevTools | ✅ 已修复 | `main.go:73` `OpenInspectorOnStartup: isDevMode()`，按构建模式门控。 |
+| P1-1 | `app.go` God Object | ❌ 未修复 | `app.go` 仍 1351 行，无 `*_api.go` 拆分文件；仅因删死代码比首轮少 41 行。 |
+| P1-2 | 下载逻辑重复 + 死代码 | ✅ 已修复 | `downloadServiceVersion` 已全仓移除（grep 无命中）；`DownloadService` 为唯一入口。 |
+| P1-3 | `getActiveEnvironmentID` 吞错 | ✅ 已修复 | `app.go:450-456` 改为 `a.stateStore.Load()` 并 `return "", err`，不再吞错、不再绕封装直读文件。 |
+| P1-4 | `Configure` 锁边界脆弱 | 🔶 改进（需复核） | `manager.go:722` `apply-config` 步骤由重入写锁改为 `m.mu.RLock()` 读取 `services[id]`。重入死锁风险消除，但若 `handler.Configure` 会写 `si.Info` 等共享字段，则存在并发写 race，需确认 handler 仅读。 |
+| P2-1 | 前端依赖栈过时 | ❌ 未修复 | `frontend/package.json` 仍为 `vite ^3.0.7` / `svelte ^3.49.0` / `@sveltejs/vite-plugin-svelte ^1.0.1` / `typescript ^7.0.2`。仅新增 biome / tailwind / daisyui / nanostores 等工具链依赖，核心构建栈未升级。 |
+| P2-2 | README 模板残留 | ✅ 已修复 | `README.md` 已改写为 DevStack 专属：功能特性、技术栈（Wails v2 + Go + Svelte）、目录结构等。 |
+| P2-3 | 核心模块缺单测 | ❌ 未修复 | `internal/service`、`internal/engine`（reconciler）、`internal/process` 仍无 `*_test.go`；P0-2/P0-3 的并发修复**无自动化防护**。 |
+| P2-4 | 子进程输出丢弃 | ✅ 已修复 | `process/process.go:106-110` 经 `io.Pipe` 将 `cmd.Stdout/Stderr` 接到 `ProcessOutput`，并提供 `GetOutput(pid)`。 |
+| P2-5 | `GetLogs` 覆盖不全 | ✅ 已修复 | `app.go:1287 / 1290` 新增 `node@` / `python@` 分支。 |
+
+## 统计
+- 已修复：10 / 14
+- 改进待复核：1（P1-4）
+- 未修复：3（P1-1、P2-1、P2-3）
+
+## 仍存风险与建议
+1. **最高优先级补 P2-3**：P0-2/P0-3 的并发修复是手工改动，但 `service.Manager` 无任何单测守护。建议立即补 `manager_test.go`，用 fake provider 固化"并发 Start 不双进程""Stop 不长期持锁"两个不变量。
+2. **P1-4 需确认**：核查各 `ConfigHandler.Configure` 实现是否仅读取 `si`、不写共享字段；若有写，应改回短写锁或把写操作移出临界区。
+3. **P2-1 仍是技术债**：构建栈落后两个大版本，升级前务必先补 P2-3 的测试与 `typecheck`/`build` 校验（package.json 已备 `biome`/`tsc --noEmit` 脚本）。
+4. **P1-1 可择机处理**：God Object 不影响正确性，建议作为独立重构，配合 P2-3 测试安全网进行。
