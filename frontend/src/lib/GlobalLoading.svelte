@@ -1,4 +1,8 @@
 <script lang="ts">
+import { createBubbler, stopPropagation } from 'svelte/legacy'
+
+const bubble = createBubbler()
+
 import { onMount } from 'svelte'
 import { fade } from 'svelte/transition'
 import { nanoLoading, nanoStatusMsg, statusMessage } from '../lib/stores'
@@ -18,14 +22,14 @@ onMount(() => {
 })
 </script>
 
-<!-- svelte-ignore a11y-click-events-have-key-events -->
-<!-- svelte-ignore a11y-no-static-element-interactions -->
+<!-- svelte-ignore a11y_click_events_have_key_events -->
+<!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
   class="fixed inset-0 z-[9999] flex flex-col items-center justify-center bg-black/50 backdrop-blur-sm transition-opacity duration-300"
   class:opacity-100={$nanoLoading}
   class:opacity-0={!$nanoLoading}
   class:pointer-events-none={!$nanoLoading}
-  on:click|stopPropagation
+  onclick={stopPropagation(bubble('click'))}
 >
   {#if $nanoLoading}
     <div class="card bg-base-100 shadow-2xl border border-base-300 px-8 py-6 flex flex-col items-center gap-4 min-w-[220px]" transition:fade={{ duration: 200 }}>

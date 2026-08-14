@@ -17,12 +17,12 @@ import GlobalToast from './lib/GlobalToast.svelte'
 import { safeInvoke } from './lib/safeInvoke'
 import { addToast, nanoOperation, operation, pushToast, refreshSignal, runOperation, syncInfo } from './lib/stores'
 
-let currentView = 'dashboard'
-let showWizard = false
+let currentView = $state('dashboard')
+let showWizard = $state(false)
 
 function navigate(view) {
   currentView = view
-  // 视图保持挂载（class:hidden 切换），切换到「安装软件」时强制刷新数据，避免过期状态
+  // 视图保持挂载（class:hidden 切换），切换到「软件管理」时强制刷新数据，避免过期状态
   if (view === 'software') refreshSignal.update((n) => n + 1)
 }
 
@@ -169,16 +169,17 @@ async function restartNginx() {
   refreshSignal.update((n) => n + 1)
 }
 
-$: pageTitle =
+let pageTitle = $derived(
   {
     dashboard: '仪表盘',
     sites: '项目',
-    software: '安装软件',
+    software: '软件管理',
     environment: '环境',
     packages: '软件仓库',
     logs: '日志',
     settings: '设置',
-  }[currentView] || ''
+  }[currentView] || '',
+)
 </script>
 
 <div class="flex h-screen w-screen overflow-hidden">
@@ -188,13 +189,13 @@ $: pageTitle =
     <header class="flex justify-between items-center px-6 py-2.5 bg-base-100 border-b border-base-300 shrink-0">
       <div class="text-base font-semibold">{pageTitle}</div>
       <div class="flex gap-2">
-        <button class="btn btn-circle btn-sm bg-success text-white border-none hover:brightness-110" title="激活当前项目所需环境" on:click={startAll} disabled={$operation.active}>
+        <button class="btn btn-circle btn-sm bg-success text-white border-none hover:brightness-110" title="激活当前项目所需环境" onclick={startAll} disabled={$operation.active}>
           <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16"><path d="M8 5v14l11-7z"/></svg>
         </button>
-        <button class="btn btn-circle btn-sm bg-warning text-white border-none hover:brightness-110" title="重启 Nginx" on:click={restartNginx} disabled={$operation.active}>
+        <button class="btn btn-circle btn-sm bg-warning text-white border-none hover:brightness-110" title="重启 Nginx" onclick={restartNginx} disabled={$operation.active}>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
         </button>
-        <button class="btn btn-circle btn-sm bg-error text-white border-none hover:brightness-110" title="停止全部服务" on:click={stopAll} disabled={$operation.active}>
+        <button class="btn btn-circle btn-sm bg-error text-white border-none hover:brightness-110" title="停止全部服务" onclick={stopAll} disabled={$operation.active}>
           <svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>
         </button>
       </div>

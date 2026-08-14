@@ -1,34 +1,35 @@
 <script lang="ts">
 import { onMount } from 'svelte'
+import { stopPropagation } from 'svelte/legacy'
 import { api } from '../lib/api'
 import { useDownloadProgress } from '../lib/events'
 import { safeInvoke } from '../lib/safeInvoke'
 import { addToast, operation, refreshSignal, runOperation } from '../lib/stores'
 
-let env = { services: {}, projects: {}, runtimes: {}, activeProfileID: '' }
-let envLoading = true
-let environments = []
-let envsLoading = true
+let env = $state({ services: {}, projects: {}, runtimes: {}, activeProfileID: '' })
+let envLoading = $state(true)
+let environments = $state([])
+let envsLoading = $state(true)
 let selectedEnv = null
-let editingEnv = null
-let envModalOpen = false
-let snapshots = []
-let snapshotDetails = {}
-let snapLoading = true
-let busy = false
+let editingEnv = $state(null)
+let envModalOpen = $state(false)
+let snapshots = $state([])
+let snapshotDetails = $state({})
+let snapLoading = $state(true)
+let busy = $state(false)
 let confirmRollbackId = null
-let confirmDeleteId = null
-let confirmDeleteEnvId = null
-let selectedSnapshotId = null
-let activeTab = 'environments'
+let confirmDeleteId = $state(null)
+let confirmDeleteEnvId = $state(null)
+let selectedSnapshotId = $state(null)
+let activeTab = $state('environments')
 // 基于后端 getInstalledVersions 构建的安装状态映射，格式: { 'nginx 1.24.0': true }
 let installStatus = {}
-let installStatusReady = false
+let installStatusReady = $state(false)
 
 // 安装进度相关
-let installModal = false
-let installingEnv = null
-let installTasks = [] // [{ id, version, name, status: 'pending'|'downloading'|'extracting'|'done'|'error', progress: 0 }]
+let installModal = $state(false)
+let installingEnv = $state(null)
+let installTasks = $state([]) // [{ id, version, name, status: 'pending'|'downloading'|'extracting'|'done'|'error', progress: 0 }]
 let installProgress = {} // { 'nginx@1.24.0': { downloaded: 0, total: 0 } }
 let installCancelled = false // 用户点击取消时设为 true
 
@@ -45,13 +46,14 @@ useDownloadProgress((data) => {
   })
 })
 
-$: sortedSnapshots = Array.isArray(snapshots) ? [...snapshots].reverse() : []
+let sortedSnapshots = $derived(Array.isArray(snapshots) ? [...snapshots].reverse() : [])
 
 // 当前激活的环境 ID
-$: activeEnvID = env.activeProfileID || ''
-$: hasRunningServices =
+let activeEnvID = $derived(env.activeProfileID || '')
+let hasRunningServices = $derived(
   Object.values(env.services || {}).some((s) => s.state === 'running') ||
-  Object.values(env.runtimes || {}).some((r) => r.state === 'running')
+    Object.values(env.runtimes || {}).some((r) => r.state === 'running'),
+)
 
 async function withTimeout(promise, timeoutMs = 5000, fallback = null) {
   return Promise.race([promise, new Promise((resolve) => setTimeout(() => resolve(fallback), timeoutMs))])
@@ -406,10 +408,10 @@ const catalog = [
 
 // 每类组件的版本缓存: { [kind]: { installed: string[], available: string[], loading: bool } }
 // installed 来自 getInstalledVersions，available 来自 getAvailableVersions（可下载）
-let versionCache = {}
+let versionCache = $state({})
 
 // 版本列表是否展开（false = 只显示一行，通过"更多"展开）
-let expandedVersions = {}
+let expandedVersions = $state({})
 
 function sortVersions(list) {
   return [...list].sort((a, b) => b.localeCompare(a, 'en', { numeric: true }))
@@ -491,9 +493,9 @@ const iconMap = {
   python: 'icon-python',
 }
 
-$: svcEntries = Object.entries(env.services || {})
-$: projEntries = Object.entries(env.projects || {})
-$: rtEntries = Object.entries(env.runtimes || {})
+let svcEntries = $derived(Object.entries(env.services || {}))
+let projEntries = $derived(Object.entries(env.projects || {}))
+let rtEntries = $derived(Object.entries(env.runtimes || {}))
 
 const unsub = refreshSignal.subscribe(() => load())
 onMount(() => {
@@ -510,15 +512,15 @@ onMount(() => {
     </div>
     <div class="flex gap-2">
       {#if activeTab === 'environments'}
-        <button class="btn btn-primary btn-sm" on:click={openCreateEnv} disabled={busy}>新建环境</button>
+        <button class="btn btn-primary btn-sm" onclick={openCreateEnv} disabled={busy}>新建环境</button>
       {/if}
     </div>
   </div>
 
   <div role="tablist" class="tabs tabs-bordered">
-    <button class="tab" class:tab-active={activeTab === 'environments'} on:click={() => activeTab = 'environments'}>我的环境</button>
-    <button class="tab" class:tab-active={activeTab === 'overview'} on:click={() => activeTab = 'overview'}>运行状态</button>
-    <button class="tab" class:tab-active={activeTab === 'snapshots'} on:click={() => activeTab = 'snapshots'}>快照存档</button>
+    <button class="tab" class:tab-active={activeTab === 'environments'} onclick={() => activeTab = 'environments'}>我的环境</button>
+    <button class="tab" class:tab-active={activeTab === 'overview'} onclick={() => activeTab = 'overview'}>运行状态</button>
+    <button class="tab" class:tab-active={activeTab === 'snapshots'} onclick={() => activeTab = 'snapshots'}>快照存档</button>
   </div>
 
   {#if activeTab === 'environments'}
@@ -545,7 +547,7 @@ onMount(() => {
       </div>
       <div class="flex gap-2">
         {#if activeEnvID || hasRunningServices}
-          <button class="btn btn-sm btn-outline" on:click={deactivateCurrent} disabled={$operation.active || busy}>
+          <button class="btn btn-sm btn-outline" onclick={deactivateCurrent} disabled={$operation.active || busy}>
             停止环境
           </button>
         {/if}
@@ -559,7 +561,7 @@ onMount(() => {
         <p class="text-base font-semibold">暂无环境</p>
         <p class="text-sm">新建一个环境，组合不同版本的软件和运行时</p>
         <p class="text-xs text-base-content/50">多个项目可共享同一个环境</p>
-        <div class="mt-4"><button class="btn btn-primary btn-sm" on:click={openCreateEnv} disabled={busy}>新建第一个环境</button></div>
+        <div class="mt-4"><button class="btn btn-primary btn-sm" onclick={openCreateEnv} disabled={busy}>新建第一个环境</button></div>
       </div>
     {:else}
       <div class="grid grid-cols-[repeat(auto-fill,minmax(320px,1fr))] gap-4">
@@ -628,14 +630,14 @@ onMount(() => {
               {:else if isActive}
                 <button class="btn btn-sm btn-disabled" disabled>当前在用</button>
               {:else if installCheck.allInstalled}
-                <button class="btn btn-sm btn-ghost" on:click={() => activateEnvOnly(env)} disabled={$operation.active || busy} title="仅切换当前环境标记，不启动组件">激活</button>
-                <button class="btn btn-sm btn-primary" on:click={() => activateEnv(env)} disabled={$operation.active || busy} title="切换标记并启动全部组件">激活并运行</button>
+                <button class="btn btn-sm btn-ghost" onclick={() => activateEnvOnly(env)} disabled={$operation.active || busy} title="仅切换当前环境标记，不启动组件">激活</button>
+                <button class="btn btn-sm btn-primary" onclick={() => activateEnv(env)} disabled={$operation.active || busy} title="切换标记并启动全部组件">激活并运行</button>
               {:else}
-                <button class="btn btn-sm btn-warning" on:click={() => installEnvComponents(env)} disabled={$operation.active || busy}>安装</button>
-                <button class="btn btn-sm btn-ghost" on:click={() => activateEnvOnly(env)} disabled={$operation.active || busy} title="仅切换当前环境标记">激活</button>
+                <button class="btn btn-sm btn-warning" onclick={() => installEnvComponents(env)} disabled={$operation.active || busy}>安装</button>
+                <button class="btn btn-sm btn-ghost" onclick={() => activateEnvOnly(env)} disabled={$operation.active || busy} title="仅切换当前环境标记">激活</button>
               {/if}
-              <button class="btn btn-sm btn-ghost" on:click={() => openEditEnv(env)} disabled={$operation.active || busy}>编辑</button>
-              <button class="btn btn-sm btn-ghost text-error" on:click={() => confirmDeleteEnvId = env.id} disabled={$operation.active || busy}>删除</button>
+              <button class="btn btn-sm btn-ghost" onclick={() => openEditEnv(env)} disabled={$operation.active || busy}>编辑</button>
+              <button class="btn btn-sm btn-ghost text-error" onclick={() => confirmDeleteEnvId = env.id} disabled={$operation.active || busy}>删除</button>
             </div>
           </div>
         {/each}
@@ -723,7 +725,7 @@ onMount(() => {
         {#each sortedSnapshots as snap}
           <div class="card bg-base-100 border border-base-300" class:border-primary={selectedSnapshotId === snap}>
             <div class="card-body p-3.5">
-              <div class="flex items-center justify-between cursor-pointer" on:click={() => loadSnapshotDetail(snap)} on:keydown={() => {}}>
+              <div class="flex items-center justify-between cursor-pointer" role="button" tabindex="0" onclick={() => loadSnapshotDetail(snap)} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); loadSnapshotDetail(snap) } }}>
                 <div class="flex-1">
                   <div class="font-mono text-sm">{snap}</div>
                   <div class="text-xs text-base-content/60 mt-0.5">{formatTime(snap)}</div>
@@ -737,7 +739,7 @@ onMount(() => {
                   {/if}
                 </div>
                 <div class="flex gap-2 shrink-0">
-                  <button class="btn btn-sm btn-ghost text-error" on:click|stopPropagation={() => confirmDeleteId = snap} disabled={busy}>删除</button>
+                  <button class="btn btn-sm btn-ghost text-error" onclick={stopPropagation(() => confirmDeleteId = snap)} disabled={busy}>删除</button>
                 </div>
               </div>
 
@@ -843,17 +845,17 @@ onMount(() => {
 
     <div class="modal-action">
       {#if installTasks.every(t => t.status === 'done' || t.status === 'cancelled')}
-        <button class="btn btn-primary btn-sm" on:click={closeInstallModal}>完成</button>
+        <button class="btn btn-primary btn-sm" onclick={closeInstallModal}>完成</button>
       {:else if installTasks.some(t => t.status === 'error')}
-        <button class="btn btn-ghost btn-sm" on:click={closeInstallModal}>关闭</button>
+        <button class="btn btn-ghost btn-sm" onclick={closeInstallModal}>关闭</button>
       {:else}
-        <button class="btn btn-ghost btn-sm" on:click={cancelInstall}>取消</button>
+        <button class="btn btn-ghost btn-sm" onclick={cancelInstall}>取消</button>
       {/if}
     </div>
   </div>
   <!-- 安装中禁止点击外部关闭 -->
   {#if installTasks.every(t => t.status === 'done' || t.status === 'cancelled') || installTasks.some(t => t.status === 'error')}
-    <form method="dialog" class="modal-backdrop"><button on:click={closeInstallModal}>关闭</button></form>
+    <form method="dialog" class="modal-backdrop"><button onclick={closeInstallModal}>关闭</button></form>
   {:else}
     <div class="modal-backdrop"></div>
   {/if}
@@ -883,7 +885,7 @@ onMount(() => {
               type="button"
               class="flex items-center gap-1.5 rounded-xl border px-2.5 py-2 transition-all select-none
                 {selected ? 'border-primary bg-primary/10 shadow-sm' : 'border-base-300 bg-base-100 hover:border-primary/60'}"
-              on:click={() => toggleKind(c.kind)}>
+              onclick={() => toggleKind(c.kind)}>
               {#if c.icon}
                 <span class="iconfont text-xl leading-none {c.icon}"></span>
               {:else}
@@ -920,7 +922,7 @@ onMount(() => {
                       <span class="loading loading-dots loading-xs text-primary"></span> 加载版本...
                     </div>
                   {:else if versions.length === 0}
-                    <div class="text-xs text-warning">暂无可用版本，可先在「安装软件」页下载对应组件</div>
+                    <div class="text-xs text-warning">暂无可用版本，可先在「软件仓库」页下载对应组件</div>
                   {:else}
                     <div class="flex items-center gap-1.5">
                       <div class="flex-1 min-w-0 flex {expanded ? 'flex-wrap' : 'flex-nowrap overflow-hidden'} gap-1.5">
@@ -928,7 +930,7 @@ onMount(() => {
                           <button
                             type="button"
                             class="shrink-0 px-2 py-1 rounded-md text-xs font-mono border border-primary bg-primary text-primary-content"
-                            on:click={() => selectVersion(spec.kind, spec.version)}>
+                            onclick={() => selectVersion(spec.kind, spec.version)}>
                             {spec.version}（自定义）
                           </button>
                         {/if}
@@ -939,7 +941,7 @@ onMount(() => {
                               {spec.version === ver
                                 ? 'border-primary bg-primary text-primary-content'
                                 : 'border-base-300 bg-base-100 text-base-content/70 hover:border-primary/60'}"
-                            on:click={() => selectVersion(spec.kind, ver)}>
+                            onclick={() => selectVersion(spec.kind, ver)}>
                             {ver}
                             {#if isInstalled(spec.kind, ver)}
                               <span class="{spec.version === ver ? 'text-primary-content' : 'text-success'}">✓</span>
@@ -950,7 +952,7 @@ onMount(() => {
                       <button
                         type="button"
                         class="shrink-0 px-2 py-1 rounded-md text-xs border border-base-300 bg-base-100 text-base-content/60 hover:border-primary/60"
-                        on:click={() => toggleMore(spec.kind)}>{expanded ? '收起' : '更多'}</button>
+                        onclick={() => toggleMore(spec.kind)}>{expanded ? '收起' : '更多'}</button>
                     </div>
                   {/if}
                 </div>
@@ -963,11 +965,11 @@ onMount(() => {
       </div>
     {/if}
     <div class="modal-action">
-      <button class="btn btn-ghost" on:click={() => { envModalOpen = false; editingEnv = null }} disabled={busy}>取消</button>
-      <button class="btn btn-primary" on:click={saveEnv} disabled={busy}>{busy ? '保存中...' : '保存'}</button>
+      <button class="btn btn-ghost" onclick={() => { envModalOpen = false; editingEnv = null }} disabled={busy}>取消</button>
+      <button class="btn btn-primary" onclick={saveEnv} disabled={busy}>{busy ? '保存中...' : '保存'}</button>
     </div>
   </div>
-  <form method="dialog" class="modal-backdrop"><button on:click={() => { envModalOpen = false; editingEnv = null }}>关闭</button></form>
+  <form method="dialog" class="modal-backdrop"><button onclick={() => { envModalOpen = false; editingEnv = null }}>关闭</button></form>
 </dialog>
 
 <!-- Delete Environment Confirm -->
@@ -976,11 +978,11 @@ onMount(() => {
     <h3 class="font-bold text-lg">确认删除环境</h3>
     <p class="py-2 text-sm text-base-content/70">删除后无法恢复，正在使用该环境的项目将回退到独立配置。</p>
     <div class="modal-action">
-      <button class="btn btn-ghost" on:click={() => confirmDeleteEnvId = null}>取消</button>
-      <button class="btn btn-error" on:click={doDeleteEnv} disabled={busy}>确认删除</button>
+      <button class="btn btn-ghost" onclick={() => confirmDeleteEnvId = null}>取消</button>
+      <button class="btn btn-error" onclick={doDeleteEnv} disabled={busy}>确认删除</button>
     </div>
   </div>
-  <form method="dialog" class="modal-backdrop"><button on:click={() => confirmDeleteEnvId = null}>关闭</button></form>
+  <form method="dialog" class="modal-backdrop"><button onclick={() => confirmDeleteEnvId = null}>关闭</button></form>
 </dialog>
 
 <!-- Delete Snapshot Confirm -->
@@ -990,9 +992,9 @@ onMount(() => {
     <p class="py-2 text-sm text-base-content/70">确定要删除快照 <code class="bg-base-300 px-1.5 py-0.5 rounded text-xs font-mono">{confirmDeleteId}</code> 吗？</p>
     <p class="text-xs text-warning">删除后无法恢复。</p>
     <div class="modal-action">
-      <button class="btn btn-ghost" on:click={() => confirmDeleteId = null}>取消</button>
-      <button class="btn btn-error" on:click={doDeleteSnapshot} disabled={busy}>确认删除</button>
+      <button class="btn btn-ghost" onclick={() => confirmDeleteId = null}>取消</button>
+      <button class="btn btn-error" onclick={doDeleteSnapshot} disabled={busy}>确认删除</button>
     </div>
   </div>
-  <form method="dialog" class="modal-backdrop"><button on:click={() => confirmDeleteId = null}>关闭</button></form>
+  <form method="dialog" class="modal-backdrop"><button onclick={() => confirmDeleteId = null}>关闭</button></form>
 </dialog>

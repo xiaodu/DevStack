@@ -5,18 +5,18 @@ import { safeInvoke } from '../lib/safeInvoke'
 import { addToast } from '../lib/stores'
 
 const dispatch = createEventDispatcher()
-let step = 0
-let installDir = ''
-let selectedRole = 'web'
+let step = $state(0)
+let installDir = $state('')
+let selectedRole = $state('web')
 
-let packages = [
+let packages = $state([
   { id: 'nginx', name: 'Nginx', checked: true, versions: [], selected: '' },
   { id: 'mysql', name: 'MySQL', checked: true, versions: [], selected: '' },
   { id: 'redis', name: 'Redis', checked: true, versions: [], selected: '' },
   { id: 'php', name: 'PHP', checked: true, versions: [], selected: '' },
   { id: 'node', name: 'Node.js', checked: false, versions: [], selected: '' },
   { id: 'python', name: 'Python', checked: false, versions: [], selected: '' },
-]
+])
 
 const roles = [
   { id: 'web', label: 'Web 开发者', icon: '🌐' },
@@ -48,9 +48,9 @@ function selectRole(id) {
   else if (id === 'python') packages.forEach((p) => (p.checked = ['nginx', 'mysql', 'redis', 'python'].includes(p.id)))
 }
 
-let installProgress = []
+let installProgress = $state([])
 let installing = false
-let currentInstall = ''
+let currentInstall = $state('')
 
 async function startInstall() {
   step = 2
@@ -107,7 +107,7 @@ function finish() {
           <li>完整的本地开发工具栈</li>
         </ul>
       </div>
-      <button class="btn btn-primary btn-lg min-w-[160px]" on:click={() => step = 1}>下一步</button>
+      <button class="btn btn-primary btn-lg min-w-[160px]" onclick={() => step = 1}>下一步</button>
     </div>
 
   {:else if step === 1}
@@ -125,7 +125,7 @@ function finish() {
           <div class="flex flex-col gap-1">
             {#each roles as role}
               <button class="flex items-center gap-2 px-3 py-2 rounded-lg text-left text-sm w-full transition-colors border-none {selectedRole === role.id ? 'bg-primary text-primary-content' : 'text-base-content/70 hover:bg-base-200'}"
-                on:click={() => selectRole(role.id)}>
+                onclick={() => selectRole(role.id)}>
                 <span>{role.icon}</span><span>{role.label}</span>
               </button>
             {/each}
@@ -133,7 +133,7 @@ function finish() {
         </div>
 
         <div class="flex flex-col">
-          <div class="mb-4"><label class="block text-xs text-base-content/60 mb-1">默认 Web 服务器</label><select class="select select-bordered select-sm max-w-[200px]"><option>Nginx</option></select></div>
+          <div class="mb-4"><label for="default-web-server" class="block text-xs text-base-content/60 mb-1">默认 Web 服务器</label><select id="default-web-server" class="select select-bordered select-sm max-w-[200px]"><option>Nginx</option></select></div>
           <div class="flex-1 flex flex-col gap-1.5">
             {#each packages as pkg}
               <label class="flex items-center gap-2.5 py-1 cursor-pointer">
@@ -145,7 +145,7 @@ function finish() {
               </label>
             {/each}
           </div>
-          <div class="pt-4 text-right"><button class="btn btn-primary btn-lg min-w-[160px]" on:click={startInstall}>开始安装</button></div>
+          <div class="pt-4 text-right"><button class="btn btn-primary btn-lg min-w-[160px]" onclick={startInstall}>开始安装</button></div>
         </div>
       </div>
     </div>
@@ -182,7 +182,7 @@ function finish() {
           <li>配置服务 - 调整服务设置</li>
         </ol>
       </div>
-      <button class="btn btn-primary btn-lg min-w-[160px]" on:click={finish}>完成</button>
+      <button class="btn btn-primary btn-lg min-w-[160px]" onclick={finish}>完成</button>
     </div>
   {/if}
 </div>

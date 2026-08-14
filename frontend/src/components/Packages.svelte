@@ -5,13 +5,13 @@ import { useDownloadProgress } from '../lib/events'
 import { safeInvoke } from '../lib/safeInvoke'
 import { addToast } from '../lib/stores'
 
-let packages = []
-let selected = 'all'
-let installing = {}
-let uninstalling = {}
-let loading = true
+let packages = $state([])
+let selected = $state('all')
+let installing = $state({})
+let uninstalling = $state({})
+let loading = $state(true)
 let installProgress = {} // { 'nginx-1.24.0': { downloaded: 0, total: 0 } }
-let installElapsed = {} // { 'nginx-1.24.0': seconds }
+let installElapsed = $state({}) // { 'nginx-1.24.0': seconds }
 let elapsedTimer = null
 const cancelledInstalls = new Set() // 已取消的安装，下载结束后不再弹成功/失败提示
 
@@ -53,31 +53,19 @@ async function load() {
   loading = true
   packages = []
   try {
-    const services = await api.getServices()
-    for (const svc of services) {
-      const releases = (await api.getAvailableVersions(svc.id)) || []
+    const kinds = Object.keys(serviceNames)
+    for (const kind of kinds) {
+      const releases = (await api.getAvailableVersions(kind)) || []
       for (const rel of releases) {
-        const installed = await api.checkVersionInstalled(svc.id, rel.version)
+        const installed = await api.checkVersionInstalled(kind, rel.version)
         packages.push({
-          id: svc.id,
-          name: serviceNames[svc.id] || svc.name,
+          id: kind,
+          name: serviceNames[kind],
           version: rel.version,
-          category: svc.category,
+          category: categoryFor(kind),
           installed,
         })
       }
-    }
-    // PHP 作为运行时管理，不在服务列表中，需要额外加载
-    const phpReleases = (await api.getAvailableVersions('php')) || []
-    for (const rel of phpReleases) {
-      const installed = await api.checkVersionInstalled('php', rel.version)
-      packages.push({
-        id: 'php',
-        name: serviceNames.php,
-        version: rel.version,
-        category: 'runtime',
-        installed,
-      })
     }
     packages = [...packages]
   } catch (e) {
@@ -85,6 +73,13 @@ async function load() {
   } finally {
     loading = false
   }
+}
+
+function categoryFor(kind) {
+  if (kind === 'nginx' || kind === 'apache') return 'webserver'
+  if (kind === 'mysql' || kind === 'postgresql' || kind === 'mongodb') return 'database'
+  if (kind === 'redis' || kind === 'memcached') return 'service'
+  return 'runtime'
 }
 
 function formatBytes(bytes) {
@@ -174,7 +169,7 @@ async function uninstall(pkg) {
   packages = [...packages]
 }
 
-$: filtered = selected === 'all' ? packages : packages.filter((p) => p.category === selected)
+let filtered = $derived(selected === 'all' ? packages : packages.filter((p) => p.category === selected))
 onMount(load)
 </script>
 
@@ -184,7 +179,7 @@ onMount(load)
     <div class="flex-1 p-2 overflow-y-auto">
       {#each categories as cat}
         <button class="flex items-center gap-2.5 w-full px-3 py-2.5 rounded-lg text-left text-sm transition-colors duration-100 border-none {selected === cat.id ? 'bg-primary text-primary-content' : 'text-base-content/70 hover:bg-base-200'}"
-          on:click={() => selected = cat.id}>
+          onclick={() => selected = cat.id}>
           {cat.label}
         </button>
       {/each}
@@ -247,12 +242,12 @@ onMount(load)
                     {#if uninstalling[key]}
                       <span class="loading loading-spinner loading-xs"></span>
                     {:else}
-                      <button class="btn btn-ghost btn-sm text-error" on:click={() => uninstall(pkg)} title="卸载">🗑 卸载</button>
+                      <button class="btn btn-ghost btn-sm text-error" onclick={() => uninstall(pkg)} title="卸载">🗑 卸载</button>
                     {/if}
                   {:else if installing[key]}
-                    <button class="btn btn-ghost btn-sm text-warning" on:click={() => cancelInstall(pkg)} title="取消安装">取消</button>
+                    <button class="btn btn-ghost btn-sm text-warning" onclick={() => cancelInstall(pkg)} title="取消安装">取消</button>
                   {:else}
-                    <button class="btn btn-primary btn-sm" on:click={() => install(pkg)} title="安装">下载</button>
+                    <button class="btn btn-primary btn-sm" onclick={() => install(pkg)} title="安装">下载</button>
                   {/if}
                 </div>
               </td>

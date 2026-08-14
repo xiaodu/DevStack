@@ -1,4 +1,6 @@
 <script lang="ts">
+import { stopPropagation } from 'svelte/legacy'
+
 import { fly } from 'svelte/transition'
 import { dismissToast, toasts } from '../lib/stores'
 </script>
@@ -11,13 +13,20 @@ import { dismissToast, toasts } from '../lib/stores'
       class:alert-error={t.type === 'error'}
       class:alert-info={t.type === 'info' || (t.type !== 'success' && t.type !== 'error')}
       transition:fly={{ x: 40, duration: 250, opacity: 0 }}
-      on:click={() => dismissToast(t.id)}
-      role="alert"
+      onclick={() => dismissToast(t.id)}
+      role="button"
+      tabindex="0"
+      onkeydown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          dismissToast(t.id)
+        }
+      }}
     >
       <span class="text-sm flex-1">{t.msg}</span>
       <button
         class="btn btn-ghost btn-xs text-base-content/50 hover:text-base-content shrink-0 -mr-1"
-        on:click|stopPropagation={() => dismissToast(t.id)}
+        onclick={stopPropagation(() => dismissToast(t.id))}
         aria-label="关闭"
       >✕</button>
     </div>

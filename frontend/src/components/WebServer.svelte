@@ -3,11 +3,11 @@ import { createEventDispatcher, onMount } from 'svelte'
 import { api } from '../lib/api'
 import { safeInvoke } from '../lib/safeInvoke'
 
-export let service
+let { service } = $props()
 const dispatch = createEventDispatcher()
 
-let nc = {}
-let configLoading = false
+let nc = $state({})
+let configLoading = $state(false)
 
 const bodySizeOptions = ['1M', '8M', '16M', '32M', '64M', '128M', '256M', '512M', '1024M']
 const recommendedConfig = {
@@ -19,7 +19,7 @@ const recommendedConfig = {
   serverTokens: 'false',
 }
 
-const iconClass = { nginx: 'icon-nginx', apache: 'icon-nginx1' }[service.kind] || ''
+let iconClass = $derived({ nginx: 'icon-nginx', apache: 'icon-nginx1' }[service.kind] || '')
 
 onMount(() => {
   if (service.kind === 'nginx') loadConfig()
@@ -87,7 +87,7 @@ async function toggle() {
       {service.name}
       <span class="text-base font-normal text-base-content/50">{service.version}</span>
     </h2>
-    <button class="btn btn-sm {service.running ? 'btn-error' : 'btn-success'}" on:click={toggle}>
+    <button class="btn btn-sm {service.running ? 'btn-error' : 'btn-success'}" onclick={toggle}>
       {service.running ? '停止' : '启动'}
     </button>
   </div>
@@ -106,18 +106,18 @@ async function toggle() {
       <div class="card bg-base-100 border border-base-300 p-5 mb-4">
         <div class="flex justify-between items-center mb-3.5">
           <h3 class="text-sm font-semibold text-primary">性能配置</h3>
-          <button class="btn btn-sm btn-outline" on:click={loadRecommended}>加载推荐值</button>
+          <button class="btn btn-sm btn-outline" onclick={loadRecommended}>加载推荐值</button>
         </div>
         <div class="flex flex-col gap-3">
           <div class="grid grid-cols-2 gap-3">
             <label class="form-control w-full">
               <div class="label"><span class="label-text">最大并发连接数</span></div>
-              <input class="input input-bordered w-full input-sm" type="number" min="1024" max="8192" step="512" value={intVal('workerConnections')} on:change={e => nc.workerConnections = String(e.target.value)} />
+              <input class="input input-bordered w-full input-sm" type="number" min="1024" max="8192" step="512" value={intVal('workerConnections')} onchange={e => nc.workerConnections = String(e.target.value)} />
               <div class="label"><span class="label-text-alt text-base-content/50">{getRecommendedHint('workerConnections', 'CPU核数 × 1024')}</span></div>
             </label>
             <label class="form-control w-full">
               <div class="label"><span class="label-text">Keepalive 超时(秒)</span></div>
-              <input class="input input-bordered w-full input-sm" type="number" min="10" max="120" value={intVal('keepaliveTimeout')} on:change={e => nc.keepaliveTimeout = String(e.target.value)} />
+              <input class="input input-bordered w-full input-sm" type="number" min="10" max="120" value={intVal('keepaliveTimeout')} onchange={e => nc.keepaliveTimeout = String(e.target.value)} />
               <div class="label"><span class="label-text-alt text-base-content/50">{getRecommendedHint('keepaliveTimeout', '长连接保持时间')}</span></div>
             </label>
           </div>
@@ -131,7 +131,7 @@ async function toggle() {
             </label>
             <label class="form-control w-full">
               <div class="label"><span class="label-text">静态资源缓存(天)</span></div>
-              <input class="input input-bordered w-full input-sm" type="number" min="0" max="365" value={intVal('staticCacheDays')} on:change={e => nc.staticCacheDays = String(e.target.value)} />
+              <input class="input input-bordered w-full input-sm" type="number" min="0" max="365" value={intVal('staticCacheDays')} onchange={e => nc.staticCacheDays = String(e.target.value)} />
               <div class="label"><span class="label-text-alt text-base-content/50">{getRecommendedHint('staticCacheDays', '0 = 不缓存')}</span></div>
             </label>
           </div>
@@ -142,11 +142,11 @@ async function toggle() {
         <h3 class="text-sm font-semibold text-primary mb-3.5">功能开关</h3>
         <div class="grid grid-cols-2 gap-3">
           <label class="flex items-center gap-2 cursor-pointer">
-            <input type="checkbox" class="toggle toggle-sm toggle-primary" checked={boolVal('gzipEnabled')} on:change={e => nc.gzipEnabled = String(e.target.checked)} />
+            <input type="checkbox" class="toggle toggle-sm toggle-primary" checked={boolVal('gzipEnabled')} onchange={e => nc.gzipEnabled = String(e.target.checked)} />
             <div><span class="text-sm">Gzip 压缩</span><p class="text-xs text-base-content/50">{getRecommendedHint('gzipEnabled', '减少传输大小 60-80%')}</p></div>
           </label>
           <label class="flex items-center gap-2 cursor-pointer">
-            <input type="checkbox" class="toggle toggle-sm toggle-primary" checked={boolVal('serverTokens')} on:change={e => nc.serverTokens = String(e.target.checked)} />
+            <input type="checkbox" class="toggle toggle-sm toggle-primary" checked={boolVal('serverTokens')} onchange={e => nc.serverTokens = String(e.target.checked)} />
             <div><span class="text-sm">显示服务器版本</span><p class="text-xs text-base-content/50">{getRecommendedHint('serverTokens', '建议关闭')}</p></div>
           </label>
         </div>
@@ -161,7 +161,7 @@ async function toggle() {
       </div>
 
       <div class="flex items-center gap-3 mt-6 pt-4 border-t border-base-300">
-        <button class="btn btn-primary" on:click={save}>保存并生效</button>
+        <button class="btn btn-primary" onclick={save}>保存并生效</button>
         <span class="text-xs text-base-content/50">保存后自动重新生成配置文件并重启 Nginx</span>
       </div>
     {/if}

@@ -13,20 +13,20 @@ import {
   statusMessage,
 } from '../lib/stores'
 
-let services = []
-let runtimes = []
-let sites = []
-let hasLoaded = false
-let loadError = false
-let envSummary = {
+let services = $state([])
+let runtimes = $state([])
+let sites = $state([])
+let hasLoaded = $state(false)
+let loadError = $state(false)
+let envSummary = $state({
   services: { total: 0, running: 0 },
   runtimes: { total: 0, running: 0 },
   projects: { total: 0, enabled: 0 },
-}
-let lastSnapshot = null
-let ops = []
-let activeEnv = null
-let profiles = []
+})
+let lastSnapshot = $state(null)
+let ops = $state([])
+let activeEnv = $state(null)
+let profiles = $state([])
 
 // 并发去重标志：防止 refreshSignal 频繁触发导致多个 load() 并发执行
 let isLoading = false
@@ -171,7 +171,7 @@ function buildActiveCards(env, profileList, svcList, rtList) {
 }
 
 // 响应式：当 activeEnv/profiles/services/runtimes 变化时重新计算卡片
-$: activeCards = buildActiveCards(activeEnv, profiles, services, runtimes)
+let activeCards = $derived(buildActiveCards(activeEnv, profiles, services, runtimes))
 
 function statusLabel(s) {
   if (s === 'running') return '运行中'
@@ -215,7 +215,10 @@ const unsubOp = subscribeOperationEvents((name, data) => {
 })
 onMount(() => {
   load()
-  return () => { unsub(); unsubOp() }
+  return () => {
+    unsub()
+    unsubOp()
+  }
 })
 </script>
 
@@ -313,7 +316,7 @@ onMount(() => {
     {:else if loadError}
       <div class="flex flex-col items-center justify-center py-8 text-base-content/60 text-sm gap-2">
         <p>数据加载失败或超时</p>
-        <button class="btn btn-xs btn-ghost text-primary" on:click={load}>重试</button>
+        <button class="btn btn-xs btn-ghost text-primary" onclick={load}>重试</button>
       </div>
     {:else if sites.length === 0}
       <div class="flex flex-col items-center justify-center py-8 text-base-content/60 text-sm">

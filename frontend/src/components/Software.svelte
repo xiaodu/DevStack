@@ -24,18 +24,20 @@ const categories = [
   { id: 'runtime', label: '运行环境', icon: 'icon-php1' },
 ]
 
-let serviceItems = []
-let runtimeItems = []
-let selected = null
-let expandedCat = 'webserver'
-let loading = true
+let serviceItems = $state([])
+let runtimeItems = $state([])
+let selected = $state(null)
+let expandedCat = $state('webserver')
+let loading = $state(true)
 let loadingNow = false
 
 // 直接引用 serviceItems/runtimeItems，使每个分类下的列表与计数对数据加载保持响应式
-$: grouped = categories.map((cat) => ({
-  ...cat,
-  items: cat.id === 'runtime' ? runtimeItems : serviceItems.filter((s) => s.category === cat.id),
-}))
+let grouped = $derived(
+  categories.map((cat) => ({
+    ...cat,
+    items: cat.id === 'runtime' ? runtimeItems : serviceItems.filter((s) => s.category === cat.id),
+  })),
+)
 
 function itemsFor(catId) {
   return grouped.find((c) => c.id === catId)?.items || []
@@ -103,7 +105,7 @@ async function handleChange() {
   ensureSelection()
 }
 
-$: service = selected
+let service = $derived(selected)
 
 let unsub
 onMount(async () => {
@@ -122,7 +124,7 @@ onDestroy(() => {
 
 <div class="grid grid-cols-[280px_1fr] h-[calc(100vh-48px)] -m-6 -mx-8 bg-base-100">
   <div class="border-r border-base-300 flex flex-col">
-    <div class="p-4 border-b border-base-300"><h3 class="text-base font-semibold">安装软件</h3></div>
+    <div class="p-4 border-b border-base-300"><h3 class="text-base font-semibold">软件管理</h3></div>
     <div class="flex-1 p-2.5 flex flex-col gap-2 overflow-y-auto">
       {#each grouped as cat}
         {@const isOpen = expandedCat === cat.id}
@@ -130,7 +132,7 @@ onDestroy(() => {
           <button
             type="button"
             class="flex items-center gap-2.5 w-full px-3 py-2.5 text-left text-sm font-medium transition-colors border-none {isOpen ? 'bg-base-200/70' : 'bg-base-100 text-base-content/80 hover:bg-base-200'}"
-            on:click={() => toggleCat(cat.id)}>
+            onclick={() => toggleCat(cat.id)}>
             <span class="iconfont text-base leading-none {cat.icon}"></span>
             <span class="flex-1 truncate">{cat.label}</span>
             <span class="text-xs text-base-content/40">{loading ? '…' : cat.items.length}</span>
@@ -150,7 +152,7 @@ onDestroy(() => {
                     type="button"
                     class="flex items-center gap-2 w-full px-2.5 py-2 rounded-lg text-left text-sm transition-colors border-none
                       {selected?.id === item.id ? 'bg-primary text-primary-content' : 'text-base-content/80 hover:bg-base-100'}"
-                    on:click={() => select(item)}>
+                    onclick={() => select(item)}>
                     {#if item.icon}
                       <span class="iconfont text-base leading-none {item.icon}"></span>
                     {:else}

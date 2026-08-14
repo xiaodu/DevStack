@@ -1,3 +1,5 @@
+<!-- @migration-task Error while migrating Svelte code: Mixing old (on:click) and new syntaxes for event handling is not allowed. Use only the onclick syntax
+https://svelte.dev/e/mixed_event_handler_syntaxes -->
 <script lang="ts">
 import { onMount } from 'svelte'
 import { api } from '../lib/api'
@@ -234,15 +236,22 @@ onMount(load)
   <div class="border-r border-base-300 flex flex-col overflow-hidden">
     <div class="flex justify-between items-center p-4 border-b border-base-300">
       <h3 class="text-base font-semibold">项目</h3>
-      <button class="w-7 h-7 rounded-full bg-primary text-primary-content text-base flex items-center justify-center hover:brightness-110 border-none" on:click={newSite} title="添加项目">+</button>
+      <button class="w-7 h-7 rounded-full bg-primary text-primary-content text-base flex items-center justify-center hover:brightness-110 border-none" onclick={newSite} title="添加项目">+</button>
     </div>
     <div class="px-4 py-3 border-b border-base-300">
       <input class="input input-bordered w-full input-sm" placeholder="搜索..." bind:value={searchQuery} />
     </div>
     <div class="flex-1 overflow-y-auto p-2">
       {#each filteredSites as site}
-        <button class="flex items-center justify-between w-full px-3 py-2.5 rounded-lg text-left transition-colors border-none {selectedId === site.id ? 'bg-primary/10' : 'hover:bg-base-200'}"
-          on:click={() => selectSite(site.id)}>
+        <div class="flex items-center justify-between w-full px-3 py-2.5 rounded-lg text-left transition-colors cursor-pointer {selectedId === site.id ? 'bg-primary/10' : 'hover:bg-base-200'}"
+          role="button" tabindex="0"
+          onclick={() => selectSite(site.id)}
+          onkeydown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault()
+              selectSite(site.id)
+            }
+          }}>
           <div class="flex items-center gap-2.5 min-w-0">
             <span class="w-2 h-2 rounded-full shrink-0 {site.enabled ? 'bg-success' : 'bg-base-content/40'}"></span>
             <div>
@@ -252,11 +261,11 @@ onMount(load)
           </div>
           <div class="flex items-center gap-1.5">
             <span class="text-xs px-1 py-0.5 rounded bg-base-200 text-base-content/60 font-mono">{site.type}</span>
-            <button class="btn btn-ghost btn-xs btn-square text-base-content/60 hover:text-base-content" on:click|stopPropagation={() => toggleProject(site.id)} title={site.enabled ? '禁用' : '启用'}>
+            <button class="btn btn-ghost btn-xs btn-square text-base-content/60 hover:text-base-content" onclick={(e) => { e.stopPropagation(); toggleProject(site.id) }} title={site.enabled ? '禁用' : '启用'}>
               {site.enabled ? '⏸' : '▶'}
             </button>
           </div>
-        </button>
+        </div>
       {/each}
       {#if filteredSites.length === 0}
         <div class="text-center py-6 text-base-content/60 text-sm">暂无项目</div>
@@ -270,10 +279,10 @@ onMount(load)
         <h2 class="text-xl font-semibold">{editing.id === '__new__' ? '新建项目' : editing.name}</h2>
         <div class="flex gap-2">
           {#if editing.id && editing.id !== '__new__'}
-            <button class="btn btn-sm btn-outline" on:click={activateProjectEnvironment} disabled={busy}>{busy ? '处理中...' : '激活此项目环境'}</button>
-            <button class="btn btn-sm btn-circle bg-error/10 text-error hover:bg-error/20 border-none" on:click={remove} title="删除">🗑</button>
+            <button class="btn btn-sm btn-outline" onclick={activateProjectEnvironment} disabled={busy}>{busy ? '处理中...' : '激活此项目环境'}</button>
+            <button class="btn btn-sm btn-circle bg-error/10 text-error hover:bg-error/20 border-none" onclick={remove} title="删除">🗑</button>
           {/if}
-          <button class="btn btn-sm btn-circle bg-success text-success-content hover:brightness-110 border-none" on:click={save} title="保存">✓</button>
+          <button class="btn btn-sm btn-circle bg-success text-success-content hover:brightness-110 border-none" onclick={save} title="保存">✓</button>
         </div>
       </div>
 
@@ -317,7 +326,7 @@ onMount(load)
           <div class="label"><span class="label-text">项目根目录</span></div>
           <div class="flex gap-2">
             <input class="input input-bordered w-full input-sm" bind:value={editing.root} placeholder="E:\projects\my-project" />
-            <button class="btn btn-sm btn-outline" on:click={browseDirectory}>浏览</button>
+            <button class="btn btn-sm btn-outline" onclick={browseDirectory}>浏览</button>
           </div>
         </label>
 

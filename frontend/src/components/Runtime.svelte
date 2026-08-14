@@ -3,15 +3,15 @@ import { createEventDispatcher, onMount } from 'svelte'
 import { api } from '../lib/api'
 import { safeInvoke } from '../lib/safeInvoke'
 
-export let service
+let { service } = $props()
 const dispatch = createEventDispatcher()
 
-let pc = {}
-let configLoading = false
-let extensions = []
-let extLoading = false
-let extSearch = ''
-let enabledSet = new Set()
+let pc = $state({})
+let configLoading = $state(false)
+let extensions = $state([])
+let extLoading = $state(false)
+let extSearch = $state('')
+let enabledSet = $state(new Set())
 
 const typeMeta = {
   php: { label: 'PHP', color: '#777BB4' },
@@ -44,8 +44,8 @@ const recommendedPHPConfig = {
   fixPathinfo: 'true',
 }
 
-$: meta = typeMeta[service.type] || { label: service.name, color: 'var(--accent)' }
-$: iconClass = rtIcons[service.type] || ''
+let meta = $derived(typeMeta[service.type] || { label: service.name, color: 'var(--accent)' })
+let iconClass = $derived(rtIcons[service.type] || '')
 
 onMount(() => {
   if (service.type === 'php') {
@@ -77,9 +77,9 @@ async function loadExtensions() {
   }
 }
 
-$: filteredExts = extSearch
-  ? extensions.filter((e) => e.name.toLowerCase().includes(extSearch.toLowerCase()))
-  : extensions
+let filteredExts = $derived(
+  extSearch ? extensions.filter((e) => e.name.toLowerCase().includes(extSearch.toLowerCase())) : extensions,
+)
 
 function toggleExt(name) {
   const s = new Set(enabledSet)
@@ -166,7 +166,7 @@ async function toggle() {
       {service.name}
       <span class="text-base font-normal text-base-content/50">{service.version}</span>
     </h2>
-    <button class="btn btn-sm {service.running ? 'btn-error' : 'btn-success'}" on:click={toggle}>
+    <button class="btn btn-sm {service.running ? 'btn-error' : 'btn-success'}" onclick={toggle}>
       {service.running ? '停止' : '启动'}
     </button>
   </div>
@@ -186,12 +186,12 @@ async function toggle() {
       <div class="card bg-base-100 border border-base-300 p-5 mb-4">
         <div class="flex justify-between items-center mb-3.5">
           <h3 class="text-sm font-semibold text-primary">PHP 配置</h3>
-          <button class="btn btn-sm btn-outline" on:click={loadRecommendedPHP}>加载推荐值</button>
+          <button class="btn btn-sm btn-outline" onclick={loadRecommendedPHP}>加载推荐值</button>
         </div>
         <div class="flex flex-col gap-3">
           <div class="grid grid-cols-2 gap-3">
             <label class="form-control w-full"><div class="label"><span class="label-text">内存限制</span></div><select class="select select-bordered w-full select-sm" bind:value={pc.memoryLimit}>{#each memoryOptions as opt}<option>{opt}</option>{/each}</select><div class="label"><span class="label-text-alt text-base-content/50">{getRecommendedHint('memoryLimit')}</span></div></label>
-            <label class="form-control w-full"><div class="label"><span class="label-text">最大执行时间(秒)</span></div><input class="input input-bordered w-full input-sm" type="number" min="30" max="600" value={intVal('maxExecutionTime')} on:change={e => pc.maxExecutionTime = String(e.target.value)} /><div class="label"><span class="label-text-alt text-base-content/50">{getRecommendedHint('maxExecutionTime')}</span></div></label>
+            <label class="form-control w-full"><div class="label"><span class="label-text">最大执行时间(秒)</span></div><input class="input input-bordered w-full input-sm" type="number" min="30" max="600" value={intVal('maxExecutionTime')} onchange={e => pc.maxExecutionTime = String(e.target.value)} /><div class="label"><span class="label-text-alt text-base-content/50">{getRecommendedHint('maxExecutionTime')}</span></div></label>
           </div>
           <div class="grid grid-cols-2 gap-3">
             <label class="form-control w-full"><div class="label"><span class="label-text">上传文件最大大小</span></div><select class="select select-bordered w-full select-sm" bind:value={pc.uploadMaxFilesize}>{#each uploadOptions as opt}<option>{opt}</option>{/each}</select><div class="label"><span class="label-text-alt text-base-content/50">{getRecommendedHint('uploadMaxFilesize')}</span></div></label>
@@ -208,19 +208,19 @@ async function toggle() {
         <h3 class="text-sm font-semibold text-primary mb-3.5">执行环境与上传</h3>
         <div class="flex flex-col gap-3 max-w-[700px]">
           <div class="grid grid-cols-2 gap-3">
-            <label class="form-control w-full"><div class="label"><span class="label-text">输入超时(秒)</span></div><input class="input input-bordered w-full input-sm" type="number" min="10" max="600" value={intVal('maxInputTime')} on:change={e => pc.maxInputTime = String(e.target.value)} /><div class="label"><span class="label-text-alt text-base-content/50">{getRecommendedHint('maxInputTime')}</span></div></label>
-            <label class="form-control w-full"><div class="label"><span class="label-text">输入变量上限</span></div><input class="input input-bordered w-full input-sm" type="number" min="1000" max="10000" value={intVal('maxInputVars')} on:change={e => pc.maxInputVars = String(e.target.value)} /><div class="label"><span class="label-text-alt text-base-content/50">{getRecommendedHint('maxInputVars', '表单字段过多时可调大')}</span></div></label>
+            <label class="form-control w-full"><div class="label"><span class="label-text">输入超时(秒)</span></div><input class="input input-bordered w-full input-sm" type="number" min="10" max="600" value={intVal('maxInputTime')} onchange={e => pc.maxInputTime = String(e.target.value)} /><div class="label"><span class="label-text-alt text-base-content/50">{getRecommendedHint('maxInputTime')}</span></div></label>
+            <label class="form-control w-full"><div class="label"><span class="label-text">输入变量上限</span></div><input class="input input-bordered w-full input-sm" type="number" min="1000" max="10000" value={intVal('maxInputVars')} onchange={e => pc.maxInputVars = String(e.target.value)} /><div class="label"><span class="label-text-alt text-base-content/50">{getRecommendedHint('maxInputVars', '表单字段过多时可调大')}</span></div></label>
           </div>
           <div class="grid grid-cols-2 gap-3">
-            <label class="form-control w-full"><div class="label"><span class="label-text">同时上传文件数</span></div><input class="input input-bordered w-full input-sm" type="number" min="1" max="100" value={intVal('maxFileUploads')} on:change={e => pc.maxFileUploads = String(e.target.value)} /><div class="label"><span class="label-text-alt text-base-content/50">{getRecommendedHint('maxFileUploads')}</span></div></label>
-            <label class="form-control w-full"><div class="label"><span class="label-text">Session 有效期(秒)</span></div><input class="input input-bordered w-full input-sm" type="number" min="60" max="86400" value={intVal('sessionGCMaxLifetime')} on:change={e => pc.sessionGCMaxLifetime = String(e.target.value)} /><div class="label"><span class="label-text-alt text-base-content/50">{getRecommendedHint('sessionGCMaxLifetime', '登录态保持时间')}</span></div></label>
+            <label class="form-control w-full"><div class="label"><span class="label-text">同时上传文件数</span></div><input class="input input-bordered w-full input-sm" type="number" min="1" max="100" value={intVal('maxFileUploads')} onchange={e => pc.maxFileUploads = String(e.target.value)} /><div class="label"><span class="label-text-alt text-base-content/50">{getRecommendedHint('maxFileUploads')}</span></div></label>
+            <label class="form-control w-full"><div class="label"><span class="label-text">Session 有效期(秒)</span></div><input class="input input-bordered w-full input-sm" type="number" min="60" max="86400" value={intVal('sessionGCMaxLifetime')} onchange={e => pc.sessionGCMaxLifetime = String(e.target.value)} /><div class="label"><span class="label-text-alt text-base-content/50">{getRecommendedHint('sessionGCMaxLifetime', '登录态保持时间')}</span></div></label>
           </div>
           <div class="grid grid-cols-2 gap-3">
             <label class="form-control w-full"><div class="label"><span class="label-text">时区</span></div><select class="select select-bordered w-full select-sm" bind:value={pc.timezone}>{#each timezoneOptions as opt}<option>{opt}</option>{/each}</select><div class="label"><span class="label-text-alt text-base-content/50">{getRecommendedHint('timezone', '影响 date() 输出')}</span></div></label>
             <label class="form-control w-full"><div class="label"><span class="label-text">默认字符集</span></div><select class="select select-bordered w-full select-sm" bind:value={pc.defaultCharset}>{#each charsetOptions as opt}<option>{opt}</option>{/each}</select><div class="label"><span class="label-text-alt text-base-content/50">{getRecommendedHint('defaultCharset')}</span></div></label>
           </div>
           <div class="grid grid-cols-2 gap-3">
-            <label class="form-control w-full"><div class="label"><span class="label-text">错误日志文件</span></div><input class="input input-bordered w-full input-sm" value={pc.errorLog || 'php_errors.log'} on:change={e => pc.errorLog = e.target.value} /><div class="label"><span class="label-text-alt text-base-content/50">{getRecommendedHint('errorLog')}</span></div></label>
+            <label class="form-control w-full"><div class="label"><span class="label-text">错误日志文件</span></div><input class="input input-bordered w-full input-sm" value={pc.errorLog || 'php_errors.log'} onchange={e => pc.errorLog = e.target.value} /><div class="label"><span class="label-text-alt text-base-content/50">{getRecommendedHint('errorLog')}</span></div></label>
           </div>
         </div>
       </div>
@@ -229,23 +229,23 @@ async function toggle() {
         <h3 class="text-sm font-semibold text-primary mb-3.5">功能开关</h3>
         <div class="grid grid-cols-2 gap-3">
           <label class="flex items-center gap-2 cursor-pointer">
-            <input type="checkbox" class="toggle toggle-sm toggle-primary" checked={boolVal('displayErrors')} on:change={e => pc.displayErrors = String(e.target.checked)} />
+            <input type="checkbox" class="toggle toggle-sm toggle-primary" checked={boolVal('displayErrors')} onchange={e => pc.displayErrors = String(e.target.checked)} />
             <div><span class="text-sm">显示错误信息</span><p class="text-xs text-base-content/50">{getRecommendedHint('displayErrors', '生产环境建议关闭')}</p></div>
           </label>
           <label class="flex items-center gap-2 cursor-pointer">
-            <input type="checkbox" class="toggle toggle-sm toggle-primary" checked={boolVal('opcacheEnabled')} on:change={e => pc.opcacheEnabled = String(e.target.checked)} />
+            <input type="checkbox" class="toggle toggle-sm toggle-primary" checked={boolVal('opcacheEnabled')} onchange={e => pc.opcacheEnabled = String(e.target.checked)} />
             <div><span class="text-sm">启用 OPcache</span><p class="text-xs text-base-content/50">{getRecommendedHint('opcacheEnabled', '性能提升 30-50%')}</p></div>
           </label>
           <label class="flex items-center gap-2 cursor-pointer">
-            <input type="checkbox" class="toggle toggle-sm toggle-primary" checked={boolVal('fileUploads')} on:change={e => pc.fileUploads = String(e.target.checked)} />
+            <input type="checkbox" class="toggle toggle-sm toggle-primary" checked={boolVal('fileUploads')} onchange={e => pc.fileUploads = String(e.target.checked)} />
             <div><span class="text-sm">允许文件上传</span><p class="text-xs text-base-content/50">file_uploads，上传大小由上方限制</p></div>
           </label>
           <label class="flex items-center gap-2 cursor-pointer">
-            <input type="checkbox" class="toggle toggle-sm toggle-primary" checked={boolVal('logErrors')} on:change={e => pc.logErrors = String(e.target.checked)} />
+            <input type="checkbox" class="toggle toggle-sm toggle-primary" checked={boolVal('logErrors')} onchange={e => pc.logErrors = String(e.target.checked)} />
             <div><span class="text-sm">记录错误日志</span><p class="text-xs text-base-content/50">写入 error_log 文件</p></div>
           </label>
           <label class="flex items-center gap-2 cursor-pointer">
-            <input type="checkbox" class="toggle toggle-sm toggle-primary" checked={boolVal('fixPathinfo')} on:change={e => pc.fixPathinfo = String(e.target.checked)} />
+            <input type="checkbox" class="toggle toggle-sm toggle-primary" checked={boolVal('fixPathinfo')} onchange={e => pc.fixPathinfo = String(e.target.checked)} />
             <div><span class="text-sm">启用 pathinfo 支持</span><p class="text-xs text-base-content/50">cgi.fix_pathinfo，ThinkPHP 等框架必需</p></div>
           </label>
         </div>
@@ -257,8 +257,8 @@ async function toggle() {
           <div class="flex items-center gap-2">
             <input class="input input-bordered w-full input-sm" type="search" placeholder="搜索扩展..." bind:value={extSearch} />
             <span class="text-xs text-base-content/50 whitespace-nowrap">已启用 {enabledSet.size}/{extensions.length}</span>
-            <button class="btn btn-sm btn-outline" on:click={selectAllExts}>全部启用</button>
-            <button class="btn btn-sm btn-outline" on:click={selectNoneExts}>全部禁用</button>
+            <button class="btn btn-sm btn-outline" onclick={selectAllExts}>全部启用</button>
+            <button class="btn btn-sm btn-outline" onclick={selectNoneExts}>全部禁用</button>
           </div>
           {#if extLoading}
             <div class="text-center py-6 text-base-content/60">加载扩展中...</div>
@@ -268,7 +268,7 @@ async function toggle() {
             <div class="grid grid-cols-2 md:grid-cols-3 gap-x-3 gap-y-1.5 max-h-56 overflow-y-auto pr-1">
               {#each filteredExts as ext}
                 <label class="flex items-center gap-2 cursor-pointer">
-                  <input type="checkbox" class="toggle toggle-xs toggle-primary" checked={enabledSet.has(ext.name)} on:change={() => toggleExt(ext.name)} />
+                  <input type="checkbox" class="toggle toggle-xs toggle-primary" checked={enabledSet.has(ext.name)} onchange={() => toggleExt(ext.name)} />
                   <span class="text-sm text-base-content/80 truncate">{ext.name}</span>
                 </label>
               {/each}
@@ -278,7 +278,7 @@ async function toggle() {
       </div>
 
       <div class="flex items-center gap-3 mt-6 pt-4 border-t border-base-300">
-        <button class="btn btn-primary" on:click={save}>保存配置</button>
+        <button class="btn btn-primary" onclick={save}>保存配置</button>
         <span class="text-xs text-base-content/50">保存后重新生成 php.ini，需重启 PHP 生效</span>
       </div>
     {/if}

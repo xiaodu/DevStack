@@ -4,10 +4,10 @@ import { api } from '../lib/api'
 import { safeInvoke } from '../lib/safeInvoke'
 import { addToast, refreshSignal } from '../lib/stores'
 
-let snapshots = []
-let loading = true
-let busy = false
-let confirmRollbackId = null
+let snapshots = $state([])
+let loading = $state(true)
+let busy = $state(false)
+let confirmRollbackId = $state(null)
 let confirmDeleteId = null
 
 async function load() {
@@ -74,7 +74,7 @@ onMount(load)
       <h1 class="text-xl font-bold">快照管理</h1>
       <p class="text-sm text-base-content/60 mt-1">保存和恢复环境状态</p>
     </div>
-    <button class="btn btn-primary" on:click={createSnapshot} disabled={busy}>
+    <button class="btn btn-primary" onclick={createSnapshot} disabled={busy}>
       {busy ? '处理中...' : '创建快照'}
     </button>
   </div>
@@ -87,7 +87,7 @@ onMount(load)
       <p class="text-base font-semibold text-base-content">暂无快照</p>
       <p class="text-xs">快照可以保存当前所有服务的运行状态和配置</p>
       <p class="text-xs">创建快照后，您可以随时回滚到该状态</p>
-      <div class="mt-4"><button class="btn btn-primary" on:click={createSnapshot} disabled={busy}>{busy ? '创建中...' : '创建第一个快照'}</button></div>
+      <div class="mt-4"><button class="btn btn-primary" onclick={createSnapshot} disabled={busy}>{busy ? '创建中...' : '创建第一个快照'}</button></div>
     </div>
   {:else}
     <div class="flex flex-col gap-2.5">
@@ -98,7 +98,7 @@ onMount(load)
               <div class="font-mono text-sm">{snap}</div>
               <div class="text-xs text-base-content/60 mt-0.5">{formatTime(snap)}</div>
             </div>
-            <button class="btn btn-sm btn-outline" on:click={() => confirmRollbackId = snap} disabled={busy}>回滚</button>
+            <button class="btn btn-sm btn-outline" onclick={() => confirmRollbackId = snap} disabled={busy}>回滚</button>
           </div>
         </div>
       {/each}
@@ -113,9 +113,9 @@ onMount(load)
     <p class="py-2 text-sm text-base-content/70">确定要回滚到快照 <code class="bg-base-300 px-1.5 py-0.5 rounded text-xs font-mono">{confirmRollbackId}</code> 吗？</p>
     <p class="text-xs text-warning">当前运行中的服务状态将被覆盖。</p>
     <div class="modal-action">
-      <button class="btn btn-ghost" on:click={() => confirmRollbackId = null}>取消</button>
-      <button class="btn btn-error" on:click={doRollback} disabled={busy}>确认回滚</button>
+      <button class="btn btn-ghost" onclick={() => confirmRollbackId = null}>取消</button>
+      <button class="btn btn-error" onclick={doRollback} disabled={busy}>确认回滚</button>
     </div>
   </div>
-  <form method="dialog" class="modal-backdrop"><button on:click={() => confirmRollbackId = null}>关闭</button></form>
+  <form method="dialog" class="modal-backdrop"><button onclick={() => confirmRollbackId = null}>关闭</button></form>
 </dialog>

@@ -1,12 +1,17 @@
 <script lang="ts">
 import { createEventDispatcher } from 'svelte'
-export let currentView = 'dashboard'
+
+interface Props {
+  currentView?: string
+}
+
+let { currentView = 'dashboard' }: Props = $props()
 const dispatch = createEventDispatcher()
 
 const navItems = [
   { id: 'dashboard', label: '控制面板', icon: 'dashboard' },
   { id: 'sites', label: '项目管理', icon: 'sites' },
-  { id: 'software', label: '安装软件', icon: 'software' },
+  { id: 'software', label: '软件管理', icon: 'software' },
   { id: 'environment', label: '环境管理', icon: 'environment' },
   { id: 'logs', label: '日志监控', icon: 'logs' },
 ]
@@ -27,7 +32,7 @@ const bottomItems = [
 
   <nav class="nav">
     {#each navItems as item}
-      <button class="nav-item" class:active={currentView === item.id} on:click={() => dispatch('navigate', item.id)}>
+      <button class="nav-item" class:active={currentView === item.id} onclick={() => dispatch('navigate', item.id)}>
         <span class="nav-icon">
           {#if item.icon === 'dashboard'}
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
@@ -48,7 +53,7 @@ const bottomItems = [
 
   <div class="nav-bottom">
     {#each bottomItems as item}
-      <button class="nav-item" class:active={currentView === item.id} on:click={() => dispatch('navigate', item.id)}>
+      <button class="nav-item" class:active={currentView === item.id} onclick={() => dispatch('navigate', item.id)}>
         <span class="nav-icon">
           {#if item.icon === 'packages'}
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16.5 9.4 7.5 4.21M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>

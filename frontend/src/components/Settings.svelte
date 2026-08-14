@@ -4,10 +4,10 @@ import { api } from '../lib/api'
 import { safeInvoke } from '../lib/safeInvoke'
 import { addToast } from '../lib/stores'
 
-let settings = { installDir: '', startOnBoot: false, minimizeToTray: true, theme: 'light', language: 'zh-CN' }
-let systemInfo = {}
-let loading = true
-let configPath = ''
+let settings = $state({ installDir: '', startOnBoot: false, minimizeToTray: true, theme: 'light', language: 'zh-CN' })
+let systemInfo = $state({})
+let loading = $state(true)
+let configPath = $state('')
 
 async function load() {
   try {
@@ -83,7 +83,7 @@ onMount(load)
         <div class="grid grid-cols-2 gap-3">
           <label class="form-control w-full">
             <div class="label"><span class="label-text">主题</span></div>
-            <select class="select select-bordered w-full" bind:value={settings.theme} on:change={handleThemeChange}>
+            <select class="select select-bordered w-full" bind:value={settings.theme} onchange={handleThemeChange}>
               <option value="light">Light</option>
               <option value="corporate">Corporate</option>
               <option value="dim">Dim</option>
@@ -122,7 +122,7 @@ onMount(load)
     </div>
 
     <div class="flex items-center gap-3">
-      <button class="btn btn-primary btn-lg" on:click={save}>保存设置</button>
+      <button class="btn btn-primary btn-lg" onclick={save}>保存设置</button>
     </div>
   {/if}
 </div>

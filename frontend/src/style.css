@@ -1,6 +1,7 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+@plugin "daisyui" {
+  themes: light --default, corporate, dim, night, business, dark;
+}
 
 :root {
   --sidebar-bg: #f1f5f9;

@@ -1,17 +1,18 @@
 <script lang="ts">
 import { createEventDispatcher, onMount } from 'svelte'
+import { run } from 'svelte/legacy'
 import { api } from '../lib/api'
 import { safeInvoke } from '../lib/safeInvoke'
 
-export let service
+let { service } = $props()
 const dispatch = createEventDispatcher()
 
-let mc = {}
-let configLoading = false
-let mysqlRootHasPassword = null
-let checkingAuth = false
-let authError = ''
-let lastStatus = null
+let mc = $state({})
+let configLoading = $state(false)
+let mysqlRootHasPassword = $state(null)
+let checkingAuth = $state(false)
+let authError = $state('')
+let lastStatus = $state(null)
 
 const memoryOptions = ['64M', '128M', '256M', '512M', '1G', '2G', '4G']
 const innodbLogOptions = ['32M', '64M', '128M', '256M', '512M']
@@ -49,17 +50,11 @@ const recommendedMySQLConfig = {
   joinBufferSize: '2M',
 }
 
-const iconClass = { mysql: 'icon-mysql', redis: 'icon-redis' }[service.kind] || ''
+let iconClass = $derived({ mysql: 'icon-mysql', redis: 'icon-redis' }[service.kind] || '')
 
 onMount(() => {
   if (service.kind === 'mysql') loadMysqlConfig()
 })
-
-// 以 service.status 变化驱动检测（含首次挂载），不再依赖挂载时快照的过期状态
-$: if (service.kind === 'mysql' && service.status !== lastStatus) {
-  lastStatus = service.status
-  checkMysqlAuth()
-}
 
 async function checkMysqlAuth() {
   checkingAuth = true
@@ -157,6 +152,13 @@ async function toggle() {
     { errorPrefix: '操作失败' },
   )
 }
+// 以 service.status 变化驱动检测（含首次挂载），不再依赖挂载时快照的过期状态
+run(() => {
+  if (service.kind === 'mysql' && service.status !== lastStatus) {
+    lastStatus = service.status
+    checkMysqlAuth()
+  }
+})
 </script>
 
 <div class="p-6">
@@ -166,7 +168,7 @@ async function toggle() {
       {service.name}
       <span class="text-base font-normal text-base-content/50">{service.version}</span>
     </h2>
-    <button class="btn btn-sm {service.running ? 'btn-error' : 'btn-success'}" on:click={toggle}>
+    <button class="btn btn-sm {service.running ? 'btn-error' : 'btn-success'}" onclick={toggle}>
       {service.running ? '停止' : '启动'}
     </button>
   </div>
@@ -221,7 +223,7 @@ async function toggle() {
             </label>
             <label class="form-control w-full">
               <div class="label"><span class="label-text">端口</span></div>
-              <input class="input input-bordered w-full input-sm" type="number" min="1" max="65535" value={intVal('port')} on:change={e => mc.port = String(e.target.value)} />
+              <input class="input input-bordered w-full input-sm" type="number" min="1" max="65535" value={intVal('port')} onchange={e => mc.port = String(e.target.value)} />
               <div class="label"><span class="label-text-alt text-base-content/50">{getRecommendedHint('port')}</span></div>
             </label>
           </div>
@@ -241,11 +243,11 @@ async function toggle() {
           </div>
           <div class="grid grid-cols-2 gap-3">
             <label class="flex items-center gap-2 cursor-pointer">
-              <input type="checkbox" class="toggle toggle-sm toggle-primary" checked={boolVal('skipNameResolve')} on:change={e => mc.skipNameResolve = String(e.target.checked)} />
+              <input type="checkbox" class="toggle toggle-sm toggle-primary" checked={boolVal('skipNameResolve')} onchange={e => mc.skipNameResolve = String(e.target.checked)} />
               <div><span class="text-sm">跳过域名解析</span><p class="text-xs text-base-content/50">跳过客户端主机名反查，仅本机访问推荐开启</p></div>
             </label>
             <label class="flex items-center gap-2 cursor-pointer">
-              <input type="checkbox" class="toggle toggle-sm toggle-primary" checked={boolVal('generalLog')} on:change={e => mc.generalLog = String(e.target.checked)} />
+              <input type="checkbox" class="toggle toggle-sm toggle-primary" checked={boolVal('generalLog')} onchange={e => mc.generalLog = String(e.target.checked)} />
               <div><span class="text-sm">全量查询日志</span><p class="text-xs text-base-content/50">记录所有 SQL，调试时开启，平时建议关闭</p></div>
             </label>
           </div>
@@ -255,7 +257,7 @@ async function toggle() {
       <div class="card bg-base-100 border border-base-300 p-5 mb-4">
         <div class="flex justify-between items-center mb-3.5">
           <h3 class="text-sm font-semibold text-primary">InnoDB 优化</h3>
-          <button class="btn btn-sm btn-outline" on:click={loadRecommendedMySQL}>加载推荐值</button>
+          <button class="btn btn-sm btn-outline" onclick={loadRecommendedMySQL}>加载推荐值</button>
         </div>
         <div class="flex flex-col gap-3 max-w-[700px]">
           <div class="grid grid-cols-2 gap-3">
@@ -272,15 +274,15 @@ async function toggle() {
         <h3 class="text-sm font-semibold text-primary mb-3.5">连接与缓存</h3>
         <div class="flex flex-col gap-3 max-w-[700px]">
           <div class="grid grid-cols-2 gap-3">
-            <label class="form-control w-full"><div class="label"><span class="label-text">最大连接数</span></div><input class="input input-bordered w-full input-sm" type="number" min="10" max="1000" value={intVal('maxConnections')} on:change={e => mc.maxConnections = String(e.target.value)} /><div class="label"><span class="label-text-alt text-base-content/50">{getRecommendedHint('maxConnections')}</span></div></label>
+            <label class="form-control w-full"><div class="label"><span class="label-text">最大连接数</span></div><input class="input input-bordered w-full input-sm" type="number" min="10" max="1000" value={intVal('maxConnections')} onchange={e => mc.maxConnections = String(e.target.value)} /><div class="label"><span class="label-text-alt text-base-content/50">{getRecommendedHint('maxConnections')}</span></div></label>
             <label class="form-control w-full"><div class="label"><span class="label-text">临时表大小</span></div><select class="select select-bordered w-full select-sm" bind:value={mc.tmpTableSize}>{#each memoryOptions as opt}<option>{opt}</option>{/each}</select><div class="label"><span class="label-text-alt text-base-content/50">{getRecommendedHint('tmpTableSize')}</span></div></label>
           </div>
           <div class="grid grid-cols-2 gap-3">
             <label class="form-control w-full"><div class="label"><span class="label-text">最大堆表大小</span></div><select class="select select-bordered w-full select-sm" bind:value={mc.maxHeapTableSize}>{#each memoryOptions as opt}<option>{opt}</option>{/each}</select><div class="label"><span class="label-text-alt text-base-content/50">{getRecommendedHint('maxHeapTableSize', '与tmp一致')}</span></div></label>
-            <label class="form-control w-full"><div class="label"><span class="label-text">线程缓存大小</span></div><input class="input input-bordered w-full input-sm" type="number" min="1" max="100" value={intVal('threadCacheSize')} on:change={e => mc.threadCacheSize = String(e.target.value)} /><div class="label"><span class="label-text-alt text-base-content/50">{getRecommendedHint('threadCacheSize')}</span></div></label>
+            <label class="form-control w-full"><div class="label"><span class="label-text">线程缓存大小</span></div><input class="input input-bordered w-full input-sm" type="number" min="1" max="100" value={intVal('threadCacheSize')} onchange={e => mc.threadCacheSize = String(e.target.value)} /><div class="label"><span class="label-text-alt text-base-content/50">{getRecommendedHint('threadCacheSize')}</span></div></label>
           </div>
           <div class="grid grid-cols-1 gap-3">
-            <label class="form-control w-full"><div class="label"><span class="label-text">表打开缓存</span></div><input class="input input-bordered w-full input-sm" type="number" min="100" max="4000" value={intVal('tableOpenCache')} on:change={e => mc.tableOpenCache = String(e.target.value)} /><div class="label"><span class="label-text-alt text-base-content/50">{getRecommendedHint('tableOpenCache')}</span></div></label>
+            <label class="form-control w-full"><div class="label"><span class="label-text">表打开缓存</span></div><input class="input input-bordered w-full input-sm" type="number" min="100" max="4000" value={intVal('tableOpenCache')} onchange={e => mc.tableOpenCache = String(e.target.value)} /><div class="label"><span class="label-text-alt text-base-content/50">{getRecommendedHint('tableOpenCache')}</span></div></label>
           </div>
           <div class="grid grid-cols-2 gap-3">
             <label class="form-control w-full"><div class="label"><span class="label-text">最大数据包</span></div><select class="select select-bordered w-full select-sm" bind:value={mc.maxAllowedPacket}>{#each sizeOptions as opt}<option>{opt}</option>{/each}</select><div class="label"><span class="label-text-alt text-base-content/50">{getRecommendedHint('maxAllowedPacket', '大字段/包提交相关')}</span></div></label>
@@ -291,13 +293,13 @@ async function toggle() {
             <label class="form-control w-full"><div class="label"><span class="label-text">连接缓冲区</span></div><select class="select select-bordered w-full select-sm" bind:value={mc.joinBufferSize}>{#each sizeOptions as opt}<option>{opt}</option>{/each}</select><div class="label"><span class="label-text-alt text-base-content/50">{getRecommendedHint('joinBufferSize')}</span></div></label>
           </div>
           <div class="grid grid-cols-2 gap-3">
-            <label class="form-control w-full"><div class="label"><span class="label-text">超时等待(秒)</span></div><input class="input input-bordered w-full input-sm" type="number" min="10" max="86400" value={intVal('waitTimeout')} on:change={e => mc.waitTimeout = String(e.target.value)} /><div class="label"><span class="label-text-alt text-base-content/50">{getRecommendedHint('waitTimeout', '空闲连接超时')}</span></div></label>
+            <label class="form-control w-full"><div class="label"><span class="label-text">超时等待(秒)</span></div><input class="input input-bordered w-full input-sm" type="number" min="10" max="86400" value={intVal('waitTimeout')} onchange={e => mc.waitTimeout = String(e.target.value)} /><div class="label"><span class="label-text-alt text-base-content/50">{getRecommendedHint('waitTimeout', '空闲连接超时')}</span></div></label>
             <div class="flex items-end gap-3 pb-1">
               <label class="flex items-center gap-2 cursor-pointer">
-                <input type="checkbox" class="toggle toggle-sm toggle-primary" checked={boolVal('slowQueryLog')} on:change={e => mc.slowQueryLog = String(e.target.checked)} />
+                <input type="checkbox" class="toggle toggle-sm toggle-primary" checked={boolVal('slowQueryLog')} onchange={e => mc.slowQueryLog = String(e.target.checked)} />
                 <div><span class="text-sm">慢查询日志</span></div>
               </label>
-              <label class="form-control flex-1"><div class="label"><span class="label-text">慢查询阈值(秒)</span></div><input class="input input-bordered w-full input-sm" type="number" min="1" max="60" value={intVal('longQueryTime')} on:change={e => mc.longQueryTime = String(e.target.value)} /></label>
+              <label class="form-control flex-1"><div class="label"><span class="label-text">慢查询阈值(秒)</span></div><input class="input input-bordered w-full input-sm" type="number" min="1" max="60" value={intVal('longQueryTime')} onchange={e => mc.longQueryTime = String(e.target.value)} /></label>
             </div>
           </div>
         </div>
@@ -337,7 +339,7 @@ async function toggle() {
 
   {#if service.kind === 'mysql' || service.kind === 'redis'}
     <div class="flex items-center gap-3 mt-6 pt-4 border-t border-base-300">
-      <button class="btn btn-primary" on:click={save}>保存设置</button>
+      <button class="btn btn-primary" onclick={save}>保存设置</button>
       <span class="text-xs text-base-content/50">{service.kind === 'mysql' ? '配置修改与密码修改后需重启生效' : 'Redis 配置修改后需重启生效'}</span>
     </div>
   {/if}
