@@ -24,7 +24,7 @@ const bottomItems = [
 <aside class="sidebar">
   <div class="logo">
     <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
-      <rect width="32" height="32" rx="8" fill="var(--accent)"/>
+      <rect width="32" height="32" rx="8" fill="var(--color-accent)"/>
       <path d="M10 16h12M16 10v12" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/>
     </svg>
     <span class="logo-text">DevStack</span>

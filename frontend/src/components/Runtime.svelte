@@ -44,7 +44,7 @@ const recommendedPHPConfig = {
   fixPathinfo: 'true',
 }
 
-let meta = $derived(typeMeta[service.type] || { label: service.name, color: 'var(--accent)' })
+let meta = $derived(typeMeta[service.type] || { label: service.name, color: 'var(--color-accent)' })
 let iconClass = $derived(rtIcons[service.type] || '')
 
 onMount(() => {

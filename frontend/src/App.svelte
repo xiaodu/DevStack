@@ -27,7 +27,8 @@ function navigate(view) {
 }
 
 function applyTheme(theme) {
-  document.documentElement.setAttribute('data-theme', theme)
+  const validThemes = ['light', 'corporate', 'dim', 'night', 'business', 'dark']
+  document.documentElement.setAttribute('data-theme', validThemes.includes(theme) ? theme : 'light')
 }
 
 function hideSplash() {

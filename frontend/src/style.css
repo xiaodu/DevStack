@@ -36,34 +36,36 @@
   --sidebar-user-plan: rgba(255,255,255,0.5);
 }
 
-* { margin: 0; padding: 0; box-sizing: border-box; }
+@layer base {
+  * { margin: 0; padding: 0; box-sizing: border-box; }
 
-html, body, #app {
-  height: 100%;
-  width: 100%;
-  overflow: hidden;
-  font-family: var(--font);
-  background: var(--bg-primary);
-  color: var(--text-primary);
-  font-size: 14px;
-  -webkit-font-smoothing: antialiased;
-}
+  html, body, #app {
+    height: 100%;
+    width: 100%;
+    overflow: hidden;
+    font-family: var(--font);
+    background: var(--color-base-100);
+    color: var(--color-base-content);
+    font-size: 14px;
+    -webkit-font-smoothing: antialiased;
+  }
 
-::-webkit-scrollbar { width: 6px; height: 6px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--text-muted); border-radius: 3px; opacity: 0.5; }
-::-webkit-scrollbar-thumb:hover { background: var(--text-secondary); }
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: oklch(0.5 0 0 / 0.3); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: oklch(0.5 0 0 / 0.5); }
 
-::selection { background: var(--p); color: var(--pc); }
+  ::selection { background: var(--color-primary); color: var(--color-primary-content); }
 
-button {
-  cursor: pointer;
-  font-family: inherit;
-  font-size: inherit;
-}
-input, select, textarea {
-  font-family: inherit;
-  font-size: inherit;
+  button {
+    cursor: pointer;
+    font-family: inherit;
+    font-size: inherit;
+  }
+  input, select, textarea {
+    font-family: inherit;
+    font-size: inherit;
+  }
 }
 
 @font-face {

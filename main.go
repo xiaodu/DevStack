@@ -4,7 +4,9 @@ import (
 	"context"
 	"embed"
 	"log"
+	"net/http"
 	"os"
+	"strings"
 
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
@@ -53,6 +55,18 @@ func main() {
 		MinHeight: 640,
 		AssetServer: &assetserver.Options{
 			Assets: assets,
+			Middleware: func(next http.Handler) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					// index.html 等入口文件不缓存，避免升级后 WebView2 缓存旧页面导致白屏/无样式；
+					// /assets/ 下文件名带内容哈希，可安全长缓存。
+					if strings.HasPrefix(r.URL.Path, "/assets/") {
+						w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+					} else {
+						w.Header().Set("Cache-Control", "no-store")
+					}
+					next.ServeHTTP(w, r)
+				})
+			},
 		},
 		BackgroundColour: &options.RGBA{R: 27, G: 38, B: 54, A: 255},
 		OnStartup:        app.startup,

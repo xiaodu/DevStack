@@ -122,7 +122,7 @@ onDestroy(() => {
 })
 </script>
 
-<div class="grid grid-cols-[280px_1fr] h-[calc(100vh-48px)] -m-6 -mx-8 bg-base-100">
+<div class="grid grid-cols-[280px_1fr] h-full bg-base-100">
   <div class="border-r border-base-300 flex flex-col">
     <div class="p-4 border-b border-base-300"><h3 class="text-base font-semibold">软件管理</h3></div>
     <div class="flex-1 p-2.5 flex flex-col gap-2 overflow-y-auto">

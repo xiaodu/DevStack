@@ -150,7 +150,7 @@ function buildActiveCards(env, profileList, svcList, rtList) {
         version: u.version,
         status: rt?.status || (rt?.running ? 'running' : 'stopped'),
         installed: rt?.installed ?? false,
-        color: (runtimeMeta[u.kind] || {}).color || 'var(--p)',
+        color: (runtimeMeta[u.kind] || {}).color || 'var(--color-primary)',
       })
     } else {
       const svc = svcList.find((s) => s.id === id)
@@ -162,7 +162,7 @@ function buildActiveCards(env, profileList, svcList, rtList) {
         version: svc?.version || u.version,
         status: svc?.status || 'stopped',
         installed: svc?.installed ?? false,
-        color: (serviceMeta[u.kind] || {}).color || 'var(--p)',
+        color: (serviceMeta[u.kind] || {}).color || 'var(--color-primary)',
       })
     }
   }
@@ -380,6 +380,6 @@ onMount(() => {
 
 <style>
   .stat-grid > :not(:last-child) {
-    border-right-width: 1px;
+    border-right: 1px solid var(--fallback-bc, oklch(0.5 0 0) / 0.2);
   }
 </style>
