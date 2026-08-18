@@ -20,6 +20,7 @@ type RedisProvider struct {
 }
 
 type RedisInstance struct {
+	instanceGuard
 	id        string
 	version   string
 	status    core.ServiceStatus
@@ -27,6 +28,7 @@ type RedisInstance struct {
 	port      int
 	redisDir  string
 	redisExe  string
+	pm        *process.Manager
 	startedAt time.Time
 }
 
@@ -65,6 +67,7 @@ func (p *RedisProvider) NewInstance(ctx context.Context, config map[string]inter
 		port:     port,
 		redisDir: redisDir,
 		redisExe: filepath.Join(redisDir, "redis-server.exe"),
+		pm:       p.pm,
 	}
 	p.instance = instance
 	return instance, nil
@@ -123,6 +126,11 @@ func (i *RedisInstance) Type() string {
 }
 
 func (i *RedisInstance) Start(ctx context.Context) error {
+	if err := i.begin(); err != nil {
+		return err
+	}
+	defer i.end()
+
 	if !fileExists(i.redisExe) {
 		return fmt.Errorf("Redis executable not found: %s", i.redisExe)
 	}
@@ -142,7 +150,7 @@ func (i *RedisInstance) Start(ctx context.Context) error {
 		}
 	}
 
-	pid, err := process.NewManager().Start("redis", i.redisExe, []string{confPath}, nil, i.redisDir)
+	pid, err := i.pm.Start("redis", i.redisExe, []string{confPath}, nil, i.redisDir)
 	if err != nil {
 		i.status = core.StatusError
 		return err
@@ -161,8 +169,8 @@ func (i *RedisInstance) Start(ctx context.Context) error {
 	}
 
 	if i.pid <= 0 {
-		if !process.NewManager().IsRunning(pid) {
-			process.NewManager().Stop(pid)
+		if !i.pm.IsRunning(pid) {
+			i.pm.Stop(pid)
 			i.status = core.StatusError
 			return fmt.Errorf("Redis start failed: port %d not responding or occupied by another process", i.port)
 		}
@@ -176,6 +184,11 @@ func (i *RedisInstance) Start(ctx context.Context) error {
 }
 
 func (i *RedisInstance) Stop(ctx context.Context) error {
+	if err := i.begin(); err != nil {
+		return err
+	}
+	defer i.end()
+
 	i.status = core.StatusStopping
 
 	// 只停止属于本实例的进程：自管 pid，以及端口上可执行路径位于本版本目录内的进程。
@@ -197,7 +210,7 @@ func (i *RedisInstance) Stop(ctx context.Context) error {
 	}
 
 	for pid := range targets {
-		process.NewManager().Stop(pid)
+		i.pm.Stop(pid)
 	}
 
 	// 停止成功的判定以本实例进程是否退出为准，而非端口是否释放
@@ -218,7 +231,7 @@ func (i *RedisInstance) HealthCheck(ctx context.Context) error {
 	if i.pid <= 0 {
 		return fmt.Errorf("not running")
 	}
-	if !process.NewManager().IsRunning(i.pid) {
+	if !i.pm.IsRunning(i.pid) {
 		return fmt.Errorf("process not running")
 	}
 	return nil

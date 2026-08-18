@@ -128,7 +128,10 @@ func (r *ReconcilerImpl) Activate(oldEnv, newEnv environment.Environment) error 
 	// ── 阶段 1：停止旧环境 ──
 	if len(oldEnv.Units) > 0 {
 		r.beginPlan("activate-stop", "停止旧环境", oldEnv.Units, nil)
-		r.stopUnits(oldEnv.Units)
+		if stopErr := r.stopUnits(oldEnv.Units); stopErr != nil {
+			r.end("activate-stop", false, stopErr.Error())
+			return stopErr
+		}
 		r.end("activate-stop", true, "")
 	}
 
@@ -188,41 +191,73 @@ func (r *ReconcilerImpl) Deactivate(env environment.Environment) error {
 	defer r.mu.Unlock()
 
 	r.beginPlan("deactivate", "停止环境", env.Units, nil)
-	r.stopUnits(env.Units)
+	stopErr := r.stopUnits(env.Units)
+	// 无论停止是否完全成功，激活标记都应清空，否则 UI 会认为环境仍在运行
 	if err := r.stateStore.SaveActive(""); err != nil {
 		r.end("deactivate", false, err.Error())
 		return err
+	}
+	if stopErr != nil {
+		r.end("deactivate", false, stopErr.Error())
+		return stopErr
 	}
 	r.end("deactivate", true, "")
 	return nil
 }
 
 // stopUnits 逆依赖序停止：Web → 运行时 → 数据库/缓存。
-func (r *ReconcilerImpl) stopUnits(units []environment.UnitSpec) {
+// 收集并返回所有停止失败的错误，供调用方上报。
+func (r *ReconcilerImpl) stopUnits(units []environment.UnitSpec) error {
 	ordered := append([]environment.UnitSpec{}, units...)
 	sort.SliceStable(ordered, func(i, j int) bool {
 		return unitRank(ordered[i].Kind) > unitRank(ordered[j].Kind)
 	})
+	var errs []string
 	for _, u := range ordered {
 		id := u.Kind + "@" + u.Version
 		name := unitLabel(u)
 		r.step(id, StepActive, fmt.Sprintf("正在停止 %s", name))
+		var err error
 		if isRuntime(u.Kind) {
-			_ = r.rtMgr.Stop(id)
+			err = r.rtMgr.Stop(id)
 		} else {
-			_ = r.svcMgr.Stop(id)
+			err = r.svcMgr.Stop(id)
 		}
-		r.step(id, StepDone, fmt.Sprintf("%s 已停止", name))
+		if err != nil {
+			r.step(id, StepError, fmt.Sprintf("%s 停止失败: %v", name, err))
+			errs = append(errs, fmt.Sprintf("%s: %v", id, err))
+		} else {
+			r.step(id, StepDone, fmt.Sprintf("%s 已停止", name))
+		}
 	}
+	if len(errs) > 0 {
+		return fmt.Errorf("停止失败: %s", strings.Join(errs, "; "))
+	}
+	return nil
 }
 
 // startUnits 按依赖序启动：数据库/缓存 → 运行时 → Web 服务器。
 // 服务在启动前先落盘最新配置（nginx 的 php 上游、mysql 的 my.ini、redis 的 conf）。
+// 任一步失败时，按逆序停掉本次已启动的单元，避免半启状态残留。
 func (r *ReconcilerImpl) startUnits(units []environment.UnitSpec) error {
 	ordered := append([]environment.UnitSpec{}, units...)
 	sort.SliceStable(ordered, func(i, j int) bool {
 		return unitRank(ordered[i].Kind) < unitRank(ordered[j].Kind)
 	})
+	var started []environment.UnitSpec
+	rollback := func(cause error) error {
+		if len(started) == 0 {
+			return cause
+		}
+		reverse := make([]environment.UnitSpec, 0, len(started))
+		for i := len(started) - 1; i >= 0; i-- {
+			reverse = append(reverse, started[i])
+		}
+		if stopErr := r.stopUnits(reverse); stopErr != nil {
+			return fmt.Errorf("%v; 回滚已启动单元失败: %w", cause, stopErr)
+		}
+		return cause
+	}
 	for _, u := range ordered {
 		id := u.Kind + "@" + u.Version
 		name := unitLabel(u)
@@ -230,21 +265,23 @@ func (r *ReconcilerImpl) startUnits(units []environment.UnitSpec) error {
 			r.step(id, StepActive, fmt.Sprintf("正在启动 %s", name))
 			if err := r.rtMgr.Start(id); err != nil {
 				r.step(id, StepError, fmt.Sprintf("%s 启动失败", name))
-				return fmt.Errorf("启动 %s 失败: %w", id, err)
+				return rollback(fmt.Errorf("启动 %s 失败: %w", id, err))
 			}
+			started = append(started, u)
 			r.step(id, StepDone, fmt.Sprintf("%s 已运行", name))
 			continue
 		}
 		r.step(id, StepActive, fmt.Sprintf("正在生成 %s 配置", name))
 		if err := r.svcMgr.Configure(id); err != nil {
 			r.step(id, StepError, fmt.Sprintf("%s 配置失败", name))
-			return fmt.Errorf("配置 %s 失败: %w", id, err)
+			return rollback(fmt.Errorf("配置 %s 失败: %w", id, err))
 		}
 		r.step(id, StepActive, fmt.Sprintf("正在启动 %s", name))
 		if err := r.svcMgr.Start(id); err != nil {
 			r.step(id, StepError, fmt.Sprintf("%s 启动失败", name))
-			return fmt.Errorf("启动 %s 失败: %w", id, err)
+			return rollback(fmt.Errorf("启动 %s 失败: %w", id, err))
 		}
+		started = append(started, u)
 		r.step(id, StepDone, fmt.Sprintf("%s 已运行", name))
 	}
 	return nil

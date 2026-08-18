@@ -27,6 +27,7 @@ type NginxProvider struct {
 }
 
 type NginxInstance struct {
+	instanceGuard
 	id        string
 	version   string
 	status    core.ServiceStatus
@@ -35,6 +36,7 @@ type NginxInstance struct {
 	port      int
 	nginxDir  string
 	nginxExe  string
+	pm        *process.Manager
 	startedAt time.Time
 }
 
@@ -75,6 +77,7 @@ func (p *NginxProvider) NewInstance(ctx context.Context, config map[string]inter
 		port:     port,
 		nginxDir: nginxDir,
 		nginxExe: filepath.Join(nginxDir, "nginx.exe"),
+		pm:       p.pm,
 	}
 	p.instance = instance
 	return instance, nil
@@ -268,10 +271,16 @@ func (p *NginxProvider) ServeHTTP(root string, upstream Upstream) error {
 }
 
 func (p *NginxProvider) Reload(ctx context.Context) error {
-	if p.instance == nil || p.instance.pid <= 0 {
+	if p.instance == nil {
+		return fmt.Errorf("Nginx instance not initialized")
+	}
+	inst := p.instance
+	inst.Lock()
+	defer inst.Unlock()
+	if inst.pid <= 0 {
 		return fmt.Errorf("Nginx instance not running")
 	}
-	reloadCmd := &reloadCommand{nginxExe: p.instance.nginxExe}
+	reloadCmd := &reloadCommand{nginxExe: inst.nginxExe, nginxDir: inst.nginxDir}
 	return reloadCmd.run()
 }
 
@@ -308,12 +317,17 @@ func (i *NginxInstance) Type() string {
 }
 
 func (i *NginxInstance) Start(ctx context.Context) error {
+	if err := i.begin(); err != nil {
+		return err
+	}
+	defer i.end()
+
 	if !fileExists(i.nginxExe) {
 		return fmt.Errorf("Nginx executable not found: %s", i.nginxExe)
 	}
 
 	// 幂等：本实例已在运行则直接返回，避免重复拉起新实例
-	if i.pid > 0 && process.NewManager().IsRunning(i.pid) {
+	if i.pid > 0 && i.pm.IsRunning(i.pid) {
 		i.status = core.StatusRunning
 		return nil
 	}
@@ -333,7 +347,7 @@ func (i *NginxInstance) Start(ctx context.Context) error {
 
 	i.status = core.StatusStarting
 
-	pid, err := process.NewManager().Start("nginx", i.nginxExe, nil, nil, i.nginxDir)
+	pid, err := i.pm.Start("nginx", i.nginxExe, nil, nil, i.nginxDir)
 	if err != nil {
 		i.status = core.StatusError
 		return err
@@ -348,8 +362,8 @@ func (i *NginxInstance) Start(ctx context.Context) error {
 		}
 	}
 
-	if !process.NewManager().IsRunning(pid) && process.FindPIDByPort(i.port) == 0 {
-		process.NewManager().Stop(pid)
+	if !i.pm.IsRunning(pid) && process.FindPIDByPort(i.port) == 0 {
+		i.pm.Stop(pid)
 		i.status = core.StatusError
 		return fmt.Errorf("Nginx start failed: port %d not responding within 3s", i.port)
 	}
@@ -362,6 +376,11 @@ func (i *NginxInstance) Start(ctx context.Context) error {
 }
 
 func (i *NginxInstance) Stop(ctx context.Context) error {
+	if err := i.begin(); err != nil {
+		return err
+	}
+	defer i.end()
+
 	i.status = core.StatusStopping
 
 	// 收集属于本实例的进程：自管 pid、主进程 mpid，以及端口上可执行路径位于本版本目录内的进程。
@@ -388,7 +407,7 @@ func (i *NginxInstance) Stop(ctx context.Context) error {
 	}
 
 	for pid := range targets {
-		process.NewManager().Stop(pid)
+		i.pm.Stop(pid)
 	}
 
 	// 停止成功的判定以本实例进程是否退出为准，而非端口是否释放：
@@ -411,7 +430,7 @@ func (i *NginxInstance) HealthCheck(ctx context.Context) error {
 	if i.pid <= 0 {
 		return fmt.Errorf("not running")
 	}
-	if !process.NewManager().IsRunning(i.pid) {
+	if !i.pm.IsRunning(i.pid) {
 		return fmt.Errorf("process not running")
 	}
 	return nil
@@ -438,6 +457,7 @@ func (i *NginxInstance) Metrics(ctx context.Context) (Metrics, error) {
 
 type reloadCommand struct {
 	nginxExe string
+	nginxDir string
 }
 
 func (c *reloadCommand) run() error {
@@ -445,6 +465,8 @@ func (c *reloadCommand) run() error {
 		return fmt.Errorf("nginx executable path not set")
 	}
 	cmd := exec.Command(c.nginxExe, "-s", "reload")
+	// -s reload 依赖工作目录下的 logs/nginx.pid，必须与 Start 的 workdir 保持一致
+	cmd.Dir = c.nginxDir
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("nginx reload failed: %w, output: %s", err, string(out))

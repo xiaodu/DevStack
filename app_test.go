@@ -93,6 +93,7 @@ func newE2EApp(t *testing.T, dir string) *App {
 		reconciler:  reconciler,
 		reactiveEng: reactiveEng,
 		AppVersion:  "e2e-test",
+		downloads:   map[string]struct{}{},
 	}
 
 	// 假 provider 接管服务启动/停止（不启动真实进程），注册为覆盖式。

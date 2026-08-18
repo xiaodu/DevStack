@@ -1,6 +1,7 @@
 package process
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -60,19 +61,34 @@ func (po *ProcessOutput) Stderr() []byte {
 func (po *ProcessOutput) appendStdout(data []byte) {
 	po.mu.Lock()
 	defer po.mu.Unlock()
-	if len(po.stdout)+len(data) > maxOutputSize {
-		po.stdout = po.stdout[len(data):]
-	}
-	po.stdout = append(po.stdout, data...)
+	po.stdout = appendTrimmed(po.stdout, data, maxOutputSize)
 }
 
 func (po *ProcessOutput) appendStderr(data []byte) {
 	po.mu.Lock()
 	defer po.mu.Unlock()
-	if len(po.stderr)+len(data) > maxOutputSize {
-		po.stderr = po.stderr[len(data):]
+	po.stderr = appendTrimmed(po.stderr, data, maxOutputSize)
+}
+
+// appendTrimmed 追加 data 到 buf，超出 cap 时按完整行裁剪头部，
+// 避免滚动缓冲切断中间行导致日志字节丢失。
+func appendTrimmed(buf, data []byte, cap int) []byte {
+	buf = append(buf, data...)
+	if len(buf) <= cap {
+		return buf
 	}
-	po.stderr = append(po.stderr, data...)
+	// 从尾部向前保留 cap 字节，然后丢弃该窗口开头的半行，保证首行完整
+	keepFrom := len(buf) - cap
+	if i := bytes.IndexByte(buf[keepFrom:], '\n'); i >= 0 {
+		keepFrom += i + 1
+	} else {
+		// 窗口内无换行（单行超长），只能硬截断
+		keepFrom = len(buf) - cap
+	}
+	if keepFrom <= 0 {
+		return buf
+	}
+	return buf[keepFrom:]
 }
 
 type Manager struct {
@@ -164,6 +180,8 @@ func (m *Manager) Start(name, executable string, args []string, env []string, wo
 		delete(m.processes, pid)
 		close(exitCh)
 		delete(m.exitChans, pid)
+		// 退出即清理输出缓冲，避免高频重启场景（如 php-cgi）下内存无界增长
+		delete(m.outputs, pid)
 		m.mu.Unlock()
 	}()
 

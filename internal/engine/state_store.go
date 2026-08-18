@@ -5,23 +5,27 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/xiaodu/DevStack/internal/atomicfile"
 )
 
 type StateStore struct {
-	dataDir string
+	mu       sync.RWMutex
+	dataDir  string
 	filePath string
 }
 
 func NewStateStore(dataDir string) *StateStore {
 	return &StateStore{
-		dataDir: dataDir,
+		dataDir:  dataDir,
 		filePath: filepath.Join(dataDir, "environment.json"),
 	}
 }
 
 func (ss *StateStore) Load() (EnvironmentState, error) {
+	ss.mu.RLock()
+	defer ss.mu.RUnlock()
 	var env EnvironmentState
 	if _, err := os.Stat(ss.filePath); os.IsNotExist(err) {
 		return env, nil
@@ -40,10 +44,14 @@ func (ss *StateStore) Load() (EnvironmentState, error) {
 }
 
 func (ss *StateStore) Save(env EnvironmentState) error {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
 	return ss.saveJSON(env)
 }
 
 func (ss *StateStore) SaveActive(activeID string) error {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
 	return ss.saveJSON(map[string]string{"activeEnvironmentId": activeID})
 }
 

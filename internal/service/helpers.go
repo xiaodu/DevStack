@@ -50,9 +50,6 @@ func updateIniValue(content, key, value string) string {
 func updateConfValue(content, key, value string) string {
 	re := regexp.MustCompile(`(?m)^\s*` + regexp.QuoteMeta(key) + `\s+.*$`)
 	repl := key + " " + value
-	if !strings.HasSuffix(strings.TrimSpace(repl), ";") {
-		repl += ";"
-	}
 	if re.MatchString(content) {
 		return re.ReplaceAllString(content, repl)
 	}

@@ -50,13 +50,13 @@ func (m *Manager) Cancel(key string) {
 	}
 }
 
-func (m *Manager) tryDownload(urls []string, destPath string, callback ProgressCallback) error {
+func (m *Manager) tryDownload(ctx context.Context, urls []string, destPath string, callback ProgressCallback) error {
 	var lastErr error
 	for _, u := range urls {
 		if u == "" {
 			continue
 		}
-		err := m.download(u, destPath, callback)
+		err := m.download(ctx, u, destPath, callback)
 		if err == nil {
 			return nil
 		}
@@ -65,8 +65,13 @@ func (m *Manager) tryDownload(urls []string, destPath string, callback ProgressC
 	return fmt.Errorf("所有下载源均失败: %w", lastErr)
 }
 
-func (m *Manager) download(u, destPath string, callback ProgressCallback) error {
-	resp, err := m.client.Get(u)
+func (m *Manager) download(ctx context.Context, u, destPath string, callback ProgressCallback) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return fmt.Errorf("构造请求失败: %w", err)
+	}
+
+	resp, err := m.client.Do(req)
 	if err != nil {
 		return fmt.Errorf("连接失败: %w", err)
 	}
@@ -89,7 +94,6 @@ func (m *Manager) writeResponse(resp *http.Response, destPath string, callback P
 	if err != nil {
 		return fmt.Errorf("创建临时文件失败: %w", err)
 	}
-	defer out.Close()
 
 	total := resp.ContentLength
 	var downloaded int64
@@ -101,6 +105,7 @@ func (m *Manager) writeResponse(resp *http.Response, destPath string, callback P
 		if n > 0 {
 			if _, werr := out.Write(buf[:n]); werr != nil {
 				out.Close()
+				os.Remove(destPath + ".tmp")
 				return fmt.Errorf("写入文件失败: %w", werr)
 			}
 			downloaded += int64(n)
@@ -114,6 +119,7 @@ func (m *Manager) writeResponse(resp *http.Response, destPath string, callback P
 		}
 		if err != nil {
 			out.Close()
+			os.Remove(destPath + ".tmp")
 			return fmt.Errorf("读取响应失败: %w", err)
 		}
 	}
@@ -243,26 +249,44 @@ func detectSingleRootDir(entries []*zip.File) string {
 }
 
 func (m *Manager) DownloadAndExtract(url, destDir string, callback ProgressCallback) error {
-	return m.TryDownloadAndExtract([]string{url}, destDir, callback)
+	return m.TryDownloadAndExtract("download", []string{url}, destDir, callback)
 }
 
-func (m *Manager) TryDownloadAndExtract(urls []string, destDir string, callback ProgressCallback) error {
+// TryDownloadAndExtract 按 key 下载并解压到 destDir。
+// key 用于下载进度与取消绑定；同 key 重复调用会覆盖进度与取消句柄（由调用方负责单飞去重）。
+// 仅在 destDir 本次新建时才在失败回滚中删除它，避免误删既有安装目录。
+func (m *Manager) TryDownloadAndExtract(key string, urls []string, destDir string, callback ProgressCallback) error {
+	_, statErr := os.Stat(destDir)
+	created := os.IsNotExist(statErr)
+
+	dlCtx, cancel := context.WithCancel(context.Background())
+	m.cancels.Store(key, cancel)
+	defer func() {
+		m.cancels.Delete(key)
+		cancel()
+	}()
+
 	compensator := tx.NewCompensator()
 	txn := tx.NewTransaction("download-extract-" + filepath.Base(destDir))
 
 	var zipPath string
 
+	removeDestDir := compensator.Noop()
+	if created {
+		removeDestDir = compensator.DeleteDir(destDir)
+	}
+
 	txn.
 		Step("create-dest-dir", func(ctx context.Context) error {
 			return os.MkdirAll(destDir, 0755)
-		}, compensator.DeleteDir(destDir)).
-		Step("download-package", func(ctx context.Context) error {
+		}, removeDestDir).
+		Step("download-package", func(_ context.Context) error {
 			zipPath = filepath.Join(destDir, "package.zip")
-			return m.tryDownload(urls, zipPath, callback)
+			return m.tryDownload(dlCtx, urls, zipPath, callback)
 		}, compensator.DeleteFile(zipPath)).
 		Step("extract-package", func(ctx context.Context) error {
 			return m.ExtractZip(zipPath, destDir)
-		}, compensator.DeleteDir(destDir))
+		}, removeDestDir)
 
 	if err := txn.Commit(); err != nil {
 		return fmt.Errorf("事务失败: %w", err)

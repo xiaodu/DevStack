@@ -95,7 +95,7 @@ func (m *Manager) Create(p core.Project) (*core.Project, error) {
 	m.projects[p.ID] = &p
 	if err := m.save(); err != nil {
 		delete(m.projects, p.ID)
-		m.resMgr.Ports().Release(p.Port)
+		m.resMgr.Ports().Release(p.Port, "project:"+p.ID)
 		return nil, err
 	}
 	m.syncNginx()

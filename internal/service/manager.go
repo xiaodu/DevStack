@@ -970,7 +970,13 @@ func (m *Manager) GetInstalledVersions(serviceType string) []string {
 func (m *Manager) GetService(id string) *ServiceInstance {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.services[id]
+	s, ok := m.services[id]
+	if !ok {
+		return nil
+	}
+	// 返回值拷贝，避免调用方在锁外读取 Info 等字段时与 Stop/Start 的写竞争
+	copy := *s
+	return &copy
 }
 
 func serviceTypeFromPkg(pt registry.PackageType) core.ServiceType {

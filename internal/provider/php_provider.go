@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/xiaodu/DevStack/internal/config"
@@ -18,10 +19,12 @@ type PHPProvider struct {
 	cfg       *config.Config
 	pm        *process.Manager
 	resMgr    *resource.Manager
+	mu        sync.Mutex // 保护 instances 映射
 	instances map[string]*PHPInstance
 }
 
 type PHPInstance struct {
+	instanceGuard
 	id        string
 	version   string
 	status    core.ServiceStatus
@@ -29,6 +32,7 @@ type PHPInstance struct {
 	port      int
 	phpDir    string
 	phpExe    string
+	pm        *process.Manager
 	startedAt time.Time
 }
 
@@ -59,9 +63,12 @@ func (p *PHPProvider) NewInstance(ctx context.Context, config map[string]interfa
 	phpDir := filepath.Join(installDir, "programs", "php", version)
 
 	instanceID := "php@" + version
+	p.mu.Lock()
 	if existing, ok := p.instances[instanceID]; ok {
+		p.mu.Unlock()
 		return existing, nil
 	}
+	p.mu.Unlock()
 
 	port := p.getPHPPort(version)
 
@@ -72,8 +79,11 @@ func (p *PHPProvider) NewInstance(ctx context.Context, config map[string]interfa
 		port:    port,
 		phpDir:  phpDir,
 		phpExe:  filepath.Join(phpDir, "php-cgi.exe"),
+		pm:      p.pm,
 	}
+	p.mu.Lock()
 	p.instances[instanceID] = instance
+	p.mu.Unlock()
 	return instance, nil
 }
 
@@ -110,12 +120,19 @@ func (p *PHPProvider) Install(ctx context.Context, version string) error {
 
 func (p *PHPProvider) Uninstall(ctx context.Context, version string) error {
 	instanceID := "php@" + version
-	if instance, ok := p.instances[instanceID]; ok {
-		instance.Stop(ctx)
-		if p.resMgr != nil {
-			p.resMgr.Ports().Release(instance.port)
-		}
+	p.mu.Lock()
+	instance, ok := p.instances[instanceID]
+	if ok {
 		delete(p.instances, instanceID)
+	}
+	p.mu.Unlock()
+	if !ok {
+		return nil
+	}
+
+	instance.Stop(ctx)
+	if p.resMgr != nil {
+		p.resMgr.Ports().Release(instance.port, "php:"+version)
 	}
 	return nil
 }
@@ -143,6 +160,8 @@ func (p *PHPProvider) ConfigSchema() ConfigSchema {
 }
 
 func (p *PHPProvider) GetListenPort() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	for _, inst := range p.instances {
 		if inst.status == core.StatusRunning {
 			return inst.port
@@ -160,16 +179,29 @@ func (p *PHPProvider) SetListenPort(port int) error {
 }
 
 func (p *PHPProvider) Reload(ctx context.Context) error {
+	p.mu.Lock()
+	running := make([]*PHPInstance, 0, len(p.instances))
 	for _, inst := range p.instances {
 		if inst.status == core.StatusRunning {
-			inst.Stop(ctx)
-			inst.Start(ctx)
+			running = append(running, inst)
+		}
+	}
+	p.mu.Unlock()
+
+	for _, inst := range running {
+		if err := inst.Stop(ctx); err != nil {
+			return err
+		}
+		if err := inst.Start(ctx); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
 func (p *PHPProvider) CheckHealth(ctx context.Context) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	for _, inst := range p.instances {
 		if inst.status == core.StatusRunning {
 			return inst.HealthCheck(ctx)
@@ -187,6 +219,11 @@ func (i *PHPInstance) Type() string {
 }
 
 func (i *PHPInstance) Start(ctx context.Context) error {
+	if err := i.begin(); err != nil {
+		return err
+	}
+	defer i.end()
+
 	if !fileExists(i.phpExe) {
 		return fmt.Errorf("PHP executable not found: %s", i.phpExe)
 	}
@@ -198,7 +235,7 @@ func (i *PHPInstance) Start(ctx context.Context) error {
 		"-c", filepath.Join(i.phpDir, "php.ini"),
 	}
 
-	pid, err := process.NewManager().Start(i.id, i.phpExe, args, nil, i.phpDir)
+	pid, err := i.pm.Start(i.id, i.phpExe, args, nil, i.phpDir)
 	if err != nil {
 		i.status = core.StatusError
 		return err
@@ -217,8 +254,8 @@ func (i *PHPInstance) Start(ctx context.Context) error {
 	}
 
 	if i.pid <= 0 {
-		if !process.NewManager().IsRunning(pid) {
-			process.NewManager().Stop(pid)
+		if !i.pm.IsRunning(pid) {
+			i.pm.Stop(pid)
 			i.status = core.StatusError
 			return fmt.Errorf("PHP start failed: port %d not responding or occupied by another process", i.port)
 		}
@@ -232,6 +269,11 @@ func (i *PHPInstance) Start(ctx context.Context) error {
 }
 
 func (i *PHPInstance) Stop(ctx context.Context) error {
+	if err := i.begin(); err != nil {
+		return err
+	}
+	defer i.end()
+
 	i.status = core.StatusStopping
 
 	// 只停止属于本实例的进程：自管 pid，以及端口上可执行路径位于本版本目录内的进程。
@@ -253,7 +295,7 @@ func (i *PHPInstance) Stop(ctx context.Context) error {
 	}
 
 	for pid := range targets {
-		process.NewManager().Stop(pid)
+		i.pm.Stop(pid)
 	}
 
 	// 停止成功的判定以本实例进程是否退出为准，而非端口是否释放
@@ -274,7 +316,7 @@ func (i *PHPInstance) HealthCheck(ctx context.Context) error {
 	if i.pid <= 0 {
 		return fmt.Errorf("not running")
 	}
-	if !process.NewManager().IsRunning(i.pid) {
+	if !i.pm.IsRunning(i.pid) {
 		return fmt.Errorf("process not running")
 	}
 	return nil

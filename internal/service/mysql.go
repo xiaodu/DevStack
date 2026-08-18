@@ -18,7 +18,7 @@ type MySQLHandler struct{}
 func (h *MySQLHandler) Configure(s *ServiceInstance, cfg *config.Config, resMgr *resource.Manager) error {
 	installDir := cfg.Get().InstallDir
 	mysqlDir := filepath.Join(installDir, "programs", "mysql", s.Info.Version)
-	dataDir := filepath.Join(installDir, "data", "mysql")
+	dataDir := filepath.Join(installDir, "data", "mysql", s.Info.Version)
 
 	myIni := filepath.Join(mysqlDir, "my.ini")
 	if !fileExists(myIni) {
@@ -76,7 +76,7 @@ wait_timeout = 28800
 func (h *MySQLHandler) SaveConfig(s *ServiceInstance, cfg *config.Config, values map[string]string) error {
 	installDir := cfg.Get().InstallDir
 	mysqlDir := filepath.Join(installDir, "programs", "mysql", s.Info.Version)
-	dataDir := filepath.Join(installDir, "data", "mysql")
+	dataDir := filepath.Join(installDir, "data", "mysql", s.Info.Version)
 
 	settings := cfg.Get()
 	mc := settings.MySQLConfig

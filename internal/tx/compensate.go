@@ -79,9 +79,9 @@ func (c *Compensator) CleanTempFiles(pattern string) StepFunc {
 	}
 }
 
-func (c *Compensator) ReleasePort(port int, portPool interface{ Release(port int) error }) StepFunc {
+func (c *Compensator) ReleasePort(port int, owner string, portPool interface{ Release(port int, owner string) error }) StepFunc {
 	return func(ctx context.Context) error {
-		return portPool.Release(port)
+		return portPool.Release(port, owner)
 	}
 }
 

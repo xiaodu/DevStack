@@ -22,6 +22,7 @@ type MySQLProvider struct {
 }
 
 type MySQLInstance struct {
+	instanceGuard
 	id        string
 	version   string
 	status    core.ServiceStatus
@@ -30,6 +31,7 @@ type MySQLInstance struct {
 	mysqlDir  string
 	mysqlExe  string
 	dataDir   string
+	pm        *process.Manager
 	startedAt time.Time
 }
 
@@ -69,6 +71,7 @@ func (p *MySQLProvider) NewInstance(ctx context.Context, config map[string]inter
 		mysqlDir: mysqlDir,
 		mysqlExe: filepath.Join(mysqlDir, "bin", "mysqld.exe"),
 		dataDir:  filepath.Join(installDir, "data", "mysql", version),
+		pm:       p.pm,
 	}
 	p.instance = instance
 	return instance, nil
@@ -113,9 +116,12 @@ func (p *MySQLProvider) applyConfig(instance *MySQLInstance) error {
 	confDir := filepath.Join(mysqlDir, "conf")
 	os.MkdirAll(confDir, 0755)
 
-	installDir := p.cfg.Get().InstallDir
-	dataDir := filepath.Join(installDir, "data", "mysql")
+	// 使用与实例一致的版本化数据目录，避免多版本共享同一 datadir 导致数据串写
+	dataDir := instance.dataDir
 	os.MkdirAll(dataDir, 0755)
+
+	// log_error/slow_query_log_file 指向 logs 目录，必须提前创建，否则首次启动 mysqld 打不开日志直接退出
+	os.MkdirAll(filepath.Join(mysqlDir, "logs"), 0755)
 
 	confPath := filepath.Join(confDir, "my.ini")
 
@@ -194,6 +200,11 @@ func (i *MySQLInstance) Type() string {
 }
 
 func (i *MySQLInstance) Start(ctx context.Context) error {
+	if err := i.begin(); err != nil {
+		return err
+	}
+	defer i.end()
+
 	if !fileExists(i.mysqlExe) {
 		return fmt.Errorf("MySQL executable not found: %s", i.mysqlExe)
 	}
@@ -214,13 +225,16 @@ func (i *MySQLInstance) Start(ctx context.Context) error {
 		}
 	}
 
+	// 确保日志目录存在（my.ini 中 log_error/slow_query_log_file 指向此处）
+	os.MkdirAll(filepath.Join(i.mysqlDir, "logs"), 0755)
+
 	args := []string{
 		fmt.Sprintf("--defaults-file=%s", myiniPath),
 		"--datadir=" + i.dataDir,
 		"--port=" + fmt.Sprintf("%d", i.port),
 	}
 
-	pid, err := process.NewManager().Start("mysql", i.mysqlExe, args, nil, filepath.Dir(filepath.Dir(i.mysqlDir)))
+	pid, err := i.pm.Start("mysql", i.mysqlExe, args, nil, filepath.Dir(filepath.Dir(i.mysqlDir)))
 	if err != nil {
 		i.status = core.StatusError
 		return err
@@ -239,8 +253,8 @@ func (i *MySQLInstance) Start(ctx context.Context) error {
 	}
 
 	if i.pid <= 0 {
-		if !process.NewManager().IsRunning(pid) {
-			process.NewManager().Stop(pid)
+		if !i.pm.IsRunning(pid) {
+			i.pm.Stop(pid)
 			i.status = core.StatusError
 			return fmt.Errorf("MySQL 启动失败: 端口 %d 无响应或已被其它程序占用，请检查配置或查看错误日志", i.port)
 		}
@@ -254,6 +268,11 @@ func (i *MySQLInstance) Start(ctx context.Context) error {
 }
 
 func (i *MySQLInstance) Stop(ctx context.Context) error {
+	if err := i.begin(); err != nil {
+		return err
+	}
+	defer i.end()
+
 	i.status = core.StatusStopping
 
 	// 只停止属于本实例的进程：自管 pid，以及端口上可执行路径位于本版本目录内的进程。
@@ -275,7 +294,7 @@ func (i *MySQLInstance) Stop(ctx context.Context) error {
 	}
 
 	for pid := range targets {
-		process.NewManager().Stop(pid)
+		i.pm.Stop(pid)
 	}
 
 	// 停止成功的判定以本实例进程是否退出为准，而非端口是否释放
@@ -296,7 +315,7 @@ func (i *MySQLInstance) HealthCheck(ctx context.Context) error {
 	if i.pid <= 0 {
 		return fmt.Errorf("not running")
 	}
-	if !process.NewManager().IsRunning(i.pid) {
+	if !i.pm.IsRunning(i.pid) {
 		return fmt.Errorf("process not running")
 	}
 	return nil

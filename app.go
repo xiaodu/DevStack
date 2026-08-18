@@ -49,6 +49,9 @@ type App struct {
 	tray        *tray.Tray
 	AppVersion  string
 	envOpMu     sync.Mutex // 串行化环境启停操作，防止并发激活
+
+	downloadMu sync.Mutex               // 保护 downloads 单飞去重表
+	downloads  map[string]struct{}      // 正在下载中的 service@version
 }
 
 var serviceNames = map[string]string{
@@ -178,7 +181,7 @@ func NewApp() *App {
 			return svcMgr.Start(serviceID)
 		},
 		func(owner string, oldPort int) (int, error) {
-			resMgr.Ports().Release(oldPort)
+			resMgr.Ports().Release(oldPort, owner)
 			return resMgr.Ports().Allocate(owner, 0)
 		},
 		func(eventType reactive.EventType, source string, data map[string]interface{}) {
@@ -204,6 +207,7 @@ func NewApp() *App {
 		reconciler:  reconciler,
 		reactiveEng: reactiveEng,
 		AppVersion:  "0.2.0",
+		downloads:   map[string]struct{}{},
 	}
 	app.tray = tray.New(
 		func() {
@@ -359,7 +363,10 @@ func (a *App) ActivateEnvironment(envID string) error {
 	}
 
 	var oldEnv environment.Environment
-	oldActiveID, _ := a.getActiveEnvironmentID()
+	oldActiveID, err := a.getActiveEnvironmentID()
+	if err != nil {
+		return fmt.Errorf("读取当前激活环境失败: %w", err)
+	}
 	if oldActiveID != "" && oldActiveID != envID {
 		if e, err := a.envMgr.Get(oldActiveID); err == nil {
 			oldEnv = e
@@ -418,7 +425,10 @@ func (a *App) DeactivateEnvironment() error {
 	if a.opStore != nil {
 		a.opStore.LogInfo("[API] DeactivateEnvironment 调用")
 	}
-	activeID, _ := a.getActiveEnvironmentID()
+	activeID, err := a.getActiveEnvironmentID()
+	if err != nil {
+		return fmt.Errorf("读取当前激活环境失败: %w", err)
+	}
 	if activeID == "" {
 		return nil
 	}
@@ -512,7 +522,10 @@ func (a *App) GetEnvironmentState() engine.EnvironmentState {
 		Projects: make(map[string]engine.ProjectDesiredState),
 		Runtimes: make(map[string]engine.RuntimeDesiredState),
 	}
-	activeID, _ := a.getActiveEnvironmentID()
+	activeID, err := a.getActiveEnvironmentID()
+	if err != nil && a.opStore != nil {
+		a.opStore.LogError("[API] GetEnvironmentState 读取激活环境失败: %v", err)
+	}
 	state.ActiveProfileID = activeID
 	state.ActiveEnvironmentID = activeID
 
@@ -1096,6 +1109,28 @@ func (a *App) DownloadService(serviceType, version, url string) error {
 		return fmt.Errorf("安装目录未设置，请先完成初始化设置")
 	}
 
+	// 已安装版本直接跳过下载
+	for _, v := range a.svcMgr.GetInstalledVersions(serviceType) {
+		if v == version {
+			return nil
+		}
+	}
+
+	// 同版本并发下载去重：单飞
+	dedupKey := serviceType + "@" + version
+	a.downloadMu.Lock()
+	if _, dup := a.downloads[dedupKey]; dup {
+		a.downloadMu.Unlock()
+		return fmt.Errorf("%s %s 正在下载中，请勿重复操作", serviceType, version)
+	}
+	a.downloads[dedupKey] = struct{}{}
+	a.downloadMu.Unlock()
+	defer func() {
+		a.downloadMu.Lock()
+		delete(a.downloads, dedupKey)
+		a.downloadMu.Unlock()
+	}()
+
 	var urls []string
 	if url != "" {
 		urls = append(urls, url)
@@ -1134,7 +1169,7 @@ func (a *App) DownloadService(serviceType, version, url string) error {
 		}
 	}
 
-	if err := a.dlMgr.TryDownloadAndExtract(urls, destDir, progressFn); err != nil {
+	if err := a.dlMgr.TryDownloadAndExtract(progressKey, urls, destDir, progressFn); err != nil {
 		name := serviceNames[serviceType]
 		if name == "" {
 			name = runtimeNames[serviceType]
@@ -1151,6 +1186,11 @@ func (a *App) DownloadService(serviceType, version, url string) error {
 
 	a.opStore.Add("下载", runtimeNames[serviceType], version, "成功")
 	return nil
+}
+
+// CancelDownload 中止指定 key 的下载任务（key 形如 "download:nginx:1.24.0"）。
+func (a *App) CancelDownload(key string) {
+	a.dlMgr.Cancel(key)
 }
 
 // ==================== Provider APIs ====================
