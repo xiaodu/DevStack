@@ -9,6 +9,7 @@ import (
 
 	"github.com/pelletier/go-toml/v2"
 	"github.com/spf13/viper"
+	"github.com/xiaodu/DevStack/internal/atomicfile"
 	"github.com/xiaodu/DevStack/internal/core"
 )
 
@@ -203,7 +204,7 @@ func (c *Config) save() error {
 			}
 		}
 	}
-	if err := os.WriteFile(c.filePath, data, 0644); err != nil {
+	if err := atomicfile.WriteFile(c.filePath, data, 0644); err != nil {
 		return fmt.Errorf("写入配置文件失败: %w", err)
 	}
 	return nil

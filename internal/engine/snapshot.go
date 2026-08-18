@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
+	"github.com/xiaodu/DevStack/internal/atomicfile"
 	"github.com/xiaodu/DevStack/internal/tx"
 )
 
@@ -35,7 +37,7 @@ func (sm *SnapshotManager) TakeSnapshot(ctx context.Context, env EnvironmentStat
 		return "", fmt.Errorf("序列化环境失败: %w", err)
 	}
 
-	if err := os.WriteFile(snapshotPath, data, 0644); err != nil {
+	if err := atomicfile.WriteFile(snapshotPath, data, 0644); err != nil {
 		return "", fmt.Errorf("写入快照文件失败: %w", err)
 	}
 
@@ -45,6 +47,9 @@ func (sm *SnapshotManager) TakeSnapshot(ctx context.Context, env EnvironmentStat
 }
 
 func (sm *SnapshotManager) LoadSnapshot(ctx context.Context, snapshotID string) (EnvironmentState, error) {
+	if !validSnapshotID(snapshotID) {
+		return EnvironmentState{}, fmt.Errorf("非法的快照标识: %s", snapshotID)
+	}
 	snapshotPath := filepath.Join(sm.baseDir, snapshotID+".json")
 	if !sm.exists(snapshotPath) {
 		return EnvironmentState{}, fmt.Errorf("快照 %s 不存在", snapshotID)
@@ -88,11 +93,30 @@ func (sm *SnapshotManager) ListSnapshots(ctx context.Context) ([]string, error) 
 }
 
 func (sm *SnapshotManager) DeleteSnapshot(ctx context.Context, snapshotID string) error {
+	if !validSnapshotID(snapshotID) {
+		return fmt.Errorf("非法的快照标识: %s", snapshotID)
+	}
 	snapshotPath := filepath.Join(sm.baseDir, snapshotID+".json")
 	if err := os.Remove(snapshotPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("删除快照失败: %w", err)
 	}
 	return nil
+}
+
+// validSnapshotID 仅允许形如 snapshot-20060102-150405 的标识，阻止路径穿越。
+func validSnapshotID(snapshotID string) bool {
+	if len(snapshotID) != len("snapshot-20060102-150405") {
+		return false
+	}
+	if !strings.HasPrefix(snapshotID, "snapshot-") {
+		return false
+	}
+	for _, r := range snapshotID[len("snapshot-"):] {
+		if (r < '0' || r > '9') && r != '-' {
+			return false
+		}
+	}
+	return true
 }
 
 func (sm *SnapshotManager) CreateSnapshotStep(env EnvironmentState) (tx.StepFunc, tx.StepFunc) {

@@ -17,20 +17,20 @@ import (
 	"github.com/xiaodu/DevStack/internal/core"
 	"github.com/xiaodu/DevStack/internal/process"
 	"github.com/xiaodu/DevStack/internal/provider"
+	"github.com/xiaodu/DevStack/internal/reactive"
 	"github.com/xiaodu/DevStack/internal/registry"
 	"github.com/xiaodu/DevStack/internal/resource"
-	"github.com/xiaodu/DevStack/internal/reactive"
 	"github.com/xiaodu/DevStack/internal/tx"
 )
 
 type Manager struct {
-	mu        sync.RWMutex
-	cfg       *config.Config
-	procMgr   *process.Manager
-	resMgr    *resource.Manager
-	services  map[string]*ServiceInstance
+	mu         sync.RWMutex
+	cfg        *config.Config
+	procMgr    *process.Manager
+	resMgr     *resource.Manager
+	services   map[string]*ServiceInstance
 	dependents map[string][]string
-	reactive  *reactive.Engine
+	reactive   *reactive.Engine
 }
 
 type ServiceInstance struct {
@@ -50,41 +50,7 @@ func NewManager(cfg *config.Config, procMgr *process.Manager, resMgr *resource.M
 		reactive:   reactiveEng,
 	}
 	m.registerDefaults()
-	m.registerReactiveRules()
 	return m
-}
-
-func (m *Manager) registerReactiveRules() {
-	m.reactive.AddRule(reactive.NewRule(
-		"service-crash-restart",
-		reactive.EventServiceCrashed,
-		func(ctx context.Context, event *reactive.Event) bool {
-			if count, ok := event.Data["restartCount"].(int); ok && count >= maxRestartCount {
-				return false
-			}
-			return true
-		},
-		func(ctx context.Context, event *reactive.Event) error {
-			if id, ok := event.Data["serviceID"].(string); ok {
-				return m.Start(id)
-			}
-			return nil
-		},
-	))
-
-	m.reactive.AddRule(reactive.NewRule(
-		"service-health-failed",
-		reactive.EventServiceHealthFailed,
-		func(ctx context.Context, event *reactive.Event) bool {
-			return true
-		},
-		func(ctx context.Context, event *reactive.Event) error {
-			if id, ok := event.Data["serviceID"].(string); ok {
-				m.publishCrashEvent(id)
-			}
-			return nil
-		},
-	))
 }
 
 func kindFromID(id string) string {
@@ -132,7 +98,13 @@ func (m *Manager) registerDefaults() {
 	}
 	for _, s := range m.services {
 		pid := process.FindPIDByPort(s.Info.Port)
-		if pid > 0 {
+		if pid <= 0 {
+			continue
+		}
+		// 端口占用者必须是本 kind/version 安装目录内的进程才算本实例在运行：
+		// 多个版本共享端口（如 nginx 1.20/1.24/1.26 共享 80）时只有真正占用者标记为运行中，
+		// 端口被其它程序占用时也不应把本服务误标为运行中。
+		if exePathMatchesPID(pid, installDir, s.Info.Kind, s.Info.Version) {
 			s.Info.Status = core.StatusRunning
 			s.Info.PID = pid
 		}
@@ -149,17 +121,24 @@ func (m *Manager) matchConfigHandler(id string) ConfigHandler {
 	return nil
 }
 
-func isPortAlive(port, pid int) bool {
-	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 300*time.Millisecond)
-	if err != nil {
-		return false
-	}
-	conn.Close()
-	return process.IsProcessRunning(pid)
-}
-
 func (m *Manager) syncServiceState(s *ServiceInstance, portPIDMap map[int]int) core.ServiceInfo {
 	info := s.Info
+	installDir := m.cfg.Get().InstallDir
+
+	// ownedPID 返回本服务端口上属于本 kind/version 的进程 PID；端口被其它程序占用时返回 0。
+	ownedPID := func() int {
+		if info.Port <= 0 {
+			return 0
+		}
+		pid, ok := portPIDMap[info.Port]
+		if !ok || pid <= 0 {
+			return 0
+		}
+		if exePathMatchesPID(pid, installDir, info.Kind, info.Version) {
+			return pid
+		}
+		return 0
+	}
 
 	switch info.Status {
 	case core.StatusStarting, core.StatusStopping:
@@ -170,12 +149,10 @@ func (m *Manager) syncServiceState(s *ServiceInstance, portPIDMap map[int]int) c
 		if s.process != nil && s.process.PID > 0 && m.procMgr.IsRunning(s.process.PID) {
 			stillRunning = true
 		}
-		if !stillRunning && info.Port > 0 {
-			if pid, ok := portPIDMap[info.Port]; ok {
-				if isPortAlive(info.Port, pid) {
-					stillRunning = true
-					info.PID = pid
-				}
+		if !stillRunning {
+			if pid := ownedPID(); pid > 0 {
+				stillRunning = true
+				info.PID = pid
 			}
 		}
 		if !stillRunning {
@@ -184,13 +161,9 @@ func (m *Manager) syncServiceState(s *ServiceInstance, portPIDMap map[int]int) c
 		}
 
 	case core.StatusStopped:
-		if info.Port > 0 {
-			if pid, ok := portPIDMap[info.Port]; ok {
-				if isPortAlive(info.Port, pid) {
-					info.Status = core.StatusRunning
-					info.PID = pid
-				}
-			}
+		if pid := ownedPID(); pid > 0 {
+			info.Status = core.StatusRunning
+			info.PID = pid
 		}
 	}
 
@@ -227,9 +200,15 @@ func (m *Manager) List() []core.ServiceInfo {
 	sort.SliceStable(entries, func(i, j int) bool {
 		oi, oki := orderMap[entries[i].kind]
 		oj, okj := orderMap[entries[j].kind]
-		if !oki { oi = len(serviceOrder) }
-		if !okj { oj = len(serviceOrder) }
-		if oi != oj { return oi < oj }
+		if !oki {
+			oi = len(serviceOrder)
+		}
+		if !okj {
+			oj = len(serviceOrder)
+		}
+		if oi != oj {
+			return oi < oj
+		}
 		return entries[i].info.ID < entries[j].info.ID
 	})
 	result := make([]core.ServiceInfo, len(entries))
@@ -415,6 +394,8 @@ func (m *Manager) Stop(id string) error {
 	m.mu.Unlock()
 
 	// 在锁外执行外部进程停止操作
+	installDir := m.cfg.Get().InstallDir
+	var stopErr error
 	p := provider.Get(kind)
 	if p != nil {
 		config := map[string]interface{}{
@@ -426,11 +407,12 @@ func (m *Manager) Stop(id string) error {
 			return err
 		}
 		if err := entity.Stop(context.Background()); err != nil {
-			return err
+			// 不立即返回：先按真实进程状态判定并回写，避免"停止失败"与"未在运行"并存
+			stopErr = err
 		}
 	} else {
 		pid := process.FindPIDByPort(port)
-		if pid > 0 {
+		if pid > 0 && exePathMatchesPID(pid, installDir, kind, version) {
 			m.mu.Lock()
 			if si, ok := m.services[id]; ok {
 				si.Info.Status = core.StatusStopping
@@ -440,30 +422,40 @@ func (m *Manager) Stop(id string) error {
 		}
 	}
 
-	// 兜底：端口仍被占用时强制终止
+	// 等待本服务进程退出（最多约 2 秒），随后以真实进程状态回写
 	if port > 0 {
-		if pid := process.FindPIDByPort(port); pid > 0 {
-			m.procMgr.Stop(pid)
-		}
-		for j := 0; j < 6; j++ {
-			time.Sleep(500 * time.Millisecond)
-			if process.FindPIDByPort(port) == 0 {
+		for j := 0; j < 4; j++ {
+			pid := process.FindPIDByPort(port)
+			if pid <= 0 || !exePathMatchesPID(pid, installDir, kind, version) {
 				break
 			}
-		}
-		if pid := process.FindPIDByPort(port); pid > 0 {
-			return fmt.Errorf("服务 %s 停止失败: 端口 %d 仍被进程 %d 占用", id, port, pid)
+			time.Sleep(500 * time.Millisecond)
 		}
 	}
 
-	// 更新状态
+	pid := process.FindPIDByPort(port)
+	owned := pid > 0 && exePathMatchesPID(pid, installDir, kind, version)
+	if owned && stopErr == nil {
+		stopErr = fmt.Errorf("服务 %s 停止失败: 端口 %d 仍被进程 %d 占用", id, port, pid)
+	}
+
+	// 更新状态：端口占用者仍为本服务进程 → 仍在运行；否则视为已停止
 	m.mu.Lock()
 	if si, ok := m.services[id]; ok {
-		si.process = nil
-		si.Info.Status = core.StatusStopped
-		si.Info.PID = 0
+		if owned {
+			si.Info.Status = core.StatusRunning
+			si.Info.PID = pid
+		} else {
+			si.process = nil
+			si.Info.Status = core.StatusStopped
+			si.Info.PID = 0
+		}
 	}
 	m.mu.Unlock()
+
+	if stopErr != nil && owned {
+		return stopErr
+	}
 	return nil
 }
 
@@ -489,74 +481,51 @@ func (m *Manager) watchProcess(id string, stopped <-chan struct{}) {
 				if !m.checkServiceHealth(id, port) {
 					m.mu.Lock()
 					s3 := m.services[id]
-					if s3 != nil {
-						s3.restartCount++
-						if s3.restartCount > maxRestartCount {
-							s3.process = nil
-							s3.Info.PID = 0
-							s3.Info.Status = core.StatusError
-							s3.Info.Error = fmt.Sprintf("服务连续崩溃 %d 次，已停止自动重启", maxRestartCount)
-							m.mu.Unlock()
-							m.reactive.Publish(reactive.NewEvent(
-								reactive.EventServiceCrashed,
-								id,
-								map[string]interface{}{
-									"serviceID":   id,
-									"restartCount": s3.restartCount,
-									"maxRetries":   maxRestartCount,
-									"error":        s3.Info.Error,
-								},
-							))
-							return
-						}
+					// 复检：重检期间服务可能已被用户停止或状态已变化，不再触发自愈
+					if s3 == nil || s3.stopped == nil || s3.Info.Status != core.StatusRunning {
 						m.mu.Unlock()
-
-						m.reactive.Publish(reactive.NewEvent(
-							reactive.EventServiceHealthFailed,
-							id,
-							map[string]interface{}{
-								"serviceID":   id,
-								"restartCount": s3.restartCount,
-							},
-						))
-					} else {
-						m.mu.Unlock()
+						return
 					}
+					s3.restartCount++
+					rc := s3.restartCount
+					s3.process = nil
+					s3.Info.PID = 0
+					msg := ""
+					if rc > maxRestartCount {
+						// 超过最大重试次数，停止自动重启并置为错误态
+						s3.Info.Status = core.StatusError
+						msg = fmt.Sprintf("服务连续崩溃 %d 次，已停止自动重启", maxRestartCount)
+						s3.Info.Error = msg
+					} else {
+						// 移出 Running 态，使重启规则能真正执行 Start
+						s3.Info.Status = core.StatusStopped
+					}
+					m.mu.Unlock()
+
+					m.reactive.Publish(reactive.NewEvent(
+						reactive.EventServiceHealthFailed,
+						id,
+						map[string]interface{}{
+							"serviceID":    id,
+							"restartCount": rc,
+						},
+					))
+					m.reactive.Publish(reactive.NewEvent(
+						reactive.EventServiceCrashed,
+						id,
+						map[string]interface{}{
+							"serviceID":    id,
+							"restartCount": rc,
+							"maxRetries":   maxRestartCount,
+							"error":        msg,
+						},
+					))
+					// 若发生重启，Start 会重置计数并注册新的 watcher；本 watcher 在此退出，避免重复计数
+					return
 				}
 			}
 		}
 	}
-}
-
-func (m *Manager) publishCrashEvent(id string) {
-	m.mu.RLock()
-	s := m.services[id]
-	if s == nil {
-		m.mu.RUnlock()
-		return
-	}
-	restartCount := s.restartCount
-	m.mu.RUnlock()
-
-	backoff := time.Duration(5*restartCount) * time.Second
-	time.Sleep(backoff)
-
-	m.mu.Lock()
-	s3 := m.services[id]
-	if s3 != nil && s3.stopped != nil && s3.Info.Status == core.StatusRunning {
-		s3.process = nil
-		s3.Info.PID = 0
-	}
-	m.mu.Unlock()
-
-	m.reactive.Publish(reactive.NewEvent(
-		reactive.EventServiceCrashed,
-		id,
-		map[string]interface{}{
-			"serviceID":   id,
-			"restartCount": restartCount,
-		},
-	))
 }
 
 func (m *Manager) checkServiceHealth(id string, port int) bool {
@@ -591,10 +560,9 @@ func (m *Manager) Restart(id string) error {
 
 func (m *Manager) Uninstall(id string) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	s, ok := m.services[id]
 	if !ok {
+		m.mu.Unlock()
 		return core.ErrServiceNotFound
 	}
 
@@ -603,22 +571,35 @@ func (m *Manager) Uninstall(id string) error {
 		s.stopped = nil
 	}
 
-	if s.Info.PID > 0 {
-		m.procMgr.Stop(s.Info.PID)
-		s.Info.PID = 0
-		s.process = nil
+	var pids []int
+	if s.process != nil {
+		pids = append(pids, s.process.PID)
+		pids = append(pids, s.process.ExtraPIDs...)
 	}
+	kind := kindFromID(id)
+	version := s.Info.Version
+	s.Info.PID = 0
+	s.process = nil
+	s.Info.Installed = false
+	s.Info.Status = core.StatusStopped
+	m.mu.Unlock()
+
+	// 只停止本实例自有进程（不按镜像名全局清理），等待其退出后再删除安装目录
+	for _, pid := range pids {
+		if pid > 0 {
+			m.procMgr.Stop(pid)
+		}
+	}
+	waitPIDsExited(pids, 3*time.Second)
 
 	installDir := m.cfg.Get().InstallDir
-	binPath := filepath.Join(installDir, "programs", kindFromID(id), s.Info.Version)
+	binPath := filepath.Join(installDir, "programs", kind, version)
 	if dirExists(binPath) {
-		if err := removeAll(id, binPath); err != nil {
+		if err := removeAll(binPath); err != nil {
 			return fmt.Errorf("删除安装目录失败: %w", err)
 		}
 	}
 
-	s.Info.Installed = false
-	s.Info.Status = core.StatusStopped
 	return nil
 }
 
@@ -657,7 +638,7 @@ func (m *Manager) MarkInstalled(id, version string) {
 	m.services[entryID] = &ServiceInstance{
 		Info: core.ServiceInfo{
 			ID: entryID, Kind: kind, Name: kindNames[kind],
-			Type: core.ServiceType(kind),
+			Type:    core.ServiceType(kind),
 			Version: version, Installed: true,
 			Status: core.StatusStopped,
 		},
@@ -892,16 +873,31 @@ func (m *Manager) UninstallVersion(serviceType, version string) error {
 	txn.
 		Step("stop-service", func(ctx context.Context) error {
 			m.mu.Lock()
-			defer m.mu.Unlock()
-			if s, ok := m.services[entryID]; ok {
-				if s.Info.PID > 0 {
-					if s.stopped != nil {
-						close(s.stopped)
-						s.stopped = nil
-					}
-					return m.procMgr.Stop(s.Info.PID)
+			s, ok := m.services[entryID]
+			if !ok {
+				m.mu.Unlock()
+				return nil
+			}
+			if s.stopped != nil {
+				close(s.stopped)
+				s.stopped = nil
+			}
+			var pids []int
+			if s.process != nil {
+				pids = append(pids, s.process.PID)
+				pids = append(pids, s.process.ExtraPIDs...)
+			}
+			s.Info.PID = 0
+			s.process = nil
+			m.mu.Unlock()
+
+			// 只停止本实例自有进程，等待退出后再删除，避免 rd 因文件占用失败
+			for _, pid := range pids {
+				if pid > 0 {
+					m.procMgr.Stop(pid)
 				}
 			}
+			waitPIDsExited(pids, 3*time.Second)
 			return nil
 		}, compensator.Noop()).
 		Step("backup-before-delete", func(ctx context.Context) error {
@@ -923,7 +919,7 @@ func (m *Manager) UninstallVersion(serviceType, version string) error {
 		}, compensator.Noop()).
 		Step("delete-install-dir", func(ctx context.Context) error {
 			if dirExists(binPath) {
-				return removeAll(serviceType, binPath)
+				return removeAll(binPath)
 			}
 			return nil
 		}, func(ctx context.Context) error {
@@ -1024,25 +1020,25 @@ func fileExists(path string) bool {
 	return err == nil
 }
 
-var serviceExecutables = map[string][]string{
-	"nginx":  {"nginx.exe"},
-	"mysql":  {"mysqld.exe"},
-	"redis":  {"redis-server.exe"},
-	"node":   {"node.exe"},
-	"python": {"python.exe"},
-}
-
-func removeAll(serviceType, path string) error {
-	if exes, ok := serviceExecutables[serviceType]; ok {
-		for _, exe := range exes {
-			cmd := exec.Command("taskkill", "/f", "/im", exe)
-			cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-			if err := cmd.Run(); err != nil {
-				return fmt.Errorf("终止进程 %s 失败: %w", exe, err)
+// waitPIDsExited 等待指定进程全部退出；在 timeout 内全部退出时立即返回。
+func waitPIDsExited(pids []int, timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		alive := false
+		for _, pid := range pids {
+			if pid > 0 && process.IsProcessRunning(pid) {
+				alive = true
+				break
 			}
 		}
+		if !alive {
+			return
+		}
+		time.Sleep(300 * time.Millisecond)
 	}
+}
 
+func removeAll(path string) error {
 	c := exec.Command("cmd", "/c", "attrib", "-r", "-s", "-h", filepath.Join(path, "*"), "/s")
 	c.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	if err := c.Run(); err != nil {

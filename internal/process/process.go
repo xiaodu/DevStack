@@ -32,9 +32,9 @@ type ProcessTree struct {
 
 // ProcessHandle holds references to one or more related OS processes.
 type ProcessHandle struct {
-	PID       int       // primary PID
-	MasterPID int       // master PID (for services with master/worker model)
-	ExtraPIDs []int     // additional PIDs (e.g. multiple php-cgi workers)
+	PID       int   // primary PID
+	MasterPID int   // master PID (for services with master/worker model)
+	ExtraPIDs []int // additional PIDs (e.g. multiple php-cgi workers)
 	Started   time.Time
 }
 
@@ -245,25 +245,52 @@ func FindPIDByPort(port int) int {
 	return 0
 }
 
+// executablePathCache 缓存 wmic 查询结果，避免 syncServiceState 为每个服务重复调用 wmic。
+var (
+	executablePathCache     map[int]string
+	executablePathCacheTime time.Time
+	executablePathCacheMu   sync.Mutex
+)
+
+// executablePathCacheTTL 是 exe 路径缓存的有效期
+const executablePathCacheTTL = 5 * time.Second
+
 // GetExecutablePath 返回指定 PID 进程的可执行文件完整路径。
 // 查询失败（进程已退出 / wmic 不可用）时返回空字符串。
 func GetExecutablePath(pid int) string {
 	if pid <= 0 {
 		return ""
 	}
+	executablePathCacheMu.Lock()
+	defer executablePathCacheMu.Unlock()
+
+	if executablePathCache != nil && time.Since(executablePathCacheTime) > executablePathCacheTTL {
+		executablePathCache = nil
+	}
+	if executablePathCache == nil {
+		executablePathCache = make(map[int]string)
+		executablePathCacheTime = time.Now()
+	}
+	if p, ok := executablePathCache[pid]; ok {
+		return p
+	}
+
 	cmd := exec.Command("wmic", "process", "where", fmt.Sprintf("ProcessId=%d", pid), "get", "ExecutablePath", "/format:value")
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	out, err := cmd.Output()
 	if err != nil {
 		return ""
 	}
+	path := ""
 	for _, line := range strings.Split(string(out), "\n") {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "ExecutablePath=") {
-			return strings.TrimPrefix(line, "ExecutablePath=")
+			path = strings.TrimPrefix(line, "ExecutablePath=")
+			break
 		}
 	}
-	return ""
+	executablePathCache[pid] = path
+	return path
 }
 
 // portPIDCache 缓存 netstat 扫描结果，避免短时间内重复执行 netstat -ano

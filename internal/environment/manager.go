@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/xiaodu/DevStack/internal/atomicfile"
 	"github.com/xiaodu/DevStack/internal/core"
 )
 
@@ -161,7 +162,7 @@ func (m *Manager) save() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(m.filePath, data, 0644)
+	return atomicfile.WriteFile(m.filePath, data, 0644)
 }
 
 func (m *Manager) List() []Environment {

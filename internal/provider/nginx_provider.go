@@ -19,11 +19,11 @@ import (
 
 type NginxProvider struct {
 	*BaseProvider
-	cfg       *config.Config
-	pm        *process.Manager
-	resMgr    *resource.Manager
-	instance  *NginxInstance
-	vhosts    []VhostConfig
+	cfg      *config.Config
+	pm       *process.Manager
+	resMgr   *resource.Manager
+	instance *NginxInstance
+	vhosts   []VhostConfig
 }
 
 type NginxInstance struct {
@@ -318,16 +318,17 @@ func (i *NginxInstance) Start(ctx context.Context) error {
 		return nil
 	}
 
-	// 端口已被 nginx 占用（如上次激活残留的实例）：接管而非再起一份
-	if pid := process.FindPIDByPort(i.port); pid > 0 {
-		exe := strings.ToLower(process.GetExecutablePath(pid))
-		if strings.Contains(exe, "nginx.exe") {
-			i.mpid = pid
-			i.pid = pid
-			i.status = core.StatusRunning
-			i.startedAt = time.Now()
-			return nil
-		}
+	// 端口已被本实例版本目录内的 nginx 占用（如上次激活残留的实例）：接管而非再起一份
+	if pid := ownedPIDByPort(i.port, i.nginxDir); pid > 0 {
+		i.mpid = pid
+		i.pid = pid
+		i.status = core.StatusRunning
+		i.startedAt = time.Now()
+		return nil
+	}
+	// 端口被其它程序/其它版本占用：明确报错，不接管，避免后续误杀外部进程
+	if process.FindPIDByPort(i.port) > 0 {
+		return fmt.Errorf("Nginx start failed: port %d is occupied by another process", i.port)
 	}
 
 	i.status = core.StatusStarting
@@ -361,27 +362,39 @@ func (i *NginxInstance) Start(ctx context.Context) error {
 }
 
 func (i *NginxInstance) Stop(ctx context.Context) error {
-	if i.pid <= 0 && process.FindPIDByPort(i.port) == 0 {
+	i.status = core.StatusStopping
+
+	// 收集属于本实例的进程：自管 pid、主进程 mpid，以及端口上可执行路径位于本版本目录内的进程。
+	// 端口被其它版本或其它程序占用时不属于本实例，不误杀。
+	targets := make(map[int]struct{})
+	if i.pid > 0 {
+		targets[i.pid] = struct{}{}
+	}
+	if i.mpid > 0 && i.mpid != i.pid {
+		targets[i.mpid] = struct{}{}
+	}
+	if i.pid <= 0 {
+		if pid := stopOwnedProcessByPort(i.port, i.nginxDir); pid > 0 {
+			targets[pid] = struct{}{}
+		}
+	}
+
+	if len(targets) == 0 {
+		// 本实例未运行：端口可能被其它程序占用，与本实例无关，视为已停止
+		i.pid = 0
+		i.mpid = 0
 		i.status = core.StatusStopped
 		return nil
 	}
-	i.status = core.StatusStopping
 
-	pid := i.pid
-	if pid <= 0 {
-		pid = stopProcessByPort(i.port, "nginx.exe")
-	}
-	if pid > 0 {
+	for pid := range targets {
 		process.NewManager().Stop(pid)
 	}
-	if i.mpid > 0 && i.mpid != pid {
-		process.NewManager().Stop(i.mpid)
-	}
 
-	killAllByName("nginx.exe")
-
-	if !waitPortReleased(i.port, 3*time.Second) {
-		return fmt.Errorf("Nginx stop failed: port %d still listening", i.port)
+	// 停止成功的判定以本实例进程是否退出为准，而非端口是否释放：
+	// 端口可能被其它程序占用，不代表 nginx 未停止。
+	if remaining := waitProcessesExited(targets, 5*time.Second); len(remaining) > 0 {
+		return fmt.Errorf("Nginx stop failed: process still running (pid %s)", pidList(remaining))
 	}
 
 	i.pid = 0
@@ -437,12 +450,6 @@ func (c *reloadCommand) run() error {
 		return fmt.Errorf("nginx reload failed: %w, output: %s", err, string(out))
 	}
 	return nil
-}
-
-func killAllByName(name string) {
-	cmd := exec.Command("taskkill", "/f", "/im", name)
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	cmd.Run()
 }
 
 // allocatedPHPBasePorts 返回资源池中所有已分配的 PHP 基端口（每个 PHP 版本一个基端口）。

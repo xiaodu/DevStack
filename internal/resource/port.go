@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+
+	"github.com/xiaodu/DevStack/internal/atomicfile"
 )
 
 const (
@@ -94,12 +96,11 @@ func (p *PortPool) Save() {
 		return
 	}
 	path := filepath.Join(p.dataDir, "port_pool.json")
-	os.MkdirAll(p.dataDir, 0755)
 	data, err := json.MarshalIndent(p.allocated, "", "  ")
 	if err != nil {
 		return
 	}
-	os.WriteFile(path, data, 0644)
+	atomicfile.WriteFile(path, data, 0644)
 }
 
 func (p *PortPool) GetOwner(port int) (string, bool) {

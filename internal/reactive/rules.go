@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"sync"
-	"time"
 )
 
 type Rule interface {
@@ -115,12 +114,16 @@ type ServiceRestarter func(serviceID string) error
 type PortReallocator func(owner string, oldPort int) (int, error)
 type AlertCallback func(eventType EventType, source string, data map[string]interface{})
 
+// maxServiceRestartAttempts 是服务崩溃后的最大自动重启次数。
+// 必须与 internal/service 包中的 maxRestartCount 保持一致。
+const maxServiceRestartAttempts = 3
+
 func RegisterBuiltinRules(engine *Engine, restarter ServiceRestarter, reallocator PortReallocator, alert AlertCallback) {
 	engine.AddRule(NewRule(
 		"service_crash_restart",
 		EventServiceCrashed,
 		func(ctx context.Context, event *Event) bool {
-			if count, ok := event.Data["restartCount"].(int); ok && count >= 3 {
+			if count, ok := event.Data["restartCount"].(int); ok && count > maxServiceRestartAttempts {
 				return false
 			}
 			return true
@@ -168,27 +171,6 @@ func RegisterBuiltinRules(engine *Engine, restarter ServiceRestarter, reallocato
 		func(ctx context.Context, event *Event) error {
 			if alert != nil {
 				alert(EventServiceHealthFailed, event.Source, event.Data)
-			}
-			return nil
-		},
-	))
-
-	engine.AddRule(NewRule(
-		"service_start_failure_retry",
-		EventServiceCrashed,
-		func(ctx context.Context, event *Event) bool {
-			if count, ok := event.Data["restartCount"].(int); ok && count >= 2 {
-				return false
-			}
-			return true
-		},
-		func(ctx context.Context, event *Event) error {
-			time.Sleep(2 * time.Second)
-			if restarter == nil {
-				return nil
-			}
-			if id, ok := event.Data["serviceID"].(string); ok {
-				return restarter(id)
 			}
 			return nil
 		},

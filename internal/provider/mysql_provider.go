@@ -228,19 +228,23 @@ func (i *MySQLInstance) Start(ctx context.Context) error {
 
 	for j := 0; j < 10; j++ {
 		time.Sleep(500 * time.Millisecond)
-		if p := process.FindPIDByPort(i.port); p > 0 {
+		if p := ownedPIDByPort(i.port, i.mysqlDir); p > 0 {
 			i.pid = p
+			break
+		}
+		// 端口被其它程序占用且不属于本实例：不接管，避免误杀外部进程
+		if process.FindPIDByPort(i.port) > 0 {
 			break
 		}
 	}
 
-	if i.pid <= 0 && !process.NewManager().IsRunning(pid) {
-		process.NewManager().Stop(pid)
-		i.status = core.StatusError
-		return fmt.Errorf("MySQL 启动失败: 端口 %d 无响应，请检查配置或查看错误日志", i.port)
-	}
-
 	if i.pid <= 0 {
+		if !process.NewManager().IsRunning(pid) {
+			process.NewManager().Stop(pid)
+			i.status = core.StatusError
+			return fmt.Errorf("MySQL 启动失败: 端口 %d 无响应或已被其它程序占用，请检查配置或查看错误日志", i.port)
+		}
+		// 进程存活但尚未监听端口（如首次初始化较慢）：跟踪自身进程
 		i.pid = pid
 	}
 
@@ -250,24 +254,33 @@ func (i *MySQLInstance) Start(ctx context.Context) error {
 }
 
 func (i *MySQLInstance) Stop(ctx context.Context) error {
-	if i.pid <= 0 && process.FindPIDByPort(i.port) == 0 {
+	i.status = core.StatusStopping
+
+	// 只停止属于本实例的进程：自管 pid，以及端口上可执行路径位于本版本目录内的进程。
+	targets := make(map[int]struct{})
+	if i.pid > 0 {
+		targets[i.pid] = struct{}{}
+	}
+	if i.pid <= 0 {
+		if pid := stopOwnedProcessByPort(i.port, i.mysqlDir); pid > 0 {
+			targets[pid] = struct{}{}
+		}
+	}
+
+	if len(targets) == 0 {
+		// 本实例未运行，视为已停止
+		i.pid = 0
 		i.status = core.StatusStopped
 		return nil
 	}
-	i.status = core.StatusStopping
 
-	pid := i.pid
-	if pid <= 0 {
-		pid = stopProcessByPort(i.port, "mysqld.exe")
-	}
-	if pid > 0 {
+	for pid := range targets {
 		process.NewManager().Stop(pid)
 	}
 
-	killAllByName("mysqld.exe")
-
-	if !waitPortReleased(i.port, 3*time.Second) {
-		return fmt.Errorf("MySQL stop failed: port %d still listening", i.port)
+	// 停止成功的判定以本实例进程是否退出为准，而非端口是否释放
+	if remaining := waitProcessesExited(targets, 5*time.Second); len(remaining) > 0 {
+		return fmt.Errorf("MySQL stop failed: process still running (pid %s)", pidList(remaining))
 	}
 
 	i.pid = 0

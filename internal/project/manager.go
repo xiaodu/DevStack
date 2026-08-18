@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/xiaodu/DevStack/internal/atomicfile"
 	"github.com/xiaodu/DevStack/internal/core"
 	"github.com/xiaodu/DevStack/internal/resource"
 	"github.com/xiaodu/DevStack/internal/runtime"
@@ -343,8 +344,7 @@ func (m *Manager) save() error {
 	if err != nil {
 		return err
 	}
-	os.MkdirAll(filepath.Dir(m.filePath), 0755)
-	return os.WriteFile(m.filePath, data, 0644)
+	return atomicfile.WriteFile(m.filePath, data, 0644)
 }
 
 func containsString(s, substr string) bool {

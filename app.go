@@ -1087,6 +1087,10 @@ func (a *App) GetInstalledVersions(serviceType string) []string {
 }
 
 func (a *App) DownloadService(serviceType, version, url string) error {
+	if !isSafePathComponent(serviceType) || !isSafePathComponent(version) {
+		return fmt.Errorf("非法的服务类型或版本号")
+	}
+
 	installDir := a.cfg.Get().InstallDir
 	if installDir == "" {
 		return fmt.Errorf("安装目录未设置，请先完成初始化设置")
@@ -1321,6 +1325,18 @@ func (a *App) ShowMessage(title, message string) {
 
 func joinPath(elem ...string) string {
 	return filepath.Join(elem...)
+}
+
+// isSafePathComponent 校验单个路径组件是否可用于拼接文件系统路径，
+// 防止 .. 路径穿越与 Windows 非法字符注入。
+func isSafePathComponent(name string) bool {
+	if name == "" || name == "." || name == ".." {
+		return false
+	}
+	if strings.ContainsAny(name, `/\<>:"|?*`) {
+		return false
+	}
+	return true
 }
 
 // ==================== Snapshot APIs ====================

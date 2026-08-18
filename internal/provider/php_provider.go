@@ -22,14 +22,14 @@ type PHPProvider struct {
 }
 
 type PHPInstance struct {
-	id         string
-	version    string
-	status     core.ServiceStatus
-	pid        int
-	port       int
-	phpDir     string
-	phpExe     string
-	startedAt  time.Time
+	id        string
+	version   string
+	status    core.ServiceStatus
+	pid       int
+	port      int
+	phpDir    string
+	phpExe    string
+	startedAt time.Time
 }
 
 func NewPHPProvider(cfg *config.Config, pm *process.Manager, resMgr *resource.Manager) *PHPProvider {
@@ -66,12 +66,12 @@ func (p *PHPProvider) NewInstance(ctx context.Context, config map[string]interfa
 	port := p.getPHPPort(version)
 
 	instance := &PHPInstance{
-		id:        instanceID,
-		version:   version,
-		status:    core.StatusStopped,
-		port:      port,
-		phpDir:    phpDir,
-		phpExe:    filepath.Join(phpDir, "php-cgi.exe"),
+		id:      instanceID,
+		version: version,
+		status:  core.StatusStopped,
+		port:    port,
+		phpDir:  phpDir,
+		phpExe:  filepath.Join(phpDir, "php-cgi.exe"),
 	}
 	p.instances[instanceID] = instance
 	return instance, nil
@@ -206,19 +206,23 @@ func (i *PHPInstance) Start(ctx context.Context) error {
 
 	for j := 0; j < 6; j++ {
 		time.Sleep(500 * time.Millisecond)
-		if p := process.FindPIDByPort(i.port); p > 0 {
+		if p := ownedPIDByPort(i.port, i.phpDir); p > 0 {
 			i.pid = p
+			break
+		}
+		// 端口被其它程序占用且不属于本实例：不接管，避免误杀外部进程
+		if process.FindPIDByPort(i.port) > 0 {
 			break
 		}
 	}
 
-	if i.pid <= 0 && !process.NewManager().IsRunning(pid) {
-		process.NewManager().Stop(pid)
-		i.status = core.StatusError
-		return fmt.Errorf("PHP start failed: port %d not responding", i.port)
-	}
-
 	if i.pid <= 0 {
+		if !process.NewManager().IsRunning(pid) {
+			process.NewManager().Stop(pid)
+			i.status = core.StatusError
+			return fmt.Errorf("PHP start failed: port %d not responding or occupied by another process", i.port)
+		}
+		// 进程存活但尚未监听端口：跟踪自身进程
 		i.pid = pid
 	}
 
@@ -228,24 +232,33 @@ func (i *PHPInstance) Start(ctx context.Context) error {
 }
 
 func (i *PHPInstance) Stop(ctx context.Context) error {
-	if i.pid <= 0 && process.FindPIDByPort(i.port) == 0 {
+	i.status = core.StatusStopping
+
+	// 只停止属于本实例的进程：自管 pid，以及端口上可执行路径位于本版本目录内的进程。
+	targets := make(map[int]struct{})
+	if i.pid > 0 {
+		targets[i.pid] = struct{}{}
+	}
+	if i.pid <= 0 {
+		if pid := stopOwnedProcessByPort(i.port, i.phpDir); pid > 0 {
+			targets[pid] = struct{}{}
+		}
+	}
+
+	if len(targets) == 0 {
+		// 本实例未运行，视为已停止
+		i.pid = 0
 		i.status = core.StatusStopped
 		return nil
 	}
-	i.status = core.StatusStopping
 
-	pid := i.pid
-	if pid <= 0 {
-		pid = stopProcessByPort(i.port, "php-cgi.exe")
-	}
-	if pid > 0 {
+	for pid := range targets {
 		process.NewManager().Stop(pid)
 	}
 
-	killAllByName("php-cgi.exe")
-
-	if !waitPortReleased(i.port, 3*time.Second) {
-		return fmt.Errorf("PHP stop failed: port %d still listening", i.port)
+	// 停止成功的判定以本实例进程是否退出为准，而非端口是否释放
+	if remaining := waitProcessesExited(targets, 5*time.Second); len(remaining) > 0 {
+		return fmt.Errorf("PHP stop failed: process still running (pid %s)", pidList(remaining))
 	}
 
 	i.pid = 0

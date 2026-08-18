@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/xiaodu/DevStack/internal/atomicfile"
 )
 
 type StateStore struct {
@@ -53,7 +55,7 @@ func (ss *StateStore) saveJSON(v interface{}) error {
 	if err != nil {
 		return fmt.Errorf("序列化数据失败: %w", err)
 	}
-	if err := os.WriteFile(ss.filePath, data, 0644); err != nil {
+	if err := atomicfile.WriteFile(ss.filePath, data, 0644); err != nil {
 		return fmt.Errorf("写入文件失败: %w", err)
 	}
 	return nil

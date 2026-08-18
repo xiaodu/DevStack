@@ -145,7 +145,10 @@ func (m *Manager) ExtractZip(src, dest string) error {
 			if relative == "" || relative == "." {
 				continue
 			}
-			fpath := filepath.Join(dest, relative)
+			fpath, err := safeExtractPath(dest, relative)
+			if err != nil {
+				return err
+			}
 			if f.FileInfo().IsDir() {
 				os.MkdirAll(fpath, 0755)
 				continue
@@ -178,7 +181,10 @@ func (m *Manager) ExtractZip(src, dest string) error {
 	}
 
 	for _, f := range entries {
-		fpath := filepath.Join(dest, f.Name)
+		fpath, err := safeExtractPath(dest, f.Name)
+		if err != nil {
+			return err
+		}
 		if f.FileInfo().IsDir() {
 			os.MkdirAll(fpath, 0755)
 			continue
@@ -205,6 +211,17 @@ func (m *Manager) ExtractZip(src, dest string) error {
 		}
 	}
 	return nil
+}
+
+// safeExtractPath 将压缩条目 name 解析到 dest 下的安全路径。
+// 若条目含 .. 或解析后逃逸出 dest（zip-slip），返回错误。
+func safeExtractPath(dest, name string) (string, error) {
+	destClean := filepath.Clean(dest)
+	target := filepath.Clean(filepath.Join(destClean, name))
+	if target != destClean && !strings.HasPrefix(target, destClean+string(os.PathSeparator)) {
+		return "", fmt.Errorf("压缩条目路径逃逸目标目录: %s", name)
+	}
+	return target, nil
 }
 
 func detectSingleRootDir(entries []*zip.File) string {

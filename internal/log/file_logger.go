@@ -140,7 +140,13 @@ func (l *FileLogger) GetLogFiles() ([]string, error) {
 }
 
 func (l *FileLogger) ReadLogFile(path string) ([]string, error) {
-	data, err := os.ReadFile(path)
+	// 防止读取日志目录之外的文件
+	clean := filepath.Clean(path)
+	dir := filepath.Clean(l.logDir)
+	if clean != dir && !strings.HasPrefix(clean, dir+string(os.PathSeparator)) {
+		return nil, fmt.Errorf("日志文件路径越界: %s", path)
+	}
+	data, err := os.ReadFile(clean)
 	if err != nil {
 		return nil, err
 	}
