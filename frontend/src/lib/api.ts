@@ -32,12 +32,14 @@ import {
   GetSnapshotDetail,
   GetSnapshots,
   GetSystemInfo,
+  ListEnvironmentProfiles,
   ListEnvironments,
   LogToast,
   OpenDirectory,
   ReadLogFile,
   RefreshPHPRegistry,
   RestartService,
+  RollbackSnapshot,
   RunEnvironment,
   SavePHPExtensions,
   SaveProjectAsEnvironment,
@@ -48,6 +50,7 @@ import {
   StartService,
   StopRuntime,
   StopService,
+  TakeSnapshot,
   ToggleProject,
   UninstallService,
   UninstallVersion,
@@ -352,6 +355,7 @@ export const api = {
 
   // ====== 环境 ======
   listEnvironments: () => callOrMock(ListEnvironments, mockEnvironments as any),
+  listEnvironmentProfiles: () => callOrMock(ListEnvironmentProfiles, mockEnvironments as any),
   getOneEnvironment: (id: string) => callOrMock(() => GetEnvironment(id), mockEnvironments[0] as any),
   createEnvironment: (env: any) => callOrMock(() => CreateEnvironment(env), { id: 'new-env' } as any),
   updateEnvironment: (env: any) => callOrMock(() => UpdateEnvironment(env), { success: true } as any),
@@ -365,6 +369,8 @@ export const api = {
   getSnapshots: () => callOrMock(GetSnapshots, mockSnapshots as any),
   getSnapshotDetail: (id: string) => callOrMock(() => GetSnapshotDetail(id), { id, content: '' } as any),
   deleteSnapshot: (id: string) => callOrMock(() => DeleteSnapshot(id), { success: true } as any),
+  takeSnapshot: () => callOrMock(TakeSnapshot, 'snap-demo' as any),
+  rollbackSnapshot: (id: string) => callOrMock(() => RollbackSnapshot(id), { success: true } as any),
 
   // ====== 设置 ======
   getSettings: () => callOrMock(GetSettings, mockSettings as any),

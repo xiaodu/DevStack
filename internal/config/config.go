@@ -176,7 +176,7 @@ func defaultSettings(installDir string) core.AppSettings {
 			CharacterSet:              "utf8mb4",
 			Collation:                 "utf8mb4_unicode_ci",
 			SQLMode:                   "STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION",
-			SkipNameResolve:           false,
+			SkipNameResolve:           true,
 			GeneralLog:                false,
 			SlowQueryLog:              false,
 			LongQueryTime:             2,

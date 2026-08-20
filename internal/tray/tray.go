@@ -32,8 +32,10 @@ func (t *Tray) Running() bool {
 
 // Start 在独立 goroutine 中启动托盘消息循环。iconBytes 应为 .ico 文件内容。
 func (t *Tray) Start(iconBytes []byte) {
+	if !t.running.CompareAndSwap(false, true) {
+		return
+	}
 	go systray.Run(func() {
-		t.running.Store(true)
 		if len(iconBytes) > 0 {
 			systray.SetIcon(iconBytes)
 		}

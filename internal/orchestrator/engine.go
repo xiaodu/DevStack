@@ -163,6 +163,140 @@ func (e *Engine) LoadProcfile(path string) error {
 	return nil
 }
 
+// RegisterService 程序化注册服务
+//
+// 不依赖 Procfile，直接从 provider 获取服务定义并注册到编排引擎。
+// 用于内置服务（nginx、mysql、php、redis）的编排管理。
+func (e *Engine) RegisterService(name string, command string, args []string, env map[string]string, workDir string, graceSec int) error {
+	if graceSec <= 0 {
+		graceSec = 5
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	// 检查是否已注册
+	if _, exists := e.services[name]; exists {
+		// 更新已有服务
+		e.services[name].Command = command
+		e.services[name].Args = args
+		e.services[name].Env = env
+		e.services[name].WorkDir = workDir
+		e.services[name].GraceSec = graceSec
+		e.log(fmt.Sprintf("更新服务 %s", name))
+		return nil
+	}
+
+	// 注册新服务
+	svc := &Service{
+		Name:      name,
+		Command:   command,
+		Args:      args,
+		Env:       env,
+		WorkDir:   workDir,
+		GraceSec:  graceSec,
+		State:     StateStopped,
+		DependsOn: e.inferDependencies(name),
+	}
+	e.services[name] = svc
+
+	e.log(fmt.Sprintf("注册服务 %s: %s", name, command))
+	return nil
+}
+
+// UnregisterService 注销服务
+func (e *Engine) UnregisterService(name string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if _, exists := e.services[name]; !exists {
+		return fmt.Errorf("服务 %s 未注册", name)
+	}
+
+	// 如果服务正在运行，先停止
+	svc := e.services[name]
+	if svc.State == StateRunning || svc.State == StateStarting {
+		e.mu.Unlock()
+		if err := e.Stop(context.Background(), name); err != nil {
+			e.mu.Lock()
+			e.log(fmt.Sprintf("停止服务 %s 失败: %v", name, err))
+		}
+		e.mu.Lock()
+	}
+
+	delete(e.services, name)
+	e.log(fmt.Sprintf("注销服务 %s", name))
+	return nil
+}
+
+// HasService 检查服务是否已注册
+func (e *Engine) HasService(name string) bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	_, exists := e.services[name]
+	return exists
+}
+
+// AssignPID 将已运行的进程加入 Job Object 管理
+//
+// 在 provider 启动服务后调用，将进程纳入 Job Object，
+// 确保 Group.Close() 时自动终止该进程。
+func (e *Engine) AssignPID(name string, pid int) error {
+	if pid <= 0 {
+		return nil
+	}
+
+	e.mu.RLock()
+	_, exists := e.services[name]
+	e.mu.RUnlock()
+
+	if !exists {
+		// 服务未注册，先自动注册
+		e.RegisterService(name, "", nil, nil, "", 5)
+	}
+
+	// 获取优雅关闭秒数
+	graceSec := 5
+	e.mu.RLock()
+	if s, ok := e.services[name]; ok && s.GraceSec > 0 {
+		graceSec = s.GraceSec
+	}
+	e.mu.RUnlock()
+
+	// 将进程加入 Job Object
+	if err := e.group.AssignPID(pid, name, graceSec); err != nil {
+		e.log(fmt.Sprintf("将进程 %s (PID=%d) 加入 Job Object 失败: %v", name, pid, err))
+		return err
+	}
+
+	// 更新服务状态
+	e.mu.Lock()
+	if s, ok := e.services[name]; ok {
+		s.PID = pid
+		s.State = StateRunning
+		s.Started = time.Now()
+	}
+	e.mu.Unlock()
+
+	e.log(fmt.Sprintf("将进程 %s (PID=%d) 纳入 Job Object 管理", name, pid))
+	return nil
+}
+
+// ReleasePID 从 Job Object 中移除进程（不终止进程）
+func (e *Engine) ReleasePID(name string, pid int) {
+	if pid <= 0 {
+		return
+	}
+	e.group.ReleasePID(pid)
+
+	e.mu.Lock()
+	if s, ok := e.services[name]; ok && s.PID == pid {
+		s.PID = 0
+		s.State = StateStopped
+	}
+	e.mu.Unlock()
+}
+
 // inferDependencies 推断服务依赖关系
 //
 // 基于常见模式推断：

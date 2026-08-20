@@ -7,7 +7,7 @@ import { safeInvoke } from '../lib/safeInvoke'
 let { service } = $props()
 const dispatch = createEventDispatcher()
 
-let mc = $state({})
+let mc = $state<Record<string, any>>({})
 let configLoading = $state(false)
 let mysqlRootHasPassword = $state(null)
 let checkingAuth = $state(false)
@@ -25,7 +25,7 @@ const sqlModeOptions = [
   { value: 'STRICT_TRANS_TABLES', label: '严格事务表模式' },
   { value: '', label: '宽松模式（兼容老旧程序）' },
 ]
-const recommendedMySQLConfig = {
+const recommendedMySQLConfig: Record<string, any> = {
   innodbBufferPoolSize: '256M',
   innodbLogFileSize: '64M',
   innodbFlushLogAtTrxCommit: '2',
@@ -50,7 +50,7 @@ const recommendedMySQLConfig = {
   joinBufferSize: '2M',
 }
 
-let iconClass = $derived({ mysql: 'icon-mysql', redis: 'icon-redis' }[service.kind] || '')
+let iconClass = $derived(({ mysql: 'icon-mysql', redis: 'icon-redis' } as Record<string, string>)[service.kind] || '')
 
 onMount(() => {
   if (service.kind === 'mysql') loadMysqlConfig()
@@ -63,7 +63,7 @@ async function checkMysqlAuth() {
     mysqlRootHasPassword = await api.checkMySQLRootAuth()
   } catch (e) {
     mysqlRootHasPassword = null
-    authError = e?.message || String(e)
+    authError = (e as any)?.message || String(e)
   } finally {
     checkingAuth = false
   }
@@ -80,13 +80,13 @@ async function loadMysqlConfig() {
   }
 }
 
-function intVal(key) {
+function intVal(key: string) {
   return parseInt(mc[key], 10) || 0
 }
-function boolVal(key) {
+function boolVal(key: string) {
   return mc[key] === 'true'
 }
-function getRecommendedHint(key, label) {
+function getRecommendedHint(key: string, label?: string) {
   const v = recommendedMySQLConfig[key]
   return v ? `推荐值: ${v}${label ? ` · ${label}` : ''}` : ''
 }
@@ -95,7 +95,7 @@ function loadRecommendedMySQL() {
 }
 
 async function save() {
-  const vals = {}
+  const vals: Record<string, any> = {}
   if (service.kind === 'mysql') {
     Object.assign(vals, {
       innodbBufferPoolSize: mc.innodbBufferPoolSize || '256M',
@@ -121,11 +121,11 @@ async function save() {
       sortBufferSize: mc.sortBufferSize || '2M',
       joinBufferSize: mc.joinBufferSize || '2M',
     })
-    const pw = document.getElementById('mysql-password')
+    const pw = document.getElementById('mysql-password') as HTMLInputElement | null
     if (pw?.value) vals.password = pw.value
   } else if (service.kind === 'redis') {
-    const bindIp = document.getElementById('redis-bind')
-    const port = document.getElementById('redis-port')
+    const bindIp = document.getElementById('redis-bind') as HTMLInputElement | null
+    const port = document.getElementById('redis-port') as HTMLInputElement | null
     if (bindIp) vals.bind = bindIp.value
     if (port) vals.port = port.value
   }
@@ -223,7 +223,7 @@ run(() => {
             </label>
             <label class="form-control w-full">
               <div class="label"><span class="label-text">端口</span></div>
-              <input class="input input-bordered w-full input-sm" type="number" min="1" max="65535" value={intVal('port')} onchange={e => mc.port = String(e.target.value)} />
+              <input class="input input-bordered w-full input-sm" type="number" min="1" max="65535" value={intVal('port')} onchange={e => (mc.port = String((e.currentTarget as HTMLInputElement).value))} />
               <div class="label"><span class="label-text-alt text-base-content/50">{getRecommendedHint('port')}</span></div>
             </label>
           </div>
@@ -243,11 +243,11 @@ run(() => {
           </div>
           <div class="grid grid-cols-2 gap-3">
             <label class="flex items-center gap-2 cursor-pointer">
-              <input type="checkbox" class="toggle toggle-sm toggle-primary" checked={boolVal('skipNameResolve')} onchange={e => mc.skipNameResolve = String(e.target.checked)} />
+              <input type="checkbox" class="toggle toggle-sm toggle-primary" checked={boolVal('skipNameResolve')} onchange={e => (mc.skipNameResolve = String((e.currentTarget as HTMLInputElement).checked))} />
               <div><span class="text-sm">跳过域名解析</span><p class="text-xs text-base-content/50">跳过客户端主机名反查，仅本机访问推荐开启</p></div>
             </label>
             <label class="flex items-center gap-2 cursor-pointer">
-              <input type="checkbox" class="toggle toggle-sm toggle-primary" checked={boolVal('generalLog')} onchange={e => mc.generalLog = String(e.target.checked)} />
+              <input type="checkbox" class="toggle toggle-sm toggle-primary" checked={boolVal('generalLog')} onchange={e => (mc.generalLog = String((e.currentTarget as HTMLInputElement).checked))} />
               <div><span class="text-sm">全量查询日志</span><p class="text-xs text-base-content/50">记录所有 SQL，调试时开启，平时建议关闭</p></div>
             </label>
           </div>
@@ -274,15 +274,15 @@ run(() => {
         <h3 class="text-sm font-semibold text-primary mb-3.5">连接与缓存</h3>
         <div class="flex flex-col gap-3 max-w-[700px]">
           <div class="grid grid-cols-2 gap-3">
-            <label class="form-control w-full"><div class="label"><span class="label-text">最大连接数</span></div><input class="input input-bordered w-full input-sm" type="number" min="10" max="1000" value={intVal('maxConnections')} onchange={e => mc.maxConnections = String(e.target.value)} /><div class="label"><span class="label-text-alt text-base-content/50">{getRecommendedHint('maxConnections')}</span></div></label>
+            <label class="form-control w-full"><div class="label"><span class="label-text">最大连接数</span></div><input class="input input-bordered w-full input-sm" type="number" min="10" max="1000" value={intVal('maxConnections')} onchange={e => (mc.maxConnections = String((e.currentTarget as HTMLInputElement).value))} /><div class="label"><span class="label-text-alt text-base-content/50">{getRecommendedHint('maxConnections')}</span></div></label>
             <label class="form-control w-full"><div class="label"><span class="label-text">临时表大小</span></div><select class="select select-bordered w-full select-sm" bind:value={mc.tmpTableSize}>{#each memoryOptions as opt}<option>{opt}</option>{/each}</select><div class="label"><span class="label-text-alt text-base-content/50">{getRecommendedHint('tmpTableSize')}</span></div></label>
           </div>
           <div class="grid grid-cols-2 gap-3">
             <label class="form-control w-full"><div class="label"><span class="label-text">最大堆表大小</span></div><select class="select select-bordered w-full select-sm" bind:value={mc.maxHeapTableSize}>{#each memoryOptions as opt}<option>{opt}</option>{/each}</select><div class="label"><span class="label-text-alt text-base-content/50">{getRecommendedHint('maxHeapTableSize', '与tmp一致')}</span></div></label>
-            <label class="form-control w-full"><div class="label"><span class="label-text">线程缓存大小</span></div><input class="input input-bordered w-full input-sm" type="number" min="1" max="100" value={intVal('threadCacheSize')} onchange={e => mc.threadCacheSize = String(e.target.value)} /><div class="label"><span class="label-text-alt text-base-content/50">{getRecommendedHint('threadCacheSize')}</span></div></label>
+            <label class="form-control w-full"><div class="label"><span class="label-text">线程缓存大小</span></div><input class="input input-bordered w-full input-sm" type="number" min="1" max="100" value={intVal('threadCacheSize')} onchange={e => (mc.threadCacheSize = String((e.currentTarget as HTMLInputElement).value))} /><div class="label"><span class="label-text-alt text-base-content/50">{getRecommendedHint('threadCacheSize')}</span></div></label>
           </div>
           <div class="grid grid-cols-1 gap-3">
-            <label class="form-control w-full"><div class="label"><span class="label-text">表打开缓存</span></div><input class="input input-bordered w-full input-sm" type="number" min="100" max="4000" value={intVal('tableOpenCache')} onchange={e => mc.tableOpenCache = String(e.target.value)} /><div class="label"><span class="label-text-alt text-base-content/50">{getRecommendedHint('tableOpenCache')}</span></div></label>
+            <label class="form-control w-full"><div class="label"><span class="label-text">表打开缓存</span></div><input class="input input-bordered w-full input-sm" type="number" min="100" max="4000" value={intVal('tableOpenCache')} onchange={e => (mc.tableOpenCache = String((e.currentTarget as HTMLInputElement).value))} /><div class="label"><span class="label-text-alt text-base-content/50">{getRecommendedHint('tableOpenCache')}</span></div></label>
           </div>
           <div class="grid grid-cols-2 gap-3">
             <label class="form-control w-full"><div class="label"><span class="label-text">最大数据包</span></div><select class="select select-bordered w-full select-sm" bind:value={mc.maxAllowedPacket}>{#each sizeOptions as opt}<option>{opt}</option>{/each}</select><div class="label"><span class="label-text-alt text-base-content/50">{getRecommendedHint('maxAllowedPacket', '大字段/包提交相关')}</span></div></label>
@@ -293,13 +293,13 @@ run(() => {
             <label class="form-control w-full"><div class="label"><span class="label-text">连接缓冲区</span></div><select class="select select-bordered w-full select-sm" bind:value={mc.joinBufferSize}>{#each sizeOptions as opt}<option>{opt}</option>{/each}</select><div class="label"><span class="label-text-alt text-base-content/50">{getRecommendedHint('joinBufferSize')}</span></div></label>
           </div>
           <div class="grid grid-cols-2 gap-3">
-            <label class="form-control w-full"><div class="label"><span class="label-text">超时等待(秒)</span></div><input class="input input-bordered w-full input-sm" type="number" min="10" max="86400" value={intVal('waitTimeout')} onchange={e => mc.waitTimeout = String(e.target.value)} /><div class="label"><span class="label-text-alt text-base-content/50">{getRecommendedHint('waitTimeout', '空闲连接超时')}</span></div></label>
+            <label class="form-control w-full"><div class="label"><span class="label-text">超时等待(秒)</span></div><input class="input input-bordered w-full input-sm" type="number" min="10" max="86400" value={intVal('waitTimeout')} onchange={e => (mc.waitTimeout = String((e.currentTarget as HTMLInputElement).value))} /><div class="label"><span class="label-text-alt text-base-content/50">{getRecommendedHint('waitTimeout', '空闲连接超时')}</span></div></label>
             <div class="flex items-end gap-3 pb-1">
               <label class="flex items-center gap-2 cursor-pointer">
-                <input type="checkbox" class="toggle toggle-sm toggle-primary" checked={boolVal('slowQueryLog')} onchange={e => mc.slowQueryLog = String(e.target.checked)} />
+                <input type="checkbox" class="toggle toggle-sm toggle-primary" checked={boolVal('slowQueryLog')} onchange={e => (mc.slowQueryLog = String((e.currentTarget as HTMLInputElement).checked))} />
                 <div><span class="text-sm">慢查询日志</span></div>
               </label>
-              <label class="form-control flex-1"><div class="label"><span class="label-text">慢查询阈值(秒)</span></div><input class="input input-bordered w-full input-sm" type="number" min="1" max="60" value={intVal('longQueryTime')} onchange={e => mc.longQueryTime = String(e.target.value)} /></label>
+              <label class="form-control flex-1"><div class="label"><span class="label-text">慢查询阈值(秒)</span></div><input class="input input-bordered w-full input-sm" type="number" min="1" max="60" value={intVal('longQueryTime')} onchange={e => (mc.longQueryTime = String((e.currentTarget as HTMLInputElement).value))} /></label>
             </div>
           </div>
         </div>

@@ -191,13 +191,13 @@ func (i *RedisInstance) Stop(ctx context.Context) error {
 
 	i.status = core.StatusStopping
 
-	// 只停止属于本实例的进程：自管 pid，以及端口上可执行路径位于本版本目录内的进程。
+	// 收集属于本实例的进程（只收集不杀）。
 	targets := make(map[int]struct{})
 	if i.pid > 0 {
 		targets[i.pid] = struct{}{}
 	}
 	if i.pid <= 0 {
-		if pid := stopOwnedProcessByPort(i.port, i.redisDir); pid > 0 {
+		if pid := ownedPIDByPort(i.port, i.redisDir); pid > 0 {
 			targets[pid] = struct{}{}
 		}
 	}
@@ -209,13 +209,34 @@ func (i *RedisInstance) Stop(ctx context.Context) error {
 		return nil
 	}
 
-	for pid := range targets {
-		i.pm.Stop(pid)
+	// 1. 优雅停止：redis-cli -p <port> shutdown。
+	//    Redis 会触发 RDB save（若配置了 save 规则）后退出，避免强杀丢未持久化数据。
+	//    忽略错误：redis-cli 不存在或网络异常时失败，由兜底强杀覆盖。
+	redisCliExe := filepath.Join(i.redisDir, "redis-cli.exe")
+	if fileExists(redisCliExe) {
+		_ = runStopCommand(redisCliExe, []string{
+			"-p", fmt.Sprintf("%d", i.port),
+			"shutdown",
+		}, i.redisDir)
 	}
 
-	// 停止成功的判定以本实例进程是否退出为准，而非端口是否释放
-	if remaining := waitProcessesExited(targets, 5*time.Second); len(remaining) > 0 {
-		return fmt.Errorf("Redis stop failed: process still running (pid %s)", pidList(remaining))
+	// 2. 等待本实例进程退出（8s）。判据=进程退出，不用端口是否释放。
+	remaining := waitProcessesExited(targets, 8*time.Second)
+	if len(remaining) == 0 {
+		i.pid = 0
+		i.status = core.StatusStopped
+		return nil
+	}
+
+	// 3. 兜底强杀：pm.Stop 已是 taskkill /F /T。
+	var lastErr error
+	for pid := range remaining {
+		if err := i.pm.Stop(pid); err != nil {
+			lastErr = err
+		}
+	}
+	if rem2 := waitProcessesExited(remaining, 3*time.Second); len(rem2) > 0 {
+		return fmt.Errorf("Redis 停止失败: 进程 %s 未退出（优雅停止超时后强制终止仍失败，可能权限不足）: %v", pidList(rem2), lastErr)
 	}
 
 	i.pid = 0

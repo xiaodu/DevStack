@@ -2,13 +2,14 @@
 import { createEventDispatcher, onMount } from 'svelte'
 import { api } from '../lib/api'
 import { safeInvoke } from '../lib/safeInvoke'
+import type { runtime } from '../../wailsjs/go/models'
 
 let { service } = $props()
 const dispatch = createEventDispatcher()
 
-let pc = $state({})
+let pc = $state<Record<string, any>>({})
 let configLoading = $state(false)
-let extensions = $state([])
+let extensions = $state<runtime.PHPExtensionInfo[]>([])
 let extLoading = $state(false)
 let extSearch = $state('')
 let enabledSet = $state(new Set())

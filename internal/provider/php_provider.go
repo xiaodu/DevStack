@@ -276,13 +276,13 @@ func (i *PHPInstance) Stop(ctx context.Context) error {
 
 	i.status = core.StatusStopping
 
-	// 只停止属于本实例的进程：自管 pid，以及端口上可执行路径位于本版本目录内的进程。
+	// 收集属于本实例的进程（只收集不杀）。
 	targets := make(map[int]struct{})
 	if i.pid > 0 {
 		targets[i.pid] = struct{}{}
 	}
 	if i.pid <= 0 {
-		if pid := stopOwnedProcessByPort(i.port, i.phpDir); pid > 0 {
+		if pid := ownedPIDByPort(i.port, i.phpDir); pid > 0 {
 			targets[pid] = struct{}{}
 		}
 	}
@@ -294,13 +294,18 @@ func (i *PHPInstance) Stop(ctx context.Context) error {
 		return nil
 	}
 
+	// php-cgi（-b FastCGI 模式）无自带优雅停止命令，直接终止进程。
+	// pm.Stop 已是 taskkill /F /T，递归杀子进程（php-cgi -b 模式通常单进程，/T 无害）。
+	var lastErr error
 	for pid := range targets {
-		i.pm.Stop(pid)
+		if err := i.pm.Stop(pid); err != nil {
+			lastErr = err
+		}
 	}
 
-	// 停止成功的判定以本实例进程是否退出为准，而非端口是否释放
+	// 等待本实例进程退出（5s）。判据=进程退出，不用端口是否释放。
 	if remaining := waitProcessesExited(targets, 5*time.Second); len(remaining) > 0 {
-		return fmt.Errorf("PHP stop failed: process still running (pid %s)", pidList(remaining))
+		return fmt.Errorf("PHP 停止失败: 进程 %s 未退出（强制终止仍失败，可能权限不足）: %v", pidList(remaining), lastErr)
 	}
 
 	i.pid = 0

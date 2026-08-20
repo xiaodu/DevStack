@@ -3,23 +3,11 @@ import { createBubbler, stopPropagation } from 'svelte/legacy'
 
 const bubble = createBubbler()
 
-import { onMount } from 'svelte'
 import { fade } from 'svelte/transition'
 import { nanoLoading, nanoStatusMsg, statusMessage } from '../lib/stores'
 
-let safetyTimer
-
-onMount(() => {
-  // 安全定时器：8 秒后强制关闭加载状态，防止 nanoLoading 永久卡住
-  safetyTimer = setInterval(() => {
-    if ($nanoLoading) {
-      console.warn('[GlobalLoading] 安全定时器触发，强制关闭加载状态')
-      nanoLoading.set(false)
-      nanoStatusMsg.set('')
-    }
-  }, 8000)
-  return () => clearInterval(safetyTimer)
-})
+// 加载状态的清理统一由 safeInvoke（15s 安全超时 + finally 复位）与 runOperation（60s 看门狗）负责，
+// 无需此处 8s 强制清 loading —— 旧 timer 会与上述超时打架，提前误关遮罩（F9）。
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->

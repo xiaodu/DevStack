@@ -9,6 +9,7 @@ import (
 	"syscall"
 
 	"github.com/xiaodu/DevStack/internal/config"
+	"github.com/xiaodu/DevStack/internal/core"
 	"github.com/xiaodu/DevStack/internal/process"
 	"github.com/xiaodu/DevStack/internal/resource"
 )
@@ -20,40 +21,14 @@ func (h *MySQLHandler) Configure(s *ServiceInstance, cfg *config.Config, resMgr 
 	mysqlDir := filepath.Join(installDir, "programs", "mysql", s.Info.Version)
 	dataDir := filepath.Join(installDir, "data", "mysql", s.Info.Version)
 
+	port := s.Info.Port
+	if port == 0 {
+		port = cfg.Get().MySQLConfig.Port
+	}
+
 	myIni := filepath.Join(mysqlDir, "my.ini")
 	if !fileExists(myIni) {
-		ini := fmt.Sprintf(`[mysqld]
-basedir=%s
-datadir=%s
-port=%d
-bind-address=127.0.0.1
-skip-networking=0
-log-error=error.log
-general_log=0
-
-character-set-server=utf8mb4
-collation-server=utf8mb4_unicode_ci
-sql-mode=STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION
-skip-name-resolve=0
-
-slow_query_log=0
-long_query_time=2
-
-innodb_buffer_pool_size = 256M
-innodb_log_file_size = 64M
-innodb_flush_log_at_trx_commit = 2
-max_connections = 50
-tmp_table_size = 64M
-max_heap_table_size = 64M
-thread_cache_size = 8
-table_open_cache = 400
-
-max_allowed_packet = 16M
-key_buffer_size = 64M
-sort_buffer_size = 2M
-join_buffer_size = 2M
-wait_timeout = 28800
-`, mysqlDir, dataDir, s.Info.Port)
+		ini := buildMySQLIni(cfg.Get().MySQLConfig, mysqlDir, dataDir, port)
 		if err := os.WriteFile(myIni, []byte(ini), 0644); err != nil {
 			return err
 		}
@@ -193,47 +168,7 @@ func (h *MySQLHandler) SaveConfig(s *ServiceInstance, cfg *config.Config, values
 	}
 
 	myIni := filepath.Join(mysqlDir, "my.ini")
-	ini := fmt.Sprintf(`[mysqld]
-basedir=%s
-datadir=%s
-port=%d
-bind-address=%s
-skip-networking=0
-log-error=error.log
-general_log=%d
-
-character-set-server=%s
-collation-server=%s
-sql-mode=%s
-skip-name-resolve=%d
-
-slow_query_log=%d
-long_query_time=%d
-
-innodb_buffer_pool_size = %s
-innodb_log_file_size = %s
-innodb_flush_log_at_trx_commit = %d
-max_connections = %d
-tmp_table_size = %s
-max_heap_table_size = %s
-thread_cache_size = %d
-table_open_cache = %d
-
-max_allowed_packet = %s
-key_buffer_size = %s
-sort_buffer_size = %s
-join_buffer_size = %s
-wait_timeout = %d
-`, mysqlDir, dataDir, mc.Port, mc.BindAddress,
-		boolInt(mc.GeneralLog),
-		mc.CharacterSet, mc.Collation, mc.SQLMode, boolInt(mc.SkipNameResolve),
-		boolInt(mc.SlowQueryLog), mc.LongQueryTime,
-		mc.InnoDBBufferPoolSize, mc.InnoDBLogFileSize, mc.InnoDBFlushLogAtTrxCommit,
-		mc.MaxConnections, mc.TmpTableSize, mc.MaxHeapTableSize,
-		mc.ThreadCacheSize, mc.TableOpenCache,
-		mc.MaxAllowedPacket, mc.KeyBufferSize, mc.SortBufferSize, mc.JoinBufferSize,
-		mc.WaitTimeout)
-
+	ini := buildMySQLIni(mc, mysqlDir, dataDir, mc.Port)
 	if err := os.WriteFile(myIni, []byte(ini), 0644); err != nil {
 		return err
 	}
@@ -267,6 +202,7 @@ func (h *MySQLHandler) setPassword(s *ServiceInstance, cfg *config.Config, newPa
 
 	sql := buildSetPasswordSQL(s.Info.Version, newPassword)
 	args := []string{
+		"--host=127.0.0.1",
 		fmt.Sprintf("--port=%d", port),
 		"-u", "root",
 		"-e", sql,
@@ -281,11 +217,55 @@ func (h *MySQLHandler) setPassword(s *ServiceInstance, cfg *config.Config, newPa
 	return nil
 }
 
+func buildMySQLIni(mc core.MySQLSettings, mysqlDir, dataDir string, port int) string {
+	return fmt.Sprintf(`[mysqld]
+basedir=%s
+datadir=%s
+port=%d
+bind-address=%s
+skip-networking=0
+log-error=error.log
+general_log=%d
+
+character-set-server=%s
+collation-server=%s
+sql-mode=%s
+skip-name-resolve=%d
+explicit_defaults_for_timestamp=1
+
+slow_query_log=%d
+long_query_time=%d
+
+innodb_buffer_pool_size = %s
+innodb_log_file_size = %s
+innodb_flush_log_at_trx_commit = %d
+max_connections = %d
+tmp_table_size = %s
+max_heap_table_size = %s
+thread_cache_size = %d
+table_open_cache = %d
+
+max_allowed_packet = %s
+key_buffer_size = %s
+sort_buffer_size = %s
+join_buffer_size = %s
+wait_timeout = %d
+`, mysqlDir, dataDir, port, mc.BindAddress,
+		boolInt(mc.GeneralLog),
+		mc.CharacterSet, mc.Collation, mc.SQLMode, boolInt(mc.SkipNameResolve),
+		boolInt(mc.SlowQueryLog), mc.LongQueryTime,
+		mc.InnoDBBufferPoolSize, mc.InnoDBLogFileSize, mc.InnoDBFlushLogAtTrxCommit,
+		mc.MaxConnections, mc.TmpTableSize, mc.MaxHeapTableSize,
+		mc.ThreadCacheSize, mc.TableOpenCache,
+		mc.MaxAllowedPacket, mc.KeyBufferSize, mc.SortBufferSize, mc.JoinBufferSize,
+		mc.WaitTimeout)
+}
+
 func buildSetPasswordSQL(version, password string) string {
 	if isMySQL8OrAbove(version) {
-		return fmt.Sprintf("ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '%s';", password)
+		return fmt.Sprintf("ALTER USER 'root'@'127.0.0.1' IDENTIFIED WITH mysql_native_password BY '%s'; ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '%s';", password, password)
 	}
-	return fmt.Sprintf("SET PASSWORD FOR 'root'@'localhost' = PASSWORD('%s');", password)
+	return fmt.Sprintf("SET PASSWORD FOR 'root'@'127.0.0.1' = PASSWORD('%s'); SET PASSWORD FOR 'root'@'localhost' = PASSWORD('%s');", password, password)
 }
 
 func isMySQL8OrAbove(version string) bool {

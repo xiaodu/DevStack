@@ -88,6 +88,8 @@ function switchTab(tab) {
 }
 
 $effect(() => {
+  // 读取 logEntries 建立依赖：日志内容更新后自动滚动到底部（F10）
+  logEntries
   if (autoScroll && logContainer) logContainer.scrollTop = logContainer.scrollHeight
 })
 

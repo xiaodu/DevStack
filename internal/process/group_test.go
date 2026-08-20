@@ -238,3 +238,66 @@ func TestProcessRunning(t *testing.T) {
 		t.Error("PID 99999 should not be running")
 	}
 }
+
+func TestGroupAssignPID(t *testing.T) {
+	group, err := NewGroup("test-assign")
+	if err != nil {
+		t.Fatalf("NewGroup failed: %v", err)
+	}
+	defer group.Close()
+
+	// 启动一个长时间运行的进程
+	proc, err := group.Start("ping", "ping.exe", []string{"-n", "30", "127.0.0.1"}, nil, ".", 5)
+	if err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	pid := proc.PID
+
+	// 关闭 group（终止进程）
+	if err := group.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	// 等待进程退出
+	time.Sleep(1 * time.Second)
+	if IsProcessRunning(pid) {
+		t.Fatalf("ping PID=%d should have been killed", pid)
+	}
+
+	// 创建新的 group2，启动一个不属于任何 job 的进程（模拟 provider 启动的进程）
+	group2, err := NewGroup("test-assign-2")
+	if err != nil {
+		t.Fatalf("NewGroup failed: %v", err)
+	}
+	defer group2.Close()
+
+	proc2, err := group2.Start("ping2", "ping.exe", []string{"-n", "30", "127.0.0.1"}, nil, ".", 5)
+	if err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	pid2 := proc2.PID
+
+	// 用另一个 group 将该进程纳入管理
+	group3, err := NewGroup("test-assign-3")
+	if err != nil {
+		t.Fatalf("NewGroup failed: %v", err)
+	}
+
+	if err := group3.AssignPID(pid2, "ping2-assigned", 5); err != nil {
+		t.Fatalf("AssignPID failed: %v", err)
+	}
+
+	// 验证进程已加入 group3
+	if !group3.HasPID(pid2) {
+		t.Errorf("AssignPID: PID %d should be in group", pid2)
+	}
+
+	// 通过 group2 关闭（group2 是原始 group，仍持有进程句柄）
+	if err := group2.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+	time.Sleep(1 * time.Second)
+	if IsProcessRunning(pid2) {
+		t.Errorf("ping PID=%d should have been killed", pid2)
+	}
+}

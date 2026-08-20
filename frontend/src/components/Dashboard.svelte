@@ -13,9 +13,9 @@ import {
   statusMessage,
 } from '../lib/stores'
 
-let services = $state([])
-let runtimes = $state([])
-let sites = $state([])
+let services = $state<any[]>([])
+let runtimes = $state<any[]>([])
+let sites = $state<any[]>([])
 let hasLoaded = $state(false)
 let loadError = $state(false)
 let envSummary = $state({
@@ -23,22 +23,22 @@ let envSummary = $state({
   runtimes: { total: 0, running: 0 },
   projects: { total: 0, enabled: 0 },
 })
-let lastSnapshot = $state(null)
-let ops = $state([])
-let activeEnv = $state(null)
-let profiles = $state([])
+let lastSnapshot = $state<any>(null)
+let ops = $state<any[]>([])
+let activeEnv = $state<any>(null)
+let profiles = $state<any[]>([])
 
 // 并发去重标志：防止 refreshSignal 频繁触发导致多个 load() 并发执行
 let isLoading = false
 
-const serviceMeta = {
+const serviceMeta: Record<string, any> = {
   nginx: { label: 'Nginx', cls: 'icon-nginx', color: '#009639' },
   mysql: { label: 'MySQL', cls: 'icon-mysql', color: '#4479A1' },
   redis: { label: 'Redis', cls: 'icon-redis', color: '#DC382D' },
 }
 
 // 运行时颜色（用于卡片顶部色条和图标背景）
-const runtimeMeta = {
+const runtimeMeta: Record<string, any> = {
   php: { color: '#777BB4', label: 'PHP', cls: 'icon-php1' },
   node: { color: '#339933', label: 'Node.js', cls: 'icon-Nodejs' },
   python: { color: '#3776AB', label: 'Python', cls: 'icon-python' },
@@ -73,8 +73,8 @@ async function load(silent = false) {
   }, 10000)
 
   try {
-    const timeout = (ms) => new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), ms))
-    const wrap = (p, fallback) => Promise.race([p, timeout(8000)]).catch(() => fallback)
+    const timeout = (ms: number) => new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), ms))
+    const wrap = (p: Promise<any>, fallback: any) => Promise.race([p, timeout(8000)]).catch(() => fallback)
     const [s, r, st, opEntries, env, snaps, profileList] = await Promise.all([
       wrap(api.getServices(), []),
       wrap(api.getRuntimes(), []),
@@ -96,13 +96,13 @@ async function load(silent = false) {
     ops = opEntries || []
     activeEnv = env
     profiles = profileList || []
-    const svcEntries = Object.entries(env?.services || {})
-    const rtEntries = Object.entries(env?.runtimes || {})
-    const projEntries = Object.entries(env?.projects || {})
+    const svcEntries = Object.entries((env as any)?.services || {})
+    const rtEntries = Object.entries((env as any)?.runtimes || {})
+    const projEntries = Object.entries((env as any)?.projects || {})
     envSummary = {
-      services: { total: svcEntries.length, running: svcEntries.filter(([, v]) => v.state === 'running').length },
-      runtimes: { total: rtEntries.length, running: rtEntries.filter(([, v]) => v.state === 'running').length },
-      projects: { total: projEntries.length, enabled: projEntries.filter(([, v]) => v.enabled).length },
+services: { total: svcEntries.length, running: svcEntries.filter(([, v]: [string, any]) => v.state === 'running').length },
+      runtimes: { total: rtEntries.length, running: rtEntries.filter(([, v]: [string, any]) => v.state === 'running').length },
+      projects: { total: projEntries.length, enabled: projEntries.filter(([, v]: [string, any]) => v.enabled).length },
     }
     lastSnapshot = snaps?.length > 0 ? snaps[snaps.length - 1] : null
     hasLoaded = true
@@ -129,18 +129,18 @@ async function load(silent = false) {
 
 // 根据当前激活的环境模板，构建需要展示的卡片列表
 // 环境模板（profile.units）声明了组件清单，实际运行状态从服务/运行时列表匹配
-function buildActiveCards(env, profileList, svcList, rtList) {
-  const cards = []
+function buildActiveCards(env: any, profileList: any[], svcList: any[], rtList: any[]) {
+  const cards: any[] = []
   if (!env || !env.activeProfileID || !profileList) return cards
 
-  const profile = profileList.find((p) => p.id === env.activeProfileID)
+  const profile = profileList.find((p: any) => p.id === env.activeProfileID)
   if (!profile) return cards
 
   const units = Array.isArray(profile.units) ? profile.units : []
   for (const u of units) {
     const id = `${u.kind}@${u.version}`
     if (u.kind === 'php' || u.kind === 'node' || u.kind === 'python') {
-      const rt = rtList.find((r) => r.id === id)
+      const rt = rtList.find((r: any) => r.id === id)
       const meta = runtimeMeta[u.kind] || {}
       const name = meta.label ? `${meta.label} ${u.version}` : u.name || `${u.kind} ${u.version}`
       cards.push({
@@ -153,7 +153,7 @@ function buildActiveCards(env, profileList, svcList, rtList) {
         color: (runtimeMeta[u.kind] || {}).color || 'var(--color-primary)',
       })
     } else {
-      const svc = svcList.find((s) => s.id === id)
+      const svc = svcList.find((s: any) => s.id === id)
       const name = svc?.name || u.name || u.kind
       cards.push({
         name,
@@ -163,6 +163,7 @@ function buildActiveCards(env, profileList, svcList, rtList) {
         status: svc?.status || 'stopped',
         installed: svc?.installed ?? false,
         color: (serviceMeta[u.kind] || {}).color || 'var(--color-primary)',
+        error: svc?.error || '',
       })
     }
   }
@@ -173,29 +174,30 @@ function buildActiveCards(env, profileList, svcList, rtList) {
 // 响应式：当 activeEnv/profiles/services/runtimes 变化时重新计算卡片
 let activeCards = $derived(buildActiveCards(activeEnv, profiles, services, runtimes))
 
-function statusLabel(s) {
+function statusLabel(s: string) {
   if (s === 'running') return '运行中'
   if (s === 'stopped') return '已停止'
-  if (s === 'starting') return '启动中'
-  if (s === 'stopping') return '停止中'
-  return '错误'
+  if (s === 'starting') return '启动中...'
+  if (s === 'stopping') return '停止中...'
+  if (s === 'error') return '错误'
+  return '未知'
 }
 
-function statusDotCls(s) {
+function statusDotCls(s: string) {
   if (s === 'running') return 'bg-success'
   if (s === 'starting' || s === 'stopping') return 'bg-warning animate-pulse'
   if (s === 'error') return 'bg-error'
   return 'bg-base-content/40'
 }
 
-function statusTextCls(s) {
+function statusTextCls(s: string) {
   if (s === 'running') return 'text-success'
   if (s === 'starting' || s === 'stopping') return 'text-warning'
   if (s === 'error') return 'text-error'
   return 'text-base-content/40'
 }
 
-function cardBorderCls(s) {
+function cardBorderCls(s: string) {
   if (s === 'running') return 'border-success'
   if (s === 'starting' || s === 'stopping') return 'border-warning'
   if (s === 'error') return 'border-error'
@@ -251,7 +253,7 @@ onMount(() => {
           </div>
         {:else}
           {#each activeCards as card}
-            <div class="relative bg-base-200 rounded-lg border border-base-300 overflow-hidden {cardBorderCls(card.status)}">
+            <div class="relative bg-base-200 rounded-lg border border-base-300 overflow-hidden {cardBorderCls(card.status)}" title={card.error || ''}>
               <div class="h-0.5 w-full" style="background:{card.color}"></div>
               <div class="flex items-center gap-3 p-3">
                 <div class="w-9 h-9 rounded-full flex items-center justify-center text-white shrink-0" style="background:{card.color}">
@@ -273,6 +275,9 @@ onMount(() => {
                       <span class="{statusTextCls(card.status)}">{statusLabel(card.status)}</span>
                     {/if}
                   </div>
+                  {#if card.status === 'error' && card.error}
+                    <div class="text-xs text-error/80 mt-1 truncate" title={card.error}>{card.error}</div>
+                  {/if}
                 </div>
               </div>
             </div>
@@ -316,7 +321,7 @@ onMount(() => {
     {:else if loadError}
       <div class="flex flex-col items-center justify-center py-8 text-base-content/60 text-sm gap-2">
         <p>数据加载失败或超时</p>
-        <button class="btn btn-xs btn-ghost text-primary" onclick={load}>重试</button>
+        <button class="btn btn-xs btn-ghost text-primary" onclick={() => load()}>重试</button>
       </div>
     {:else if sites.length === 0}
       <div class="flex flex-col items-center justify-center py-8 text-base-content/60 text-sm">

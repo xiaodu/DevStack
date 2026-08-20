@@ -31,6 +31,7 @@ type VersionInfo struct {
 	URL      string `json:"url"`
 	Mirror   string `json:"mirror,omitempty"`
 	FileName string `json:"fileName"`
+	Checksum string `json:"checksum,omitempty"`
 }
 
 type PackageDef struct {

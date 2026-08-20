@@ -3,6 +3,8 @@ package download
 import (
 	"archive/zip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -248,6 +250,25 @@ func detectSingleRootDir(entries []*zip.File) string {
 	return ""
 }
 
+// verifySHA256 计算文件的 SHA256 并与期望值比较。不匹配则返回错误。
+func verifySHA256(filePath, expected string) error {
+	f, err := os.Open(filePath)
+	if err != nil {
+		return fmt.Errorf("打开文件校验失败: %w", err)
+	}
+	defer f.Close()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return fmt.Errorf("计算校验值失败: %w", err)
+	}
+	actual := hex.EncodeToString(h.Sum(nil))
+	if !strings.EqualFold(actual, expected) {
+		return fmt.Errorf("文件校验失败: 期望 %s，实际 %s", expected, actual)
+	}
+	return nil
+}
+
 func (m *Manager) DownloadAndExtract(url, destDir string, callback ProgressCallback) error {
 	return m.TryDownloadAndExtract("download", []string{url}, destDir, callback)
 }
@@ -255,7 +276,8 @@ func (m *Manager) DownloadAndExtract(url, destDir string, callback ProgressCallb
 // TryDownloadAndExtract 按 key 下载并解压到 destDir。
 // key 用于下载进度与取消绑定；同 key 重复调用会覆盖进度与取消句柄（由调用方负责单飞去重）。
 // 仅在 destDir 本次新建时才在失败回滚中删除它，避免误删既有安装目录。
-func (m *Manager) TryDownloadAndExtract(key string, urls []string, destDir string, callback ProgressCallback) error {
+// expectedChecksum 为 SHA256 hex；若为空则跳过校验。
+func (m *Manager) TryDownloadAndExtract(key string, urls []string, destDir string, callback ProgressCallback, expectedChecksum ...string) error {
 	_, statErr := os.Stat(destDir)
 	created := os.IsNotExist(statErr)
 
@@ -283,6 +305,12 @@ func (m *Manager) TryDownloadAndExtract(key string, urls []string, destDir strin
 		Step("download-package", func(_ context.Context) error {
 			zipPath = filepath.Join(destDir, "package.zip")
 			return m.tryDownload(dlCtx, urls, zipPath, callback)
+		}, compensator.DeleteFile(zipPath)).
+		Step("verify-checksum", func(_ context.Context) error {
+			if len(expectedChecksum) == 0 || expectedChecksum[0] == "" {
+				return nil
+			}
+			return verifySHA256(zipPath, expectedChecksum[0])
 		}, compensator.DeleteFile(zipPath)).
 		Step("extract-package", func(ctx context.Context) error {
 			return m.ExtractZip(zipPath, destDir)
@@ -312,6 +340,7 @@ func (m *Manager) getVersions(serviceType string) []ReleaseInfo {
 			URL:       v.URL,
 			MirrorURL: v.Mirror,
 			FileName:  v.FileName,
+			Checksum:  v.Checksum,
 		}
 	}
 	return out

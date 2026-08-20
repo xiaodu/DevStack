@@ -202,6 +202,62 @@ func (g *Group) Start(name, executable string, args []string, env []string, work
 	return proc, nil
 }
 
+// AssignPID 将已运行的进程加入 Job Object
+//
+// 用于 provider 已启动进程后，将其纳入 Job Object 管理。
+// 进程退出后自动从进程表中移除。
+func (g *Group) AssignPID(pid int, name string, graceSecs int) error {
+	g.mu.Lock()
+	if g.closed {
+		g.mu.Unlock()
+		return fmt.Errorf("进程组 %s 已关闭", g.name)
+	}
+	g.mu.Unlock()
+
+	if graceSecs <= 0 {
+		graceSecs = 5
+	}
+
+	if !isProcessRunning(pid) {
+		return fmt.Errorf("进程 %d 不存在或已退出", pid)
+	}
+
+	// 将进程加入 Job Object
+	if err := g.assignProcess(pid); err != nil {
+		return fmt.Errorf("将进程 %s (PID=%d) 加入进程组失败: %w", name, pid, err)
+	}
+
+	proc := &GroupProc{
+		PID:       pid,
+		Name:      name,
+		Started:   time.Now(),
+		GraceSecs: graceSecs,
+	}
+
+	g.mu.Lock()
+	g.procs[pid] = proc
+	g.mu.Unlock()
+
+	// 后台等待进程退出，从进程表中移除
+	go func() {
+		for isProcessRunning(pid) {
+			time.Sleep(500 * time.Millisecond)
+		}
+		g.mu.Lock()
+		delete(g.procs, pid)
+		g.mu.Unlock()
+	}()
+
+	return nil
+}
+
+// ReleasePID 从 Job Object 中移除进程（不终止进程）
+func (g *Group) ReleasePID(pid int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	delete(g.procs, pid)
+}
+
 // assignProcess 将进程加入 Job Object
 //
 // 原理：调用 Windows API AssignProcessToJobObject，

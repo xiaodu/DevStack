@@ -115,6 +115,16 @@ func (g *DependencyGraph) RemoveNode(id string) {
 		}
 		g.edges[from] = filtered
 	}
+
+	for key, sources := range g.rev {
+		filtered := sources[:0]
+		for _, s := range sources {
+			if s != id {
+				filtered = append(filtered, s)
+			}
+		}
+		g.rev[key] = filtered
+	}
 }
 
 func (g *DependencyGraph) DependenciesOf(id string) []string {
@@ -185,47 +195,6 @@ func (g *DependencyGraph) TopologicalSort() ([]string, error) {
 
 	if len(result) != len(g.nodes) {
 		return nil, fmt.Errorf("依赖图中存在环，无法拓扑排序")
-	}
-
-	return result, nil
-}
-
-func (g *DependencyGraph) GetStartOrder() ([]string, error) {
-	g.mu.RLock()
-	defer g.mu.RUnlock()
-
-	inDegree := make(map[string]int)
-	for id := range g.nodes {
-		inDegree[id] = len(g.edges[id])
-	}
-
-	queue := make([]string, 0)
-	for id, deg := range inDegree {
-		if deg == 0 {
-			queue = append(queue, id)
-		}
-	}
-	sort.Strings(queue)
-
-	result := make([]string, 0, len(g.nodes))
-	for len(queue) > 0 {
-		current := queue[0]
-		queue = queue[1:]
-		result = append(result, current)
-
-		for _, dependent := range g.rev[current] {
-			inDegree[dependent]--
-			if inDegree[dependent] == 0 {
-				idx := sort.SearchStrings(queue, dependent)
-				queue = append(queue, "")
-				copy(queue[idx+1:], queue[idx:])
-				queue[idx] = dependent
-			}
-		}
-	}
-
-	if len(result) != len(g.nodes) {
-		return nil, fmt.Errorf("依赖图中存在环")
 	}
 
 	return result, nil

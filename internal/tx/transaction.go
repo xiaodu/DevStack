@@ -144,7 +144,10 @@ func (t *Transaction) Rollback() error {
 	var errs []error
 	for i := len(t.steps) - 1; i >= 0; i-- {
 		step := t.steps[i]
-		if !step.executed || step.compensate == nil {
+		t.mu.RLock()
+		executed := step.executed
+		t.mu.RUnlock()
+		if !executed || step.compensate == nil {
 			continue
 		}
 

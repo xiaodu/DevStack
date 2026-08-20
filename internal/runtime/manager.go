@@ -159,46 +159,66 @@ func (m *Manager) scan() {
 
 func (m *Manager) Start(id string) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	inst, ok := m.instances[id]
 	if !ok {
+		m.mu.Unlock()
 		return core.ErrRuntimeNotFound
 	}
 	if inst.Info.Status == core.StatusRunning {
+		m.mu.Unlock()
 		return nil
 	}
+	inst.Info.Status = core.StatusStarting
+	m.mu.Unlock()
 
+	var err error
 	switch inst.Info.Type {
 	case core.RuntimePHP:
-		return m.startPHP(inst)
+		err = m.startPHP(inst)
 	case core.RuntimeNode:
-		return m.startNode(inst)
+		err = m.startNode(inst)
 	default:
-		return fmt.Errorf("不支持的运行时类型: %s", inst.Info.Type)
+		err = fmt.Errorf("不支持的运行时类型: %s", inst.Info.Type)
 	}
+
+	if err != nil {
+		m.mu.Lock()
+		inst.Info.Status = core.StatusError
+		m.mu.Unlock()
+	}
+	return err
 }
 
 func (m *Manager) Stop(id string) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	inst, ok := m.instances[id]
 	if !ok {
+		m.mu.Unlock()
 		return core.ErrRuntimeNotFound
 	}
 	if inst.Info.Status == core.StatusStopped {
+		m.mu.Unlock()
 		return nil
 	}
+	inst.Info.Status = core.StatusStopping
+	m.mu.Unlock()
 
+	var err error
 	switch inst.Info.Type {
 	case core.RuntimePHP:
-		return m.stopPHP(inst)
+		err = m.stopPHP(inst)
 	case core.RuntimeNode:
-		return m.stopNode(inst)
+		err = m.stopNode(inst)
 	default:
-		return fmt.Errorf("不支持的运行时类型: %s", inst.Info.Type)
+		err = fmt.Errorf("不支持的运行时类型: %s", inst.Info.Type)
 	}
+
+	if err != nil {
+		m.mu.Lock()
+		inst.Info.Status = core.StatusError
+		m.mu.Unlock()
+	}
+	return err
 }
 
 func (m *Manager) Scan() {

@@ -5,15 +5,16 @@ import { useDownloadProgress } from '../lib/events'
 import { safeInvoke } from '../lib/safeInvoke'
 import { addToast } from '../lib/stores'
 
-let packages = $state([])
+let packages = $state<any[]>([])
 let selected = $state('all')
-let installing = $state({})
-let uninstalling = $state({})
+let installing = $state<Record<string, any>>({})
+let cancelling = $state<Record<string, boolean>>({}) // 取消进行中：保持 installing=true 直到原 promise 结束（F12）
+let uninstalling = $state<Record<string, any>>({})
 let loading = $state(true)
-let installProgress = {} // { 'nginx-1.24.0': { downloaded: 0, total: 0 } }
-let installElapsed = $state({}) // { 'nginx-1.24.0': seconds }
-let elapsedTimer = null
-const cancelledInstalls = new Set() // 已取消的安装，下载结束后不再弹成功/失败提示
+let installProgress: Record<string, any> = {} // { 'nginx-1.24.0': { downloaded: 0, total: 0 } }
+let installElapsed = $state<Record<string, any>>({}) // { 'nginx-1.24.0': seconds }
+let elapsedTimer: ReturnType<typeof setInterval> | null = null
+const cancelledInstalls = new Set<string>() // 已取消的安装，下载结束后不再弹成功/失败提示
 
 const categories = [
   { id: 'all', label: '全部' },
@@ -23,7 +24,7 @@ const categories = [
   { id: 'service', label: '基础服务' },
 ]
 
-const serviceNames = {
+const serviceNames: Record<string, string> = {
   nginx: 'Nginx',
   apache: 'Apache',
   mysql: 'MySQL',
@@ -75,14 +76,14 @@ async function load() {
   }
 }
 
-function categoryFor(kind) {
+function categoryFor(kind: string) {
   if (kind === 'nginx' || kind === 'apache') return 'webserver'
   if (kind === 'mysql' || kind === 'postgresql' || kind === 'mongodb') return 'database'
   if (kind === 'redis' || kind === 'memcached') return 'service'
   return 'runtime'
 }
 
-function formatBytes(bytes) {
+function formatBytes(bytes: number) {
   if (!bytes || bytes <= 0) return '0 B'
   const units = ['B', 'KB', 'MB', 'GB']
   let i = 0
@@ -94,12 +95,12 @@ function formatBytes(bytes) {
   return `${size.toFixed(i === 0 ? 0 : 1)} ${units[i]}`
 }
 
-function formatElapsed(seconds) {
+function formatElapsed(seconds: number) {
   if (seconds < 60) return `${seconds}s`
   return `${Math.floor(seconds / 60)}m ${seconds % 60}s`
 }
 
-async function install(pkg) {
+async function install(pkg: any) {
   const key = `${pkg.id}-${pkg.version}`
   if (installing[key]) return
   cancelledInstalls.delete(key)
@@ -124,12 +125,13 @@ async function install(pkg) {
     await api.downloadService(pkg.id, pkg.version)
     if (cancelledInstalls.has(key)) return
     await load()
-    addToast(`${pkg.name} ${pkg.version} 安装成功`, 'success')
+    addToast(`${pkg.name} ${pkg.version} 安装成功`, 'success', 3500)
   } catch (e) {
     if (cancelledInstalls.has(key)) return
-    addToast(`安装 ${pkg.name} ${pkg.version} 失败: ${e.message || e}`, 'error')
+    addToast(`安装 ${pkg.name} ${pkg.version} 失败: ${(e as any)?.message || e}`, 'error', 3500)
   } finally {
     installing[key] = false
+    cancelling[key] = false
     delete installProgress[key]
     delete installElapsed[key]
     installProgress = { ...installProgress }
@@ -137,23 +139,25 @@ async function install(pkg) {
   }
 }
 
-function cancelInstall(pkg) {
+function cancelInstall(pkg: any) {
   const key = `${pkg.id}-${pkg.version}`
   if (!installing[key]) return
-  installing[key] = false
+  // 标记取消中：保持 installing[key]=true，直到原 downloadService promise 在 install() 的 finally 中结束，
+  // 避免取消期间再次点击触发第二次并发下载（F12）
+  cancelling[key] = true
   cancelledInstalls.add(key)
   delete installProgress[key]
   delete installElapsed[key]
   installProgress = { ...installProgress }
   packages = [...packages]
-  addToast(`已取消安装 ${pkg.name} ${pkg.version}`, 'warning')
+  addToast(`正在取消安装 ${pkg.name} ${pkg.version}`, 'warning', 3500)
 }
 
-function getProgress(key) {
+function getProgress(key: string) {
   return installProgress[key] || { downloaded: 0, total: 0 }
 }
 
-async function uninstall(pkg) {
+async function uninstall(pkg: any) {
   if (!confirm(`确定卸载 ${pkg.name} ${pkg.version}？`)) return
   const key = `${pkg.id}-${pkg.version}`
   uninstalling[key] = true
@@ -244,9 +248,14 @@ onMount(load)
                     {:else}
                       <button class="btn btn-ghost btn-sm text-error" onclick={() => uninstall(pkg)} title="卸载">🗑 卸载</button>
                     {/if}
-                  {:else if installing[key]}
-                    <button class="btn btn-ghost btn-sm text-warning" onclick={() => cancelInstall(pkg)} title="取消安装">取消</button>
+                {:else if installing[key]}
+                  {#if cancelling[key]}
+                    <span class="loading loading-spinner loading-xs"></span>
+                    <span class="text-xs text-warning">取消中…</span>
                   {:else}
+                    <button class="btn btn-ghost btn-sm text-warning" onclick={() => cancelInstall(pkg)} title="取消安装">取消</button>
+                  {/if}
+                {:else}
                     <button class="btn btn-primary btn-sm" onclick={() => install(pkg)} title="安装">下载</button>
                   {/if}
                 </div>

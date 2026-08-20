@@ -11,6 +11,7 @@ import (
 
 	"github.com/xiaodu/DevStack/internal/config"
 	"github.com/xiaodu/DevStack/internal/core"
+	"github.com/xiaodu/DevStack/internal/mysqlutil"
 	"github.com/xiaodu/DevStack/internal/process"
 )
 
@@ -133,6 +134,8 @@ default-time-zone='+08:00'
 character-set-server=utf8mb4
 collation-server=utf8mb4_unicode_ci
 init_connect='SET NAMES utf8mb4'
+skip-name-resolve=1
+explicit_defaults_for_timestamp=1
 
 innodb_buffer_pool_size=%s
 innodb_log_file_size=64M
@@ -211,11 +214,6 @@ func (i *MySQLInstance) Start(ctx context.Context) error {
 
 	i.status = core.StatusStarting
 
-	myiniPath := filepath.Join(i.mysqlDir, "conf", "my.ini")
-	if !fileExists(myiniPath) {
-		myiniPath = filepath.Join(i.mysqlDir, "my.ini")
-	}
-
 	// 数据目录不存在或为空时，先执行初始化，否则 mysqld 会立即退出
 	if !dirExists(i.dataDir) || isEmptyDir(i.dataDir) {
 		initCmd := &initCommand{mysqlExe: i.mysqlExe, dataDir: i.dataDir}
@@ -228,15 +226,61 @@ func (i *MySQLInstance) Start(ctx context.Context) error {
 	// 确保日志目录存在（my.ini 中 log_error/slow_query_log_file 指向此处）
 	os.MkdirAll(filepath.Join(i.mysqlDir, "logs"), 0755)
 
+	if err := i.startServer(); err != nil {
+		i.status = core.StatusError
+		return err
+	}
+
+	// 确保 root@127.0.0.1 存在：修复 "Host '127.0.0.1' is not allowed to connect"，
+	// 同时让 mysqladmin -h127.0.0.1 -uroot shutdown 的优雅关闭真正生效。
+	// 引导期间会短暂停掉刚启动的实例，healed=true 时需要重新拉起。
+	healed, err := mysqlutil.EnsureRootIPAccount(mysqlutil.Config{
+		MySQLDir: i.mysqlDir,
+		DataDir:  i.dataDir,
+		Port:     i.port,
+		Version:  i.version,
+		MyIni:    i.configPath(),
+	})
+	if err != nil {
+		i.status = core.StatusError
+		return err
+	}
+	if healed {
+		if err := i.startServer(); err != nil {
+			i.status = core.StatusError
+			return err
+		}
+	}
+
+	i.status = core.StatusRunning
+	i.startedAt = time.Now()
+	return nil
+}
+
+// configPath 返回本实例实际使用的服务器配置文件（conf/my.ini 优先，其次 my.ini），均不存在时返回空串。
+func (i *MySQLInstance) configPath() string {
+	myiniPath := filepath.Join(i.mysqlDir, "conf", "my.ini")
+	if !fileExists(myiniPath) {
+		myiniPath = filepath.Join(i.mysqlDir, "my.ini")
+	}
+	if !fileExists(myiniPath) {
+		return ""
+	}
+	return myiniPath
+}
+
+// startServer 启动正常 mysqld 实例并等待端口就绪，同步更新 i.pid。
+func (i *MySQLInstance) startServer() error {
 	args := []string{
-		fmt.Sprintf("--defaults-file=%s", myiniPath),
 		"--datadir=" + i.dataDir,
 		"--port=" + fmt.Sprintf("%d", i.port),
+	}
+	if cp := i.configPath(); cp != "" {
+		args = append([]string{"--defaults-file=" + cp}, args...)
 	}
 
 	pid, err := i.pm.Start("mysql", i.mysqlExe, args, nil, filepath.Dir(filepath.Dir(i.mysqlDir)))
 	if err != nil {
-		i.status = core.StatusError
 		return err
 	}
 
@@ -244,7 +288,7 @@ func (i *MySQLInstance) Start(ctx context.Context) error {
 		time.Sleep(500 * time.Millisecond)
 		if p := ownedPIDByPort(i.port, i.mysqlDir); p > 0 {
 			i.pid = p
-			break
+			return nil
 		}
 		// 端口被其它程序占用且不属于本实例：不接管，避免误杀外部进程
 		if process.FindPIDByPort(i.port) > 0 {
@@ -252,18 +296,16 @@ func (i *MySQLInstance) Start(ctx context.Context) error {
 		}
 	}
 
-	if i.pid <= 0 {
-		if !i.pm.IsRunning(pid) {
-			i.pm.Stop(pid)
-			i.status = core.StatusError
-			return fmt.Errorf("MySQL 启动失败: 端口 %d 无响应或已被其它程序占用，请检查配置或查看错误日志", i.port)
-		}
-		// 进程存活但尚未监听端口（如首次初始化较慢）：跟踪自身进程
-		i.pid = pid
+	if p := process.FindPIDByPort(i.port); p > 0 {
+		i.pid = p
+		return nil
 	}
-
-	i.status = core.StatusRunning
-	i.startedAt = time.Now()
+	if !i.pm.IsRunning(pid) {
+		i.pm.Stop(pid)
+		return fmt.Errorf("MySQL 启动失败: 端口 %d 无响应或已被其它程序占用，请检查配置或查看错误日志", i.port)
+	}
+	// 进程存活但尚未监听端口（如首次初始化较慢）：跟踪自身进程
+	i.pid = pid
 	return nil
 }
 
@@ -275,13 +317,13 @@ func (i *MySQLInstance) Stop(ctx context.Context) error {
 
 	i.status = core.StatusStopping
 
-	// 只停止属于本实例的进程：自管 pid，以及端口上可执行路径位于本版本目录内的进程。
+	// 收集属于本实例的进程：自管 pid，以及端口上属于本版本目录内的进程（只收集不杀）。
 	targets := make(map[int]struct{})
 	if i.pid > 0 {
 		targets[i.pid] = struct{}{}
 	}
 	if i.pid <= 0 {
-		if pid := stopOwnedProcessByPort(i.port, i.mysqlDir); pid > 0 {
+		if pid := ownedPIDByPort(i.port, i.mysqlDir); pid > 0 {
 			targets[pid] = struct{}{}
 		}
 	}
@@ -293,13 +335,39 @@ func (i *MySQLInstance) Stop(ctx context.Context) error {
 		return nil
 	}
 
-	for pid := range targets {
-		i.pm.Stop(pid)
+	// 1. 优雅停止：mysqladmin --host=127.0.0.1 --port=<p> -u root shutdown。
+	//    走 mysqld 正常关闭流程（flush buffer pool / 写 redo log / 关表），
+	//    避免强杀跳过持久化导致数据损坏。root 为 --initialize-insecure 创建的无密码账户。
+	//    忽略错误：用户改了 root 密码或网络异常时失败，由兜底强杀覆盖。
+	mysqladminExe := filepath.Join(i.mysqlDir, "bin", "mysqladmin.exe")
+	if fileExists(mysqladminExe) {
+		_ = runStopCommand(mysqladminExe, []string{
+			"--host=127.0.0.1",
+			fmt.Sprintf("--port=%d", i.port),
+			"-u", "root",
+			"shutdown",
+		}, i.mysqlDir)
 	}
 
-	// 停止成功的判定以本实例进程是否退出为准，而非端口是否释放
-	if remaining := waitProcessesExited(targets, 5*time.Second); len(remaining) > 0 {
-		return fmt.Errorf("MySQL stop failed: process still running (pid %s)", pidList(remaining))
+	// 2. 等待本实例进程退出（10s）。MySQL 正常关闭要 flush 脏页，比其它服务慢。
+	//    判据=进程退出，不用端口是否释放。
+	remaining := waitProcessesExited(targets, 10*time.Second)
+	if len(remaining) == 0 {
+		i.pid = 0
+		i.status = core.StatusStopped
+		return nil
+	}
+
+	// 3. 兜底强杀：pm.Stop 已是 taskkill /F /T。
+	//    注意：到这一步说明优雅停止失败，数据可能有损坏风险，但服务必须停止。
+	var lastErr error
+	for pid := range remaining {
+		if err := i.pm.Stop(pid); err != nil {
+			lastErr = err
+		}
+	}
+	if rem2 := waitProcessesExited(remaining, 3*time.Second); len(rem2) > 0 {
+		return fmt.Errorf("MySQL 停止失败: 进程 %s 未退出（优雅停止超时后强制终止仍失败，可能权限不足）: %v", pidList(rem2), lastErr)
 	}
 
 	i.pid = 0

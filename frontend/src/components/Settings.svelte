@@ -22,7 +22,7 @@ async function load() {
   }
 }
 
-function applyTheme(theme) {
+function applyTheme(theme: string) {
   document.documentElement.setAttribute('data-theme', theme)
 }
 

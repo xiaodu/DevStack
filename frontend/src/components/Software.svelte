@@ -6,7 +6,7 @@ import Database from './Database.svelte'
 import Runtime from './Runtime.svelte'
 import WebServer from './WebServer.svelte'
 
-const iconMap = {
+const iconMap: Record<string, string> = {
   nginx: 'icon-nginx',
   apache: 'icon-nginx1',
   mysql: 'icon-mysql',
@@ -24,10 +24,10 @@ const categories = [
   { id: 'runtime', label: '运行环境', icon: 'icon-php1' },
 ]
 
-let serviceItems = $state([])
-let runtimeItems = $state([])
-let selected = $state(null)
-let expandedCat = $state('webserver')
+let serviceItems = $state<any[]>([])
+let runtimeItems = $state<any[]>([])
+let selected = $state<any>(null)
+let expandedCat = $state<string | null>('webserver')
 let loading = $state(true)
 let loadingNow = false
 
@@ -39,11 +39,11 @@ let grouped = $derived(
   })),
 )
 
-function itemsFor(catId) {
+function itemsFor(catId: string) {
   return grouped.find((c) => c.id === catId)?.items || []
 }
 
-function toItem(x) {
+function toItem(x: any) {
   return {
     id: x.id,
     kind: x.kind || x.type,
@@ -66,8 +66,8 @@ async function load() {
   loadingNow = true
   try {
     const [all, rts] = await Promise.all([api.getServices().catch(() => []), api.getRuntimes().catch(() => [])])
-    serviceItems = (all || []).filter((s) => s.installed).map((s) => toItem({ ...s, source: 'service' }))
-    runtimeItems = (rts || []).filter((r) => r.installed !== false).map((r) => toItem({ ...r, source: 'runtime' }))
+serviceItems = (all || []).filter((s: any) => s.installed).map((s: any) => toItem({ ...s, source: 'service' }))
+    runtimeItems = (rts || []).filter((r: any) => r.installed !== false).map((r: any) => toItem({ ...r, source: 'runtime' }))
   } finally {
     loadingNow = false
     loading = false
@@ -91,11 +91,11 @@ function ensureSelection() {
   selected = pool.find((i) => i.id === selected.id) || selected
 }
 
-function toggleCat(catId) {
+function toggleCat(catId: string) {
   expandedCat = expandedCat === catId ? null : catId
 }
 
-function select(item) {
+function select(item: any) {
   selected = item
   expandedCat = item.category === 'runtime' ? 'runtime' : item.category
 }
@@ -107,7 +107,7 @@ async function handleChange() {
 
 let service = $derived(selected)
 
-let unsub
+let unsub: (() => void) | undefined
 onMount(async () => {
   await load()
   ensureSelection()

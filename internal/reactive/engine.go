@@ -2,6 +2,7 @@ package reactive
 
 import (
 	"context"
+	"reflect"
 	"sync"
 	"sync/atomic"
 )
@@ -18,6 +19,8 @@ type Engine struct {
 	onDropped    func(event *Event)
 	ctx          context.Context
 	cancel       context.CancelFunc
+	dispatchSem  chan struct{}
+	ruleSem      chan struct{}
 }
 
 func NewEngine(bufferSize int) *Engine {
@@ -28,6 +31,8 @@ func NewEngine(bufferSize int) *Engine {
 		eventBuffer: make(chan *Event, bufferSize),
 		ctx:         ctx,
 		cancel:      cancel,
+		dispatchSem: make(chan struct{}, 64),
+		ruleSem:     make(chan struct{}, 16),
 	}
 	e.running.Store(true)
 	return e
@@ -76,26 +81,38 @@ func (e *Engine) dispatch(event *Event) {
 	}
 
 	for _, handler := range handlers {
-		go func(h EventHandler) {
+		select {
+		case e.dispatchSem <- struct{}{}:
+			go func(h EventHandler) {
+				defer func() { <-e.dispatchSem }()
+				defer func() {
+					if r := recover(); r != nil {
+						// 记录 panic 但不崩溃
+					}
+				}()
+				h(event)
+			}(handler)
+		default:
+			// 超过并发限制，丢弃本次分发
+		}
+	}
+}
+
+func (e *Engine) executeRules(event *Event) {
+	select {
+	case e.ruleSem <- struct{}{}:
+		go func() {
+			defer func() { <-e.ruleSem }()
 			defer func() {
 				if r := recover(); r != nil {
 					// 记录 panic 但不崩溃
 				}
 			}()
-			h(event)
-		}(handler)
-	}
-}
-
-func (e *Engine) executeRules(event *Event) {
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				// 记录 panic 但不崩溃
-			}
+			_ = e.ruleSet.ExecuteMatching(e.ctx, event)
 		}()
-		_ = e.ruleSet.ExecuteMatching(e.ctx, event)
-	}()
+	default:
+		// 规则执行器满，跳过本次
+	}
 }
 
 func (e *Engine) Publish(event *Event) {
@@ -130,11 +147,17 @@ func (e *Engine) Subscribe(eventType EventType, handler EventHandler) {
 	e.subscribers[eventType] = append(e.subscribers[eventType], handler)
 }
 
-func (e *Engine) Unsubscribe(eventType EventType, _ EventHandler) {
+func (e *Engine) Unsubscribe(eventType EventType, handler EventHandler) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	delete(e.subscribers, eventType)
+	handlers := e.subscribers[eventType]
+	for i, h := range handlers {
+		if reflect.ValueOf(h).Pointer() == reflect.ValueOf(handler).Pointer() {
+			e.subscribers[eventType] = append(handlers[:i], handlers[i+1:]...)
+			return
+		}
+	}
 }
 
 func (e *Engine) AddRule(rule Rule) {

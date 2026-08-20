@@ -57,7 +57,7 @@ func Sync(enabled bool) error {
 }
 
 func enableRegistry(exe string) error {
-	k, _, err := registry.CreateKey(registry.CURRENT_USER, runKeyPath, registry.SET_VALUE)
+	k, _, err := registry.CreateKey(registry.CURRENT_USER, runKeyPath, registry.SET_VALUE|registry.QUERY_VALUE)
 	if err != nil {
 		return fmt.Errorf("打开注册表 Run 键失败: %w", err)
 	}

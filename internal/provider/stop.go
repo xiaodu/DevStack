@@ -1,9 +1,13 @@
 package provider
 
 import (
+	"fmt"
+	"os/exec"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/xiaodu/DevStack/internal/process"
@@ -26,15 +30,24 @@ func ownedPIDByPort(port int, ownDir string) int {
 	return pid
 }
 
-// stopOwnedProcessByPort 停止监听在 port 上、且可执行文件路径位于 ownDir 目录内的进程。
-// 端口被其它程序或其它版本占用时不误杀，返回 0。
-func stopOwnedProcessByPort(port int, ownDir string) int {
-	pid := ownedPIDByPort(port, ownDir)
-	if pid <= 0 {
-		return 0
+// runStopCommand 执行服务自带的优雅停止命令（如 nginx -s stop / mysqladmin shutdown / redis-cli shutdown）。
+// 工作目录设为 workdir（为空则不设置），隐藏窗口，捕获 stderr/stdout 合并输出。
+// 失败时返回含输出的错误，便于上层决定是否走兜底强杀。调用方通常忽略此错误，
+// 因为优雅停止失败属正常情况（PID 文件丢失、端口被占、密码不符等），由后续 taskkill /F /T 兜底。
+func runStopCommand(exe string, args []string, workdir string) error {
+	if exe == "" {
+		return fmt.Errorf("可执行文件路径为空")
 	}
-	process.NewManager().Stop(pid)
-	return pid
+	cmd := exec.Command(exe, args...)
+	if workdir != "" {
+		cmd.Dir = workdir
+	}
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s 优雅停止失败: %w, 输出: %s", filepath.Base(exe), err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 // waitProcessesExited 等待 pids 全部退出，全部退出返回 nil，超时返回仍未退出的 PID 集合。

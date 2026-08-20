@@ -10,20 +10,29 @@ function getWailsRuntime() {
   return null
 }
 
+// 返回精确退订函数：仅移除本次注册的回调，不影响同名其他监听（F5）
 function EventsOn(eventName: string, callback: (...args: any[]) => void) {
   const rt = getWailsRuntime()
   if (rt && typeof rt.EventsOn === 'function') {
-    return rt.EventsOn(eventName, callback)
+    rt.EventsOn(eventName, callback)
+    return () => EventsOff(eventName, callback)
   }
   return () => {}
 }
 
-function EventsOff(eventName: string) {
+function EventsOff(eventName: string, cb?: (...args: any[]) => void) {
   const rt = getWailsRuntime()
   if (rt && typeof rt.EventsOff === 'function') {
-    return rt.EventsOff(eventName)
+    if (cb) {
+      try {
+        rt.EventsOff(eventName, cb)
+        return
+      } catch {
+        // 部分 Wails 版本的 EventsOff 不接受回调参数，回退到按名全删
+      }
+    }
+    rt.EventsOff(eventName)
   }
-  return () => {}
 }
 
 /*
@@ -38,9 +47,7 @@ function EventsOff(eventName: string) {
  *   })
  */
 export function onWailsEvent(eventName: string, handler: (...args: any[]) => void) {
-  EventsOn(eventName, handler)
-  const unsub = () => EventsOff(eventName)
-  return unsub
+  return EventsOn(eventName, handler)
 }
 
 /*
@@ -50,8 +57,8 @@ export function onWailsEvent(eventName: string, handler: (...args: any[]) => voi
  *   useWailsEvent('reactive:service.started', (data) => updateUI(data))
  */
 export function useWailsEvent(eventName: string, handler: (...args: any[]) => void) {
-  EventsOn(eventName, handler)
-  onDestroy(() => EventsOff(eventName))
+  const unsub = EventsOn(eventName, handler)
+  onDestroy(unsub)
 }
 
 /*
@@ -64,9 +71,12 @@ export function subscribeReactiveEvents() {
   const events = [
     'reactive:service.started',
     'reactive:service.stopped',
+    'reactive:service.starting',
+    'reactive:service.stopping',
     'reactive:service.crashed',
     'reactive:service.restarted',
     'reactive:service.health_failed',
+    'reactive:service.error',
     'reactive:port.conflict',
     'reactive:config.changed',
     'reactive:config.reloaded',
@@ -78,13 +88,12 @@ export function subscribeReactiveEvents() {
     'reactive:project.disabled',
   ]
 
-  const unsubs = events.map((name) => {
+  const unsubs = events.map((name) =>
     EventsOn(name, (data) => {
       console.debug('[events]', name, data)
       nanoRefresh.set(nanoRefresh.get() + 1)
-    })
-    return () => EventsOff(name)
-  })
+    }),
+  )
 
   return () => unsubs.forEach((fn) => fn())
 }
@@ -95,8 +104,8 @@ export function subscribeReactiveEvents() {
  *   useDownloadProgress(({ key, service, version, downloaded, total }) => ...)
  */
 export function useDownloadProgress(handler: (data: any) => void) {
-  EventsOn('download:progress', handler)
-  onDestroy(() => EventsOff('download:progress'))
+  const unsub = EventsOn('download:progress', handler)
+  onDestroy(unsub)
 }
 
 /*
@@ -109,11 +118,10 @@ export function useDownloadProgress(handler: (data: any) => void) {
  */
 export function subscribeOperationEvents(handler: (eventName: string, data: any) => void) {
   const names = ['operation:begin', 'operation:step', 'operation:end']
-  const unsubs = names.map((name) => {
+  const unsubs = names.map((name) =>
     EventsOn(name, (data: any) => {
       handler(name.replace('operation:', ''), data)
-    })
-    return () => EventsOff(name)
-  })
+    }),
+  )
   return () => unsubs.forEach((fn) => fn())
 }

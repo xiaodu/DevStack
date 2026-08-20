@@ -5,6 +5,10 @@ import { nanoLoading, nanoStatusMsg, pushToast } from './stores'
  */
 const pendingCalls = new Map<string, { abort: boolean }>()
 
+// 匿名调用（无函数名）的去重序号：每次匿名调用分配唯一 key，
+// 避免并发匿名调用共用 'anonymous' 互相去重丢弃（F8）
+let anonSeq = 0
+
 function debounceKey(key: string): { abort: boolean } {
   if (pendingCalls.has(key)) {
     pendingCalls.get(key)!.abort = true
@@ -49,6 +53,11 @@ export interface SafeInvokeOptions {
   suppressToast?: boolean
   onSuccess?: (result: any) => void
   onError?: (err: any) => void
+  /**
+   * 失败时是否向上抛出（默认不抛，返回 undefined）。
+   * 需要调用方感知失败并做流程控制时（如 runOperation）置 true。
+   */
+  rethrow?: boolean
 }
 
 export async function safeInvoke(
@@ -60,10 +69,19 @@ export async function safeInvoke(
   if (typeof key === 'function') {
     opts = (fn as SafeInvokeOptions) || {}
     fn = key as () => Promise<any>
-    key = (fn as () => Promise<any>).name || 'anonymous'
+    key = (fn as () => Promise<any>).name || 'anon-' + ++anonSeq
   }
   const callFn = fn as () => Promise<any>
-  const { statusMsg, successMsg, errorPrefix, timeoutMs = 15000, suppressToast = false, onSuccess, onError } = opts
+  const {
+    statusMsg,
+    successMsg,
+    errorPrefix,
+    timeoutMs = 15000,
+    suppressToast = false,
+    onSuccess,
+    onError,
+    rethrow = false,
+  } = opts
 
   // ── Debounce: abort if another call with same key is in-flight ──
   const guard = debounceKey(key)
@@ -97,7 +115,8 @@ export async function safeInvoke(
       pushToast(errorPrefix ? `${errorPrefix}: ${message}` : message, 'error')
     }
     if (onError) onError(e)
-    throw e
+    if (rethrow) throw e
+    return undefined
   } finally {
     nanoLoading.set(false)
     nanoStatusMsg.set('')

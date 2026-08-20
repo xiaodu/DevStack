@@ -3,14 +3,14 @@ import { createEventDispatcher, onMount } from 'svelte'
 import { api } from '../lib/api'
 import { safeInvoke } from '../lib/safeInvoke'
 
-let { service } = $props()
+let { service }: { service: any } = $props()
 const dispatch = createEventDispatcher()
 
-let nc = $state({})
+let nc = $state<Record<string, any>>({})
 let configLoading = $state(false)
 
 const bodySizeOptions = ['1M', '8M', '16M', '32M', '64M', '128M', '256M', '512M', '1024M']
-const recommendedConfig = {
+const recommendedConfig: Record<string, string> = {
   workerConnections: '2048',
   clientMaxBodySize: '64m',
   gzipEnabled: 'true',
@@ -19,7 +19,8 @@ const recommendedConfig = {
   serverTokens: 'false',
 }
 
-let iconClass = $derived({ nginx: 'icon-nginx', apache: 'icon-nginx1' }[service.kind] || '')
+const iconClassMap: Record<string, string> = { nginx: 'icon-nginx', apache: 'icon-nginx1' }
+let iconClass = $derived(iconClassMap[service.kind] || '')
 
 onMount(() => {
   if (service.kind === 'nginx') loadConfig()
@@ -36,13 +37,13 @@ async function loadConfig() {
   }
 }
 
-function intVal(key) {
+function intVal(key: string) {
   return parseInt(nc[key], 10) || 0
 }
-function boolVal(key) {
+function boolVal(key: string) {
   return nc[key] === 'true'
 }
-function getRecommendedHint(key, label) {
+function getRecommendedHint(key: string, label?: string) {
   const v = recommendedConfig[key]
   return v ? `推荐值: ${v}${label ? ` · ${label}` : ''}` : ''
 }
@@ -112,12 +113,12 @@ async function toggle() {
           <div class="grid grid-cols-2 gap-3">
             <label class="form-control w-full">
               <div class="label"><span class="label-text">最大并发连接数</span></div>
-              <input class="input input-bordered w-full input-sm" type="number" min="1024" max="8192" step="512" value={intVal('workerConnections')} onchange={e => nc.workerConnections = String(e.target.value)} />
+              <input class="input input-bordered w-full input-sm" type="number" min="1024" max="8192" step="512" value={intVal('workerConnections')} onchange={e => nc.workerConnections = String((e.currentTarget as HTMLInputElement).value)} />
               <div class="label"><span class="label-text-alt text-base-content/50">{getRecommendedHint('workerConnections', 'CPU核数 × 1024')}</span></div>
             </label>
             <label class="form-control w-full">
               <div class="label"><span class="label-text">Keepalive 超时(秒)</span></div>
-              <input class="input input-bordered w-full input-sm" type="number" min="10" max="120" value={intVal('keepaliveTimeout')} onchange={e => nc.keepaliveTimeout = String(e.target.value)} />
+              <input class="input input-bordered w-full input-sm" type="number" min="10" max="120" value={intVal('keepaliveTimeout')} onchange={e => nc.keepaliveTimeout = String((e.currentTarget as HTMLInputElement).value)} />
               <div class="label"><span class="label-text-alt text-base-content/50">{getRecommendedHint('keepaliveTimeout', '长连接保持时间')}</span></div>
             </label>
           </div>
@@ -131,7 +132,7 @@ async function toggle() {
             </label>
             <label class="form-control w-full">
               <div class="label"><span class="label-text">静态资源缓存(天)</span></div>
-              <input class="input input-bordered w-full input-sm" type="number" min="0" max="365" value={intVal('staticCacheDays')} onchange={e => nc.staticCacheDays = String(e.target.value)} />
+              <input class="input input-bordered w-full input-sm" type="number" min="0" max="365" value={intVal('staticCacheDays')} onchange={e => nc.staticCacheDays = String((e.currentTarget as HTMLInputElement).value)} />
               <div class="label"><span class="label-text-alt text-base-content/50">{getRecommendedHint('staticCacheDays', '0 = 不缓存')}</span></div>
             </label>
           </div>
@@ -142,11 +143,11 @@ async function toggle() {
         <h3 class="text-sm font-semibold text-primary mb-3.5">功能开关</h3>
         <div class="grid grid-cols-2 gap-3">
           <label class="flex items-center gap-2 cursor-pointer">
-            <input type="checkbox" class="toggle toggle-sm toggle-primary" checked={boolVal('gzipEnabled')} onchange={e => nc.gzipEnabled = String(e.target.checked)} />
+            <input type="checkbox" class="toggle toggle-sm toggle-primary" checked={boolVal('gzipEnabled')} onchange={e => nc.gzipEnabled = String((e.currentTarget as HTMLInputElement).checked)} />
             <div><span class="text-sm">Gzip 压缩</span><p class="text-xs text-base-content/50">{getRecommendedHint('gzipEnabled', '减少传输大小 60-80%')}</p></div>
           </label>
           <label class="flex items-center gap-2 cursor-pointer">
-            <input type="checkbox" class="toggle toggle-sm toggle-primary" checked={boolVal('serverTokens')} onchange={e => nc.serverTokens = String(e.target.checked)} />
+            <input type="checkbox" class="toggle toggle-sm toggle-primary" checked={boolVal('serverTokens')} onchange={e => nc.serverTokens = String((e.currentTarget as HTMLInputElement).checked)} />
             <div><span class="text-sm">显示服务器版本</span><p class="text-xs text-base-content/50">{getRecommendedHint('serverTokens', '建议关闭')}</p></div>
           </label>
         </div>

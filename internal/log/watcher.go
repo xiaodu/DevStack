@@ -5,6 +5,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"sync"
 	"time"
 )
@@ -97,8 +99,9 @@ func (w *LogWatcher) ReadRecent(logPath string, lines int) ([]LogEntry, error) {
 	for scanner.Scan() {
 		line := scanner.Text()
 		if len(line) > 0 {
+			ts := parseLogTimestamp(line)
 			result = append(result, LogEntry{
-				Time:    time.Now().Format("15:04:05"),
+				Time:    ts,
 				Content: line,
 				Stream:  "out",
 			})
@@ -108,4 +111,15 @@ func (w *LogWatcher) ReadRecent(logPath string, lines int) ([]LogEntry, error) {
 		result = result[len(result)-lines:]
 	}
 	return result, scanner.Err()
+}
+
+var tsPattern = regexp.MustCompile(`^(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2})`)
+
+func parseLogTimestamp(line string) string {
+	if m := tsPattern.FindStringSubmatch(line); m != nil {
+		if t, err := time.Parse("2006-01-02T15:04:05", strings.Replace(m[1], " ", "T", 1)); err == nil {
+			return t.Format("15:04:05")
+		}
+	}
+	return time.Now().Format("15:04:05")
 }

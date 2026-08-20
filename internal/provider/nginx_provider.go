@@ -340,10 +340,6 @@ func (i *NginxInstance) Start(ctx context.Context) error {
 		i.startedAt = time.Now()
 		return nil
 	}
-	// 端口被其它程序/其它版本占用：明确报错，不接管，避免后续误杀外部进程
-	if process.FindPIDByPort(i.port) > 0 {
-		return fmt.Errorf("Nginx start failed: port %d is occupied by another process", i.port)
-	}
 
 	i.status = core.StatusStarting
 
@@ -353,23 +349,29 @@ func (i *NginxInstance) Start(ctx context.Context) error {
 		return err
 	}
 
-	actualPid := pid
-	for j := 0; j < 6; j++ {
+	for j := 0; j < 10; j++ {
 		time.Sleep(500 * time.Millisecond)
-		if p := process.FindPIDByPort(i.port); p > 0 {
-			actualPid = p
+		if p := ownedPIDByPort(i.port, i.nginxDir); p > 0 {
+			i.pid = p
+			break
+		}
+		// 端口被其它程序占用且不属于本实例：不接管，避免误杀外部进程
+		if process.FindPIDByPort(i.port) > 0 {
 			break
 		}
 	}
 
-	if !i.pm.IsRunning(pid) && process.FindPIDByPort(i.port) == 0 {
-		i.pm.Stop(pid)
-		i.status = core.StatusError
-		return fmt.Errorf("Nginx start failed: port %d not responding within 3s", i.port)
+	if i.pid <= 0 {
+		if !i.pm.IsRunning(pid) {
+			i.pm.Stop(pid)
+			i.status = core.StatusError
+			return fmt.Errorf("Nginx start failed: port %d not responding or occupied by another process", i.port)
+		}
+		// 进程存活但尚未监听端口：跟踪自身进程
+		i.pid = pid
 	}
 
 	i.mpid = pid
-	i.pid = actualPid
 	i.status = core.StatusRunning
 	i.startedAt = time.Now()
 	return nil
@@ -383,8 +385,9 @@ func (i *NginxInstance) Stop(ctx context.Context) error {
 
 	i.status = core.StatusStopping
 
-	// 收集属于本实例的进程：自管 pid、主进程 mpid，以及端口上可执行路径位于本版本目录内的进程。
-	// 端口被其它版本或其它程序占用时不属于本实例，不误杀。
+	// 收集属于本实例的进程：自管 pid、主进程 mpid，以及端口上属于本版本目录内的进程。
+	// 用 ownedPIDByPort（只收集 PID 不杀），避免旧的 stopOwnedProcessByPort 边收集边用新 Manager
+	// 实例杀进程（与 i.pm 不是同一注册表，且重复杀）的设计缺陷。
 	targets := make(map[int]struct{})
 	if i.pid > 0 {
 		targets[i.pid] = struct{}{}
@@ -393,7 +396,7 @@ func (i *NginxInstance) Stop(ctx context.Context) error {
 		targets[i.mpid] = struct{}{}
 	}
 	if i.pid <= 0 {
-		if pid := stopOwnedProcessByPort(i.port, i.nginxDir); pid > 0 {
+		if pid := ownedPIDByPort(i.port, i.nginxDir); pid > 0 {
 			targets[pid] = struct{}{}
 		}
 	}
@@ -406,14 +409,32 @@ func (i *NginxInstance) Stop(ctx context.Context) error {
 		return nil
 	}
 
-	for pid := range targets {
-		i.pm.Stop(pid)
+	// 1. 优雅停止：nginx -s stop（master 读 logs/nginx.pid 后通知 workers 优雅退出）。
+	//    忽略错误：PID 文件丢失/指向旧 master 时会失败，由后续兜底强杀覆盖。
+	//    工作目录设为 nginxDir，与 reloadCommand 一致，依赖 conf/nginx.conf 里的 pid 指令。
+	if i.nginxExe != "" && fileExists(i.nginxExe) {
+		_ = runStopCommand(i.nginxExe, []string{"-s", "stop"}, i.nginxDir)
 	}
 
-	// 停止成功的判定以本实例进程是否退出为准，而非端口是否释放：
-	// 端口可能被其它程序占用，不代表 nginx 未停止。
-	if remaining := waitProcessesExited(targets, 5*time.Second); len(remaining) > 0 {
-		return fmt.Errorf("Nginx stop failed: process still running (pid %s)", pidList(remaining))
+	// 2. 等待本实例进程退出（8s）。判据=进程退出，不用端口是否释放。
+	remaining := waitProcessesExited(targets, 8*time.Second)
+	if len(remaining) == 0 {
+		i.pid = 0
+		i.mpid = 0
+		i.status = core.StatusStopped
+		return nil
+	}
+
+	// 3. 兜底强杀：pm.Stop 已是 taskkill /F /T，递归杀子进程覆盖 worker 残留。
+	var lastErr error
+	for pid := range remaining {
+		if err := i.pm.Stop(pid); err != nil {
+			lastErr = err
+		}
+	}
+	// 再等 3s 确认退出
+	if rem2 := waitProcessesExited(remaining, 3*time.Second); len(rem2) > 0 {
+		return fmt.Errorf("Nginx 停止失败: 进程 %s 未退出（优雅停止超时后强制终止仍失败，可能权限不足）: %v", pidList(rem2), lastErr)
 	}
 
 	i.pid = 0

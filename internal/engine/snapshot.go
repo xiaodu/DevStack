@@ -7,13 +7,18 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/xiaodu/DevStack/internal/atomicfile"
 	"github.com/xiaodu/DevStack/internal/tx"
 )
 
+var snapshotCounter atomic.Uint64
+
 type SnapshotManager struct {
+	mu      sync.Mutex
 	baseDir string
 }
 
@@ -24,12 +29,16 @@ func NewSnapshotManager(baseDir string) *SnapshotManager {
 }
 
 func (sm *SnapshotManager) TakeSnapshot(ctx context.Context, env EnvironmentState) (string, error) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
 	if err := os.MkdirAll(sm.baseDir, 0755); err != nil {
 		return "", fmt.Errorf("创建快照目录失败: %w", err)
 	}
 
+	counter := snapshotCounter.Add(1)
 	timestamp := time.Now().Format("20060102-150405")
-	snapshotID := fmt.Sprintf("snapshot-%s", timestamp)
+	snapshotID := fmt.Sprintf("snapshot-%s-%d", timestamp, counter)
 	snapshotPath := filepath.Join(sm.baseDir, snapshotID+".json")
 
 	data, err := json.MarshalIndent(env, "", "  ")
@@ -50,8 +59,11 @@ func (sm *SnapshotManager) LoadSnapshot(ctx context.Context, snapshotID string) 
 	if !validSnapshotID(snapshotID) {
 		return EnvironmentState{}, fmt.Errorf("非法的快照标识: %s", snapshotID)
 	}
+	sm.mu.Lock()
 	snapshotPath := filepath.Join(sm.baseDir, snapshotID+".json")
-	if !sm.exists(snapshotPath) {
+	exists := sm.exists(snapshotPath)
+	sm.mu.Unlock()
+	if !exists {
 		return EnvironmentState{}, fmt.Errorf("快照 %s 不存在", snapshotID)
 	}
 
@@ -69,6 +81,9 @@ func (sm *SnapshotManager) LoadSnapshot(ctx context.Context, snapshotID string) 
 }
 
 func (sm *SnapshotManager) ListSnapshots(ctx context.Context) ([]string, error) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
 	if !sm.exists(sm.baseDir) {
 		return nil, nil
 	}
@@ -96,6 +111,8 @@ func (sm *SnapshotManager) DeleteSnapshot(ctx context.Context, snapshotID string
 	if !validSnapshotID(snapshotID) {
 		return fmt.Errorf("非法的快照标识: %s", snapshotID)
 	}
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
 	snapshotPath := filepath.Join(sm.baseDir, snapshotID+".json")
 	if err := os.Remove(snapshotPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("删除快照失败: %w", err)
@@ -103,17 +120,29 @@ func (sm *SnapshotManager) DeleteSnapshot(ctx context.Context, snapshotID string
 	return nil
 }
 
-// validSnapshotID 仅允许形如 snapshot-20060102-150405 的标识，阻止路径穿越。
+// validSnapshotID 仅允许形如 snapshot-20060102-150405-N 的标识，阻止路径穿越。
 func validSnapshotID(snapshotID string) bool {
-	if len(snapshotID) != len("snapshot-20060102-150405") {
-		return false
-	}
 	if !strings.HasPrefix(snapshotID, "snapshot-") {
 		return false
 	}
-	for _, r := range snapshotID[len("snapshot-"):] {
+	rest := snapshotID[len("snapshot-"):]
+	if len(rest) < 15 {
+		return false
+	}
+	for i := 0; i < 15; i++ {
+		r := rest[i]
 		if (r < '0' || r > '9') && r != '-' {
 			return false
+		}
+	}
+	if len(rest) > 15 {
+		if rest[15] != '-' {
+			return false
+		}
+		for _, r := range rest[16:] {
+			if r < '0' || r > '9' {
+				return false
+			}
 		}
 	}
 	return true
@@ -128,14 +157,13 @@ func (sm *SnapshotManager) CreateSnapshotStep(env EnvironmentState) (tx.StepFunc
 	}
 }
 
-func (sm *SnapshotManager) RestoreLastSnapshot() error {
+func (sm *SnapshotManager) RestoreLastSnapshot() (EnvironmentState, error) {
 	snapshots, err := sm.ListSnapshots(context.Background())
 	if err != nil || len(snapshots) == 0 {
-		return nil
+		return EnvironmentState{}, err
 	}
 	last := snapshots[len(snapshots)-1]
-	_, err = sm.LoadSnapshot(context.Background(), last)
-	return err
+	return sm.LoadSnapshot(context.Background(), last)
 }
 
 func (sm *SnapshotManager) cleanupOldSnapshots() {

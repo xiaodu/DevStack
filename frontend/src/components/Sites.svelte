@@ -6,17 +6,17 @@ import { api } from '../lib/api'
 import { safeInvoke } from '../lib/safeInvoke'
 import { addToast } from '../lib/stores'
 
-let sites = []
-let selectedId = null
-let editing = null
-let loading = true
-let searchQuery = ''
-let busy = false
-let phpVersions = []
-let mysqlVersions = []
-let nginxVersions = []
-let profiles = []
-let profilesLoading = false
+let sites = $state<any[]>([])
+let selectedId = $state<string | null>(null)
+let editing = $state<any>(null)
+let loading = $state(true)
+let searchQuery = $state('')
+let busy = $state(false)
+let phpVersions = $state<any[]>([])
+let mysqlVersions = $state<any[]>([])
+let nginxVersions = $state<any[]>([])
+let profiles = $state<any[]>([])
+let profilesLoading = $state(false)
 
 async function load() {
   try {
@@ -126,50 +126,44 @@ async function activateProjectEnvironment() {
   }
   if (busy) return
   busy = true
-  await safeInvoke(async () => await api.activateEnvironmentForProject(editing.id), {
-    successMsg: `「${editing.name}」的环境已按依赖顺序激活`,
-    errorPrefix: '环境激活失败',
-  })
-  busy = false
+  try {
+    await safeInvoke('activateProjectEnvironment', () => api.activateEnvironmentForProject(editing.id), {
+      successMsg: `「${editing.name}」的环境已按依赖顺序激活`,
+      errorPrefix: '环境激活失败',
+    })
+  } finally {
+    busy = false
+  }
 }
 
-$: selectedProfile = editing?.environmentID ? profiles.find((p) => p.id === editing.environmentID) : null
+let selectedProfile = $derived(editing?.environmentID ? profiles.find((p) => p.id === editing.environmentID) : null)
 
-// 将 profile.services / profile.runtimes 统一转为数组（后端返回 map，mock 用数组）
-function profileSpecs(spec) {
-  if (!spec) return []
-  if (Array.isArray(spec)) return spec
-  if (typeof spec === 'object') {
-    return Object.entries(spec).map(([key, val]) => ({
-      id: val.id || key,
-      runtimeId: val.runtimeId || key,
-      version: val.version,
-    }))
-  }
-  return []
+// 从环境模板（units: {kind, version}）读取指定组件版本
+function profileUnit(kind: string) {
+  return selectedProfile?.units?.find((u) => u.kind === kind) || null
 }
 
 // 从模板提取版本（只读展示）
-$: templateNginxVersion = (() => {
-  if (!selectedProfile) return ''
-  const svc = profileSpecs(selectedProfile.services).find((s) => s.id === 'nginx')
-  return svc ? 'Nginx ' + svc.version : '未指定'
-})()
-$: templateMySQLVersion = (() => {
-  if (!selectedProfile) return ''
-  const svc = profileSpecs(selectedProfile.services).find((s) => s.id === 'mysql')
-  return svc ? 'MySQL ' + svc.version : '未指定'
-})()
-$: templatePHPVersion = (() => {
-  if (!selectedProfile) return ''
-  const rt = profileSpecs(selectedProfile.runtimes).find((r) => r.runtimeId === 'php')
-  return rt ? 'PHP ' + rt.version : '未指定'
-})()
-$: templateRuntimeBadges = selectedProfile ? profileSpecs(selectedProfile.runtimes) : []
+let templateNginxVersion = $derived((() => {
+  const u = profileUnit('nginx')
+  return u ? 'Nginx ' + u.version : '未指定'
+})())
+let templateMySQLVersion = $derived((() => {
+  const u = profileUnit('mysql')
+  return u ? 'MySQL ' + u.version : '未指定'
+})())
+let templatePHPVersion = $derived((() => {
+  const u = profileUnit('php')
+  return u ? 'PHP ' + u.version : '未指定'
+})())
+let templateRuntimeBadges = $derived((selectedProfile?.units || [])
+  .filter((u) => u.kind === 'php' || u.kind === 'node' || u.kind === 'python')
+  .map((u) => ({ runtimeId: u.kind, version: u.version })))
 
 async function save() {
   if (!editing) return
   await safeInvoke(
+    'saveProject',
     async () => {
       let savedId = editing.id
       if (editing.id && editing.id !== '__new__') {
@@ -190,20 +184,25 @@ async function remove() {
   if (!editing?.id || editing.id === '__new__') return
   if (busy) return
   busy = true
-  await safeInvoke(
-    async () => {
-      await api.deleteProject(editing.id)
-      selectedId = null
-      editing = null
-      await load()
-    },
-    { successMsg: '已删除', errorPrefix: '删除失败' },
-  )
-  busy = false
+  try {
+    await safeInvoke(
+      'deleteProject',
+      async () => {
+        await api.deleteProject(editing.id)
+        selectedId = null
+        editing = null
+        await load()
+      },
+      { successMsg: '已删除', errorPrefix: '删除失败' },
+    )
+  } finally {
+    busy = false
+  }
 }
 
 async function toggleProject(id) {
   await safeInvoke(
+    'toggleProject',
     async () => {
       await api.toggleProject(id)
       await load()
@@ -212,20 +211,19 @@ async function toggleProject(id) {
   )
 }
 
-$: filteredSites = sites.filter(
+let filteredSites = $derived(sites.filter(
   (s) =>
     s.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
     s.domain.toLowerCase().includes(searchQuery.toLowerCase()),
-)
-$: showTargetPort = editing && (editing.type === 'node' || editing.type === 'python')
-$: showProxyPass = editing && editing.type === 'proxy'
-$: showPHP = editing && editing.type === 'php'
+))
+let showTargetPort = $derived(editing && (editing.type === 'node' || editing.type === 'python'))
+let showProxyPass = $derived(editing && editing.type === 'proxy')
+let showPHP = $derived(editing && editing.type === 'php')
 
 async function browseDirectory() {
   const path = await api.openDirectory(editing?.root || '')
   if (path && editing) {
     editing.root = path
-    editing = editing
   }
 }
 

@@ -2,17 +2,23 @@ package reactive
 
 import (
 	"fmt"
+	"sync/atomic"
 	"time"
 )
 
 type EventType string
 
+var eventCounter atomic.Uint64
+
 const (
 	EventServiceStarted     EventType = "service.started"
 	EventServiceStopped     EventType = "service.stopped"
+	EventServiceStarting    EventType = "service.starting"
+	EventServiceStopping    EventType = "service.stopping"
 	EventServiceCrashed     EventType = "service.crashed"
 	EventServiceHealthFailed EventType = "service.health_failed"
 	EventServiceRestarted   EventType = "service.restarted"
+	EventServiceError       EventType = "service.error"
 	EventPortConflict       EventType = "port.conflict"
 	EventConfigChanged      EventType = "config.changed"
 	EventConfigReloaded     EventType = "config.reloaded"
@@ -33,8 +39,9 @@ type Event struct {
 }
 
 func NewEvent(eventType EventType, source string, data map[string]interface{}) *Event {
+	counter := eventCounter.Add(1)
 	return &Event{
-		ID:        fmt.Sprintf("%s-%d", eventType, time.Now().UnixNano()),
+		ID:        fmt.Sprintf("%s-%d-%d", eventType, time.Now().UnixNano(), counter),
 		Type:      eventType,
 		Source:    source,
 		Timestamp: time.Now(),

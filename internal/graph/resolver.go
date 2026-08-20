@@ -2,6 +2,7 @@ package graph
 
 import (
 	"fmt"
+	"sync"
 )
 
 type ServiceDesiredState struct {
@@ -34,6 +35,7 @@ type EnvironmentSnapshot struct {
 }
 
 type Resolver struct {
+	mu    sync.Mutex
 	graph *DependencyGraph
 }
 
@@ -48,6 +50,9 @@ func (r *Resolver) Graph() *DependencyGraph {
 }
 
 func (r *Resolver) Resolve(env EnvironmentSnapshot) (*DependencyGraph, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	r.graph = NewDependencyGraph()
 
 	for id, svc := range env.Services {
@@ -144,7 +149,7 @@ func (r *Resolver) GetStartOrder(env EnvironmentSnapshot) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return g.GetStartOrder()
+	return g.TopologicalSort()
 }
 
 func (r *Resolver) GetStopOrder(env EnvironmentSnapshot) ([]string, error) {

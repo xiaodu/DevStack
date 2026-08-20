@@ -4,7 +4,7 @@ import { createBubbler, stopPropagation } from 'svelte/legacy'
 const bubble = createBubbler()
 
 import { fade } from 'svelte/transition'
-import { operation } from '../lib/stores'
+import { dismissOperation, operation } from '../lib/stores'
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -56,6 +56,12 @@ import { operation } from '../lib/stores'
 
       {#if $operation.status === 'error'}
         <div class="mt-4 text-xs text-error bg-error/10 rounded-lg px-3 py-2 break-all">{$operation.error}</div>
+      {/if}
+
+      {#if $operation.status !== 'running'}
+        <div class="mt-4 flex justify-end">
+          <button class="btn btn-sm" onclick={dismissOperation}>关闭</button>
+        </div>
       {/if}
     </div>
   </div>

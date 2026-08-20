@@ -138,9 +138,27 @@ export interface RunOperationOptions {
   call: () => Promise<any>
   successMsg: string
   onDone?: () => void | Promise<void>
+  /** 整体超时（毫秒），后端挂起时不再让遮罩永久锁死。默认 60s。 */
+  timeoutMs?: number
 }
 
 let opTimer = 0
+let opTimeout = 0
+
+function scheduleOperationClose(status: 'success' | 'error', toast: string, delay: number) {
+  clearTimeout(opTimer)
+  opTimer = window.setTimeout(() => {
+    nanoOperation.set({ ...nanoOperation.get(), active: false, status: 'idle' })
+    pushToast(toast, status)
+  }, delay)
+}
+
+/** 手动关闭操作遮罩（如超时后人工接管）。 */
+export function dismissOperation() {
+  clearTimeout(opTimer)
+  clearTimeout(opTimeout)
+  nanoOperation.set(IDLE_OPERATION)
+}
 
 export async function runOperation(opts: RunOperationOptions): Promise<boolean> {
   const cur = nanoOperation.get()
@@ -149,6 +167,7 @@ export async function runOperation(opts: RunOperationOptions): Promise<boolean> 
     return false
   }
   clearTimeout(opTimer)
+  clearTimeout(opTimeout)
   nanoOperation.set({
     ...IDLE_OPERATION,
     active: true,
@@ -158,23 +177,34 @@ export async function runOperation(opts: RunOperationOptions): Promise<boolean> 
     message: '正在准备...',
     startedAt: Date.now(),
   })
+
+  // 整体看门狗：后端挂起时强制结束遮罩，避免永久锁死（F2）
+  const timeoutMs = opts.timeoutMs || 60000
+  opTimeout = window.setTimeout(() => {
+    nanoOperation.set({ ...nanoOperation.get(), status: 'error', error: '操作超时，请检查后端状态', message: '操作超时' })
+    scheduleOperationClose('error', '操作超时，请检查后端状态', 4500)
+  }, timeoutMs)
+
   try {
     await opts.call()
     if (opts.onDone) await opts.onDone()
-    nanoOperation.set({ ...nanoOperation.get(), status: 'success', message: '操作完成，正在同步状态…' })
-    opTimer = window.setTimeout(() => {
-      nanoOperation.set({ ...nanoOperation.get(), active: false, status: 'idle' })
-      pushToast(opts.successMsg, 'success')
-    }, 1200)
+    // operation:end(ok=false) 可能在 call 返回前先到，复查状态，
+    // 失败的 op 不得被成功路径覆盖（F6）
+    const after = nanoOperation.get()
+    if (after.status === 'error') {
+      scheduleOperationClose('error', `操作失败：${after.error}`, 4500)
+      return false
+    }
+    nanoOperation.set({ ...after, status: 'success', message: '操作完成，正在同步状态…' })
+    scheduleOperationClose('success', opts.successMsg, 1200)
     return true
   } catch (e) {
     const msg = (e as any)?.message || String(e)
     nanoOperation.set({ ...nanoOperation.get(), status: 'error', error: msg, message: '操作失败' })
-    opTimer = window.setTimeout(() => {
-      nanoOperation.set({ ...nanoOperation.get(), active: false, status: 'idle' })
-      pushToast(`操作失败：${msg}`, 'error')
-    }, 4500)
+    scheduleOperationClose('error', `操作失败：${msg}`, 4500)
     return false
+  } finally {
+    clearTimeout(opTimeout)
   }
 }
 

@@ -199,21 +199,29 @@ func (m *Manager) WaitChan(pid int) <-chan struct{} {
 	return ch
 }
 
+// Stop 终止指定进程及其子进程（进程树）。
+// 统一使用 taskkill /F /T /PID：
+//   - /F 强制终止（TerminateProcess 语义）
+//   - /T 递归终止子进程，覆盖 nginx master+worker、php-fpm master+children 等多进程模型
+//
+// 进程已退出视为幂等成功（返回 nil），避免上层处理 spurious error。
+// 失败时返回真实原因（含 taskkill stderr），便于上层透传给用户。
+// 自管进程（pm.Start 注册的）在 taskkill 触发退出后，cmd.Wait() goroutine
+// 仍会正常清理 m.processes / m.exitChans / m.outputs，链路保持完整。
 func (m *Manager) Stop(pid int) error {
-	m.mu.Lock()
-	cmd, ok := m.processes[pid]
-	m.mu.Unlock()
-	if !ok {
-		if !IsProcessRunning(pid) {
-			return fmt.Errorf("进程 %d 未找到或已退出", pid)
-		}
-		proc, err := os.FindProcess(pid)
-		if err != nil {
-			return fmt.Errorf("进程 %d 未找到: %w", pid, err)
-		}
-		return proc.Kill()
+	if pid <= 0 {
+		return nil
 	}
-	return cmd.Process.Kill()
+	if !IsProcessRunning(pid) {
+		return nil
+	}
+	cmd := exec.Command("taskkill", "/F", "/T", "/PID", strconv.Itoa(pid))
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("终止进程 %d 失败: %w, 输出: %s", pid, err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 func (m *Manager) IsRunning(pid int) bool {

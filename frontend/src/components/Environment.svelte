@@ -6,31 +6,31 @@ import { useDownloadProgress } from '../lib/events'
 import { safeInvoke } from '../lib/safeInvoke'
 import { addToast, operation, refreshSignal, runOperation } from '../lib/stores'
 
-let env = $state({ services: {}, projects: {}, runtimes: {}, activeProfileID: '' })
+let env = $state<any>({ services: {}, projects: {}, runtimes: {}, activeProfileID: '' })
 let envLoading = $state(true)
-let environments = $state([])
+let environments = $state<any[]>([])
 let envsLoading = $state(true)
-let selectedEnv = null
-let editingEnv = $state(null)
+let selectedEnv: any = null
+let editingEnv = $state<any>(null)
 let envModalOpen = $state(false)
-let snapshots = $state([])
-let snapshotDetails = $state({})
+let snapshots = $state<any[]>([])
+let snapshotDetails = $state<Record<string, any>>({})
 let snapLoading = $state(true)
 let busy = $state(false)
-let confirmRollbackId = null
-let confirmDeleteId = $state(null)
-let confirmDeleteEnvId = $state(null)
-let selectedSnapshotId = $state(null)
+let confirmRollbackId: any = null
+let confirmDeleteId = $state<any>(null)
+let confirmDeleteEnvId = $state<any>(null)
+let selectedSnapshotId = $state<any>(null)
 let activeTab = $state('environments')
 // 基于后端 getInstalledVersions 构建的安装状态映射，格式: { 'nginx 1.24.0': true }
-let installStatus = {}
+let installStatus: Record<string, boolean> = {}
 let installStatusReady = $state(false)
 
 // 安装进度相关
 let installModal = $state(false)
-let installingEnv = $state(null)
-let installTasks = $state([]) // [{ id, version, name, status: 'pending'|'downloading'|'extracting'|'done'|'error', progress: 0 }]
-let installProgress = {} // { 'nginx@1.24.0': { downloaded: 0, total: 0 } }
+let installingEnv = $state<any>(null)
+let installTasks = $state<any[]>([]) // [{ id, version, name, status: 'pending'|'downloading'|'extracting'|'done'|'error', progress: 0 }]
+let installProgress: Record<string, any> = {} // { 'nginx@1.24.0': { downloaded: 0, total: 0 } }
 let installCancelled = false // 用户点击取消时设为 true
 
 // 监听下载进度事件（后端 key 格式 "download:nginx:1.24.0" → 前端 key "nginx@1.24.0"）
@@ -55,7 +55,7 @@ let hasRunningServices = $derived(
     Object.values(env.runtimes || {}).some((r) => r.state === 'running'),
 )
 
-async function withTimeout(promise, timeoutMs = 5000, fallback = null) {
+async function withTimeout(promise: Promise<any>, timeoutMs = 5000, fallback: any = null) {
   return Promise.race([promise, new Promise((resolve) => setTimeout(() => resolve(fallback), timeoutMs))])
 }
 
@@ -112,7 +112,7 @@ async function load() {
 }
 
 // 使用后端 installStatus 检查组件安装状态
-function checkEnvInstalled(env) {
+function checkEnvInstalled(env: any) {
   const units = env.units ? (Array.isArray(env.units) ? env.units : Object.values(env.units)) : []
 
   const allInstalled = []
@@ -137,12 +137,12 @@ function checkEnvInstalled(env) {
 // 收集所有环境涉及的服务类型，查询后端实际安装版本
 async function refreshInstallStatus() {
   installStatusReady = false
-  const types = new Set()
+  const types = new Set<string>()
   for (const e of environments) {
     const units = Array.isArray(e.units) ? e.units : Object.values(e.units || {})
     for (const u of units) types.add(u.kind)
   }
-  const map = {}
+  const map: Record<string, boolean> = {}
   for (const kind of types) {
     const versions = await withTimeout(api.getInstalledVersions(kind), 5000, []).catch(() => [])
     if (Array.isArray(versions)) {
@@ -166,7 +166,7 @@ async function deactivateCurrent() {
   })
 }
 
-async function activateEnv(env) {
+async function activateEnv(env: any) {
   await runOperation({
     action: 'activate',
     title: `正在激活「${env.name}」`,
@@ -180,7 +180,7 @@ async function activateEnv(env) {
 }
 
 // 仅切换 activeEnvironmentId 标记，不启停任何组件
-async function activateEnvOnly(env) {
+async function activateEnvOnly(env: any) {
   await runOperation({
     action: 'activate-only',
     title: `正在激活「${env.name}」`,
@@ -207,11 +207,11 @@ async function activateEnvOnly(env) {
 //   })
 // }
 
-async function installEnvComponents(env) {
+async function installEnvComponents(env: any) {
   if (busy) return
   const installCheck = checkEnvInstalled(env)
   if (!installCheck.missing.length) {
-    addToast('所有组件已安装，可直接激活', 'info')
+    addToast('所有组件已安装，可直接激活', 'info', 3500)
     return
   }
 
@@ -244,11 +244,11 @@ async function installEnvComponents(env) {
       task.status = 'done'
       task.progress = 100
       installTasks = [...installTasks]
-    } catch (e) {
+} catch (e: any) {
       task.status = 'error'
       installTasks = [...installTasks]
       if (!installCancelled) {
-        addToast(`安装 ${task.name} ${task.version} 失败: ${e.message || e}`, 'error')
+        addToast(`安装 ${task.name} ${task.version} 失败: ${e.message || e}`, 'error', 3500)
       }
     }
   }
@@ -264,10 +264,10 @@ async function installEnvComponents(env) {
   await load()
   busy = false
 
-  if (installCancelled) {
+if (installCancelled) {
     // 已由 cancelInstall 提示
   } else if (installTasks.every((t) => t.status === 'done')) {
-    addToast('所有组件安装完成，可点击「激活并运行」启动环境', 'success')
+    addToast('所有组件安装完成，可点击「激活并运行」启动环境', 'success', 3500)
   }
 }
 
@@ -275,12 +275,12 @@ function cancelInstall() {
   if (installCancelled) return
   installCancelled = true
   // 立即反馈：未完成任务标记为已取消并关闭弹窗，不必等待正在进行的下载结束
-  installTasks = installTasks.map((t) => (t.status === 'done' ? t : { ...t, status: 'cancelled', progress: 0 }))
+installTasks = installTasks.map((t) => (t.status === 'done' ? t : { ...t, status: 'cancelled', progress: 0 }))
   installModal = false
-  addToast('已取消安装', 'warning')
+  addToast('已取消安装', 'warning', 3500)
 }
 
-const unitNames = {
+const unitNames: Record<string, string> = {
   nginx: 'Nginx',
   mysql: 'MySQL',
   redis: 'Redis',
@@ -297,8 +297,8 @@ function closeInstallModal() {
 }
 
 async function saveEnv() {
-  if (!editingEnv.name?.trim()) {
-    addToast('请填写环境名称', 'error')
+if (!editingEnv.name?.trim()) {
+    addToast('请填写环境名称', 'error', 3500)
     return
   }
   await safeInvoke(
@@ -343,23 +343,24 @@ async function doDeleteSnapshot() {
     if (selectedSnapshotId === id) selectedSnapshotId = null
     confirmDeleteId = null
     snapshots = snapshots.filter((s) => s !== id)
-    addToast('快照已删除', 'success')
-  } catch (e) {
-    addToast(`删除失败: ${e.message || e}`, 'error')
+addToast('快照已删除', 'success', 3500)
+  } catch (e: any) {
+    addToast(`删除失败: ${e.message || e}`, 'error', 3500)
   } finally {
     busy = false
   }
 }
 
-function formatTime(snapshotId) {
+function formatTime(snapshotId: string) {
   if (!snapshotId?.startsWith('snapshot-')) return snapshotId
   const ts = snapshotId.replace('snapshot-', '')
   if (ts.length !== 13) return snapshotId
   return `${ts.slice(0, 4)}-${ts.slice(4, 6)}-${ts.slice(6, 8)} ${ts.slice(9, 11)}:${ts.slice(11, 13)}`
 }
 
-function stateLabel(state) {
-  return { running: '运行中', stopped: '已停止', starting: '启动中', stopping: '停止中' }[state] || state || '未知'
+function stateLabel(state: string) {
+  const labels: Record<string, string> = { running: '运行中', stopped: '已停止', starting: '启动中', stopping: '停止中' }
+  return labels[state] || state || '未知'
 }
 
 function openCreateEnv() {
@@ -369,14 +370,14 @@ function openCreateEnv() {
   envModalOpen = true
 }
 
-function openEditEnv(env) {
+function openEditEnv(env: any) {
   expandedVersions = {}
   editingEnv = JSON.parse(JSON.stringify(env))
   preloadVersions()
   envModalOpen = true
 }
 
-function loadSnapshotDetail(id) {
+function loadSnapshotDetail(id: string) {
   if (selectedSnapshotId === id) {
     selectedSnapshotId = null
     return
@@ -392,7 +393,7 @@ function loadSnapshotDetail(id) {
         selectedSnapshotId = id
       }
     })
-    .catch(() => addToast('加载快照详情失败', 'error'))
+    .catch(() => addToast('加载快照详情失败', 'error', 3500))
 }
 
 // 组件目录：环境编辑器中可选的全部组件类型
@@ -408,28 +409,28 @@ const catalog = [
 
 // 每类组件的版本缓存: { [kind]: { installed: string[], available: string[], loading: bool } }
 // installed 来自 getInstalledVersions，available 来自 getAvailableVersions（可下载）
-let versionCache = $state({})
+let versionCache = $state<Record<string, any>>({})
 
 // 版本列表是否展开（false = 只显示一行，通过"更多"展开）
-let expandedVersions = $state({})
+let expandedVersions = $state<Record<string, boolean>>({})
 
-function sortVersions(list) {
+function sortVersions(list: any[]) {
   return [...list].sort((a, b) => b.localeCompare(a, 'en', { numeric: true }))
 }
 
 // 合并某类组件的全部版本：已安装优先（带 ✓ 标识），其后为可下载版本
-function allVersions(kind) {
+function allVersions(kind: string) {
   const v = versionCache[kind] || { installed: [], available: [] }
   const installed = v.installed || []
   const avail = (v.available || []).filter((x) => !installed.includes(x))
   return [...sortVersions(installed), ...sortVersions(avail)]
 }
 
-function isInstalled(kind, ver) {
+function isInstalled(kind: string, ver: string) {
   return (versionCache[kind]?.installed || []).includes(ver)
 }
 
-async function ensureVersions(kind) {
+async function ensureVersions(kind: string) {
   if (versionCache[kind]) return
   versionCache[kind] = { installed: [], available: [], loading: true }
   const [installed, available] = await Promise.all([
@@ -460,7 +461,7 @@ function preloadVersions() {
 }
 
 // 切换组件类型：已添加则移除，未加入则加入并默认选中第一个版本
-function toggleKind(kind) {
+function toggleKind(kind: string) {
   const idx = (editingEnv.units || []).findIndex((u) => u.kind === kind)
   if (idx >= 0) {
     const a = [...editingEnv.units]
@@ -474,7 +475,7 @@ function toggleKind(kind) {
   editingEnv.units = [...(editingEnv.units || []), { kind, version: def, name: '' }]
 }
 
-function selectVersion(kind, ver) {
+function selectVersion(kind: string, ver: string) {
   editingEnv.units = (editingEnv.units || []).map((u) => (u.kind === kind ? { ...u, version: ver } : u))
 }
 

@@ -20,6 +20,46 @@ import { addToast, nanoOperation, operation, pushToast, refreshSignal, runOperat
 let currentView = $state('dashboard')
 let showWizard = $state(false)
 
+// 状态栏数据：当前环境状态 + 环境模板列表（用于 ID→name 映射）
+let envState = $state<any>(null)
+let envProfiles = $state<any[]>([])
+
+async function loadEnvBar() {
+  const [env, profiles] = await Promise.all([
+    api.getEnvironment().catch(() => null),
+    api.listEnvironments().catch(() => [] as any[]),
+  ])
+  envState = env
+  envProfiles = (profiles as any[]) || []
+}
+
+// 当前激活环境名（ID→name 映射，映射不到回退 ID）
+let activeEnvName = $derived.by(() => {
+  const id = envState?.activeProfileID
+  if (!id) return '未激活'
+  const p = envProfiles.find((e: any) => e.id === id)
+  return p?.name || id
+})
+
+// 运行中组件数 / 总组件数（services + runtimes）
+let runningCount = $derived.by(() => {
+  if (!envState) return 0
+  const svcs = Object.values(envState.services || {})
+  const rts = Object.values(envState.runtimes || {})
+  return [...svcs, ...rts].filter((s: any) => s?.state === 'running').length
+})
+let totalCount = $derived.by(() => {
+  if (!envState) return 0
+  return Object.keys(envState.services || {}).length + Object.keys(envState.runtimes || {}).length
+})
+
+// Nginx 是否运行中（重启按钮禁用依据）
+let nginxRunning = $derived.by(() => {
+  if (!envState?.services) return false
+  const entry = Object.entries(envState.services).find(([id]) => id.startsWith('nginx@'))
+  return entry?.[1]?.state === 'running'
+})
+
 function navigate(view) {
   currentView = view
   // 视图保持挂载（class:hidden 切换），切换到「软件管理」时强制刷新数据，避免过期状态
@@ -38,9 +78,13 @@ function hideSplash() {
 
 onMount(() => {
   hideSplash()
+  loadEnvBar()
 
   // Subscribe to backend reactive events → auto-refresh stores
   const unsubEvents = subscribeReactiveEvents()
+
+  // 服务启停后刷新状态栏环境/运行数据
+  const unsubRefresh = refreshSignal.subscribe(() => loadEnvBar())
 
   // 环境编排进度事件 → 更新全屏操作进度
   const unsubOp = subscribeOperationEvents((name, data) => {
@@ -84,19 +128,23 @@ onMount(() => {
     }
   })
 
-  Promise.race([api.getSettings(), new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 15000))])
+  new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('timeout')), 15000)
+    api.getSettings().then(resolve, reject).finally(() => clearTimeout(timer))
+  })
     .then((settings) => {
       applyTheme(settings.theme)
       if (!settings.installDir) showWizard = true
     })
     .catch((e) => {
-      console.warn('[DevStack] getSettings 失败:', e)
-      showWizard = true
+      // 仅在不超时且确无 installDir 时才引导；超时/网络等任意失败不应弹设置向导（F11）
+      console.warn('[DevStack] getSettings 失败，使用默认设置:', e)
     })
 
   return () => {
     unsubEvents()
     unsubOp()
+    unsubRefresh()
   }
 })
 
@@ -163,6 +211,11 @@ async function restartNginx() {
   const env = await api.getEnvironment().catch(() => ({ services: {} }))
   const nginxEntry = Object.entries(env.services || {}).find(([id]) => id.startsWith('nginx@'))
   const serviceId = nginxEntry ? nginxEntry[0] : 'nginx'
+  // 仅在 Nginx 运行中时重启；未运行直接提示，避免"重启=启动"的误导语义
+  if (nginxEntry?.[1]?.state !== 'running') {
+    pushToast('Nginx 未运行，无需重启（请先点击绿色启动按钮）', 'info')
+    return
+  }
   await safeInvoke('restart:nginx', () => api.restartService(serviceId), {
     successMsg: 'Nginx 已重启',
     errorPrefix: '重启失败',
@@ -193,7 +246,7 @@ let pageTitle = $derived(
         <button class="btn btn-circle btn-sm bg-success text-white border-none hover:brightness-110" title="激活当前项目所需环境" onclick={startAll} disabled={$operation.active}>
           <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16"><path d="M8 5v14l11-7z"/></svg>
         </button>
-        <button class="btn btn-circle btn-sm bg-warning text-white border-none hover:brightness-110" title="重启 Nginx" onclick={restartNginx} disabled={$operation.active}>
+        <button class="btn btn-circle btn-sm bg-warning text-white border-none hover:brightness-110" title={nginxRunning ? '重启 Nginx' : 'Nginx 未运行'} onclick={restartNginx} disabled={$operation.active || !nginxRunning}>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
         </button>
         <button class="btn btn-circle btn-sm bg-error text-white border-none hover:brightness-110" title="停止全部服务" onclick={stopAll} disabled={$operation.active}>
@@ -203,16 +256,25 @@ let pageTitle = $derived(
     </header>
 
     <main class="flex-1 overflow-y-auto overflow-x-hidden px-8 py-6 bg-base-200">
-      <div class:block={currentView === 'dashboard'} class:hidden={currentView !== 'dashboard'}><Dashboard /></div>
-      <div class:block={currentView === 'sites'} class:hidden={currentView !== 'sites'}><Sites /></div>
-      <div class:block={currentView === 'software'} class:hidden={currentView !== 'software'}><Software /></div>
-      <div class:block={currentView === 'environment'} class:hidden={currentView !== 'environment'}><Environment /></div>
-      <div class:block={currentView === 'packages'} class:hidden={currentView !== 'packages'}><Packages /></div>
-      <div class:block={currentView === 'logs'} class:hidden={currentView !== 'logs'}><Logs /></div>
-      <div class:block={currentView === 'settings'} class:hidden={currentView !== 'settings'}><Settings /></div>
+      <!-- 仅挂载当前视图：隐藏视图不订阅 refreshSignal / 不轮询，避免每次 reactive 事件触发全部视图并行 reload（F14） -->
+      {#if currentView === 'dashboard'}<Dashboard />{/if}
+      {#if currentView === 'sites'}<Sites />{/if}
+      {#if currentView === 'software'}<Software />{/if}
+      {#if currentView === 'environment'}<Environment />{/if}
+      {#if currentView === 'packages'}<Packages />{/if}
+      {#if currentView === 'logs'}<Logs />{/if}
+      {#if currentView === 'settings'}<Settings />{/if}
     </main>
 
-    <footer class="flex items-center gap-3 px-6 py-1.5 bg-base-100 border-t border-base-300 text-xs text-base-content/60 shrink-0">
+    <footer class="flex items-center gap-4 px-6 py-1.5 bg-base-100 border-t border-base-300 text-xs text-base-content/60 shrink-0">
+      <span class="flex items-center gap-1.5">
+        <span>环境:</span>
+        <strong class="text-base-content/80">{activeEnvName}</strong>
+      </span>
+      <span class="flex items-center gap-1.5">
+        <span>运行:</span>
+        <span class={runningCount > 0 ? 'text-success font-medium' : ''}>{runningCount}/{totalCount}</span>
+      </span>
       <span class="flex items-center gap-1.5">
         {#if $syncInfo.syncing}
           <span class="loading loading-spinner loading-xs text-primary"></span>

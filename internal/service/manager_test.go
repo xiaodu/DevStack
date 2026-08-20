@@ -1,0 +1,196 @@
+package service
+
+import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"sync"
+	"sync/atomic"
+	"testing"
+
+	"github.com/xiaodu/DevStack/internal/config"
+	"github.com/xiaodu/DevStack/internal/core"
+	"github.com/xiaodu/DevStack/internal/process"
+	"github.com/xiaodu/DevStack/internal/provider"
+	"github.com/xiaodu/DevStack/internal/reactive"
+	"github.com/xiaodu/DevStack/internal/resource"
+)
+
+type testFakeProvider struct {
+	*provider.BaseProvider
+	failStart bool
+	startCalls int32
+	stopCalls  int32
+}
+
+func newTestFakeProvider(name string, failStart bool) *testFakeProvider {
+	return &testFakeProvider{
+		BaseProvider: provider.NewBaseProvider(name, "0.0.0-test", "test fake", nil),
+		failStart:    failStart,
+	}
+}
+
+func (p *testFakeProvider) NewInstance(ctx context.Context, cfg map[string]interface{}) (provider.ManagedEntity, error) {
+	version := "unknown"
+	if v, ok := cfg["version"].(string); ok {
+		version = v
+	}
+	return &testFakeEntity{id: p.Name() + "@" + version, p: p}, nil
+}
+
+func (p *testFakeProvider) IsInstalled(version string) bool { return true }
+
+type testFakeEntity struct {
+	id     string
+	status core.ServiceStatus
+	p      *testFakeProvider
+}
+
+func (e *testFakeEntity) ID() string   { return e.id }
+func (e *testFakeEntity) Type() string { return kindFromID(e.id) }
+
+func (e *testFakeEntity) Start(ctx context.Context) error {
+	atomic.AddInt32(&e.p.startCalls, 1)
+	if e.p.failStart {
+		return errors.New("模拟启动失败")
+	}
+	e.status = core.StatusRunning
+	return nil
+}
+
+func (e *testFakeEntity) Stop(ctx context.Context) error {
+	atomic.AddInt32(&e.p.stopCalls, 1)
+	e.status = core.StatusStopped
+	return nil
+}
+
+func (e *testFakeEntity) Status() (string, error) { return string(e.status), nil }
+func (e *testFakeEntity) LogPaths() []string        { return nil }
+func (e *testFakeEntity) ConfigSchema() provider.ConfigSchema {
+	return provider.ConfigSchema{}
+}
+func (e *testFakeEntity) HealthCheck(ctx context.Context) error { return nil }
+func (e *testFakeEntity) Configure(values map[string]interface{}) error {
+	return nil
+}
+func (e *testFakeEntity) Metrics(ctx context.Context) (provider.Metrics, error) {
+	return provider.Metrics{}, nil
+}
+
+func newTestManager(t *testing.T, failStart bool) (*Manager, *testFakeProvider) {
+	t.Helper()
+	dir := t.TempDir()
+	config.EnsureDirs(dir)
+	cfg := config.NewConfigForDir(dir)
+	if err := os.MkdirAll(filepath.Join(dir, "programs", "memcached", "1.6.0"), 0755); err != nil {
+		t.Fatalf("创建安装目录失败: %v", err)
+	}
+
+	fp := newTestFakeProvider("memcached", failStart)
+	provider.Register("memcached", fp, provider.CapabilityCache)
+
+	procMgr := process.NewManager()
+	resMgr := resource.NewManager(filepath.Join(dir, "config"))
+	reactiveEng := reactive.NewEngine(100)
+	return NewManager(cfg, procMgr, resMgr, reactiveEng), fp
+}
+
+// probe: 启动失败必须把状态回写为 Stopped，不能残留 Starting/Unknown。
+func TestManager_StartFailureResetsStatus(t *testing.T) {
+	m, _ := newTestManager(t, true)
+	if err := m.Start("memcached@1.6.0"); err == nil {
+		t.Fatalf("Start 应返回失败")
+	}
+	s := m.GetService("memcached@1.6.0")
+	if s == nil {
+		t.Fatalf("服务未注册")
+	}
+	if s.Info.Status != core.StatusStopped {
+		t.Fatalf("启动失败后状态应为 Stopped, 实际 %s", s.Info.Status)
+	}
+	if s.process != nil {
+		t.Fatalf("启动失败后不应残留进程句柄")
+	}
+}
+
+// probe: 启动成功置 Running；重复 Start 应是无操作（不重复拉起）。
+func TestManager_StartSucceedsAndIdempotent(t *testing.T) {
+	m, fp := newTestManager(t, false)
+	if err := m.Start("memcached@1.6.0"); err != nil {
+		t.Fatalf("Start 失败: %v", err)
+	}
+	if s := m.GetService("memcached@1.6.0"); s.Info.Status != core.StatusRunning {
+		t.Fatalf("启动后状态应为 Running, 实际 %s", s.Info.Status)
+	}
+	if atomic.LoadInt32(&fp.startCalls) != 1 {
+		t.Fatalf("Start 应调用 provider 1 次, 实际 %d", fp.startCalls)
+	}
+	// 重复 Start：无操作
+	if err := m.Start("memcached@1.6.0"); err != nil {
+		t.Fatalf("重复 Start 不应报错: %v", err)
+	}
+	if atomic.LoadInt32(&fp.startCalls) != 1 {
+		t.Fatalf("重复 Start 不应再次拉起, 实际 %d 次", fp.startCalls)
+	}
+}
+
+// probe: Stop 后状态回写 Stopped 且清理进程句柄（无 watcher 复活通道）；
+// 重复 Stop 幂等且不 panic。
+func TestManager_StopClearsAndIdempotent(t *testing.T) {
+	m, fp := newTestManager(t, false)
+	if err := m.Start("memcached@1.6.0"); err != nil {
+		t.Fatalf("Start 失败: %v", err)
+	}
+	if err := m.Stop("memcached@1.6.0"); err != nil {
+		t.Fatalf("Stop 失败: %v", err)
+	}
+	s := m.GetService("memcached@1.6.0")
+	if s.Info.Status != core.StatusStopped {
+		t.Fatalf("Stop 后状态应为 Stopped, 实际 %s", s.Info.Status)
+	}
+	if s.process != nil {
+		t.Fatalf("Stop 后应清理进程句柄（自愈不得复活已停服务）")
+	}
+	if s.stopped != nil {
+		t.Fatalf("Stop 后 stopped 通道应被清空")
+	}
+	if err := m.Stop("memcached@1.6.0"); err != nil {
+		t.Fatalf("重复 Stop 不应报错: %v", err)
+	}
+	if atomic.LoadInt32(&fp.stopCalls) == 0 {
+		t.Fatalf("Stop 未调用 provider")
+	}
+}
+
+// probe: 并发 Start/Stop 不应 panic / data race，且不丢失服务实例。
+func TestManager_ConcurrentStartStop(t *testing.T) {
+	m, _ := newTestManager(t, false)
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			var err error
+			if i%2 == 0 {
+				err = m.Start("memcached@1.6.0")
+			} else {
+				err = m.Stop("memcached@1.6.0")
+			}
+			if err != nil {
+				// Stop 在未运行时可返回“未找到或已退出”类错误，属于正常竞态结果
+				t.Logf("goroutine %d: %v", i, err)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	s := m.GetService("memcached@1.6.0")
+	if s == nil {
+		t.Fatalf("并发后服务实例丢失")
+	}
+	valid := s.Info.Status == core.StatusStopped || s.Info.Status == core.StatusRunning
+	if !valid {
+		t.Fatalf("并发后状态非法: %s", s.Info.Status)
+	}
+}

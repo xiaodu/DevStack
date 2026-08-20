@@ -1,0 +1,225 @@
+package mysqlutil
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/xiaodu/DevStack/internal/process"
+)
+
+// Config 描述一次 MySQL 数据目录的 root@127.0.0.1 账号引导参数。
+type Config struct {
+	MySQLDir string // programs/mysql/<version>
+	DataDir  string
+	Port     int
+	Version  string // 如 "5.7.44" / "8.0.39"
+	MyIni    string // 服务器配置文件（可为空，空则用 mysqld 编译默认值）
+}
+
+func (c Config) mysqlExe() string { return filepath.Join(c.MySQLDir, "bin", "mysqld.exe") }
+func (c Config) mysqlBin() string { return filepath.Join(c.MySQLDir, "bin", "mysql.exe") }
+
+type probeResult int
+
+const (
+	probeOK probeResult = iota
+	probeAuthDenied
+	probeHostDenied
+	probeUnreachable
+	probeOther
+)
+
+// EnsureRootIPAccount 确保 root@127.0.0.1 账号存在。
+//
+// 背景：Windows 下客户端经 TCP 连 127.0.0.1 时，MySQL 靠反向解析把 IP 映射回
+// localhost 才能匹配 root@localhost；解析失败时主机名就是字面 IP，于是报
+// "Host '127.0.0.1' is not allowed to connect"（错误 1130）。所以
+// --initialize-insecure 只建 root@localhost 是不够的，必须额外建 root@127.0.0.1。
+//
+// 探测逻辑：
+//   - 连接成功或提示 Access denied（账号已存在，只是有密码）→ 直接返回，不改动任何数据；
+//   - 提示 1130（账号缺失）或服务器未运行 → 以 --skip-grant-tables 启动临时实例创建账号。
+//
+// 返回 healed=true 表示期间停掉了端口上已有的本目录实例，调用方需负责重新启动正常实例。
+func EnsureRootIPAccount(c Config) (healed bool, err error) {
+	switch probe(c) {
+	case probeOK, probeAuthDenied:
+		return false, nil
+	case probeHostDenied:
+		// 账号缺失：需要临时实例，先停掉正在占端口的本目录实例
+	case probeUnreachable, probeOther:
+		// 服务器未运行：直接引导，无需停已有进程
+	}
+
+	if err := stopOwned(c); err != nil {
+		return false, err
+	}
+	// 强杀后稍等，让 InnoDB 释放数据目录文件锁，避免引导实例与旧进程竞争
+	time.Sleep(500 * time.Millisecond)
+
+	boot, err := startBootstrap(c)
+	if err != nil {
+		return false, err
+	}
+	cleanup := func() {
+		_ = stopProcess(boot)
+	}
+
+	if err := createRootIPAccount(c); err != nil {
+		cleanup()
+		return false, err
+	}
+	if err := stopProcess(boot); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
+// probe 尝试以 root 无密码连接 127.0.0.1，判断账号状态。
+func probe(c Config) probeResult {
+	out, err := runSQLOutput(c, "SELECT 1;")
+	if err == nil {
+		return probeOK
+	}
+	s := string(out)
+	switch {
+	case strings.Contains(s, "1130"):
+		return probeHostDenied
+	case strings.Contains(s, "1045"), strings.Contains(s, "Access denied"):
+		return probeAuthDenied
+	case strings.Contains(s, "2003"), strings.Contains(s, "2002"), strings.Contains(s, "10061"):
+		return probeUnreachable
+	}
+	return probeOther
+}
+
+// stopOwned 停掉端口上属于本数据目录的实例（防止端口冲突）。
+func stopOwned(c Config) error {
+	for i := 0; i < 20; i++ {
+		pid := process.FindPIDByPort(c.Port)
+		if pid <= 0 {
+			return nil
+		}
+		if !ownedBy(pid, c) {
+			return fmt.Errorf("端口 %d 被其它程序占用（PID %d），无法引导 MySQL root 账号", c.Port, pid)
+		}
+		if err := stopProcess(pid); err != nil {
+			return err
+		}
+	}
+	return fmt.Errorf("等待端口 %d 释放超时", c.Port)
+}
+
+// ownedBy 判断进程是否属于该 MySQL 安装目录。
+func ownedBy(pid int, c Config) bool {
+	p := process.GetExecutablePath(pid)
+	return strings.HasPrefix(strings.ToLower(p), strings.ToLower(c.MySQLDir))
+}
+
+// stopProcess 强制终止进程并等待退出。
+func stopProcess(pid int) error {
+	if pid <= 0 {
+		return nil
+	}
+	cmd := exec.Command("taskkill", "/F", "/T", "/PID", fmt.Sprintf("%d", pid))
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	_ = cmd.Run()
+	for i := 0; i < 20; i++ {
+		if !process.IsProcessRunning(pid) {
+			return nil
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	return fmt.Errorf("进程 %d 未能终止", pid)
+}
+
+// startBootstrap 以 --skip-grant-tables 启动临时实例并等待端口就绪。
+func startBootstrap(c Config) (int, error) {
+	args := []string{
+		"--datadir=" + c.DataDir,
+		"--port=" + strconv.Itoa(c.Port),
+		"--skip-grant-tables",
+	}
+	if c.MyIni != "" && fileExists(c.MyIni) {
+		args = append([]string{"--defaults-file=" + c.MyIni}, args...)
+	}
+	cmd := exec.Command(c.mysqlExe(), args...)
+	cmd.Dir = c.MySQLDir
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	if err := cmd.Start(); err != nil {
+		return 0, fmt.Errorf("启动 MySQL 引导实例失败: %w", err)
+	}
+	spawned := cmd.Process.Pid
+	for i := 0; i < 24; i++ {
+		time.Sleep(500 * time.Millisecond)
+		if p := process.FindPIDByPort(c.Port); p > 0 {
+			return p, nil
+		}
+		if !process.IsProcessRunning(spawned) {
+			_ = stopProcess(spawned)
+			return 0, fmt.Errorf("MySQL 引导实例启动后即退出，请检查 %s 下的错误日志", c.MySQLDir)
+		}
+	}
+	_ = stopProcess(spawned)
+	return 0, fmt.Errorf("MySQL 引导实例未监听端口 %d", c.Port)
+}
+
+// createRootIPAccount 创建 root@127.0.0.1（空密码、全权限），与 root@localhost 等价。
+func createRootIPAccount(c Config) error {
+	if err := runSQL(c, "FLUSH PRIVILEGES;"); err != nil {
+		return fmt.Errorf("刷新权限表失败: %w", err)
+	}
+	out, err := runSQLOutput(c, "SELECT COUNT(*) FROM mysql.user WHERE User='root' AND Host='127.0.0.1';")
+	if err != nil {
+		return fmt.Errorf("查询 root@127.0.0.1 失败: %w", err)
+	}
+	if n, _ := strconv.Atoi(strings.TrimSpace(firstLine(out))); n > 0 {
+		return nil
+	}
+	if mysqlVersionAtLeast8(c.Version) {
+		return runSQL(c, "CREATE USER IF NOT EXISTS 'root'@'127.0.0.1' IDENTIFIED BY ''; GRANT ALL PRIVILEGES ON *.* TO 'root'@'127.0.0.1' WITH GRANT OPTION;")
+	}
+	return runSQL(c, "CREATE USER 'root'@'127.0.0.1' IDENTIFIED BY ''; GRANT ALL PRIVILEGES ON *.* TO 'root'@'127.0.0.1' WITH GRANT OPTION;")
+}
+
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
+	}
+	return s
+}
+
+func mysqlVersionAtLeast8(version string) bool {
+	fields := strings.SplitN(version, ".", 2)
+	major, err := strconv.Atoi(fields[0])
+	return err == nil && major >= 8
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func runSQL(c Config, sql string) error {
+	_, err := runSQLOutput(c, sql)
+	return err
+}
+
+func runSQLOutput(c Config, sql string) (string, error) {
+	args := []string{
+		"--host=127.0.0.1",
+		"--port=" + strconv.Itoa(c.Port),
+		"-u", "root",
+		"-e", sql,
+	}
+	cmd := exec.Command(c.mysqlBin(), args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}

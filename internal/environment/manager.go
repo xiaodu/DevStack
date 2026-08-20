@@ -249,13 +249,32 @@ func (m *Manager) Delete(id string) error {
 		m.deletedBuiltins = append(m.deletedBuiltins, id)
 	}
 	delete(m.envs, id)
-	return m.save()
+	if err := m.save(); err != nil {
+		m.envs[id] = e
+		if e.IsBuiltin {
+			m.deletedBuiltins = m.deletedBuiltins[:len(m.deletedBuiltins)-1]
+		}
+		return err
+	}
+	return nil
+}
+
+var validKinds = map[string]bool{
+	"nginx":  true,
+	"mysql":  true,
+	"php":    true,
+	"redis":  true,
+	"node":   true,
+	"python": true,
 }
 
 func validateUnits(units []UnitSpec) error {
 	for i, u := range units {
 		if strings.TrimSpace(u.Kind) == "" {
 			return fmt.Errorf("第 %d 个组件的 kind 不能为空", i+1)
+		}
+		if !validKinds[u.Kind] {
+			return fmt.Errorf("第 %d 个组件的 kind %q 不合法，支持: nginx, mysql, php, redis, node, python", i+1, u.Kind)
 		}
 		if strings.TrimSpace(u.Version) == "" {
 			return fmt.Errorf("第 %d 个组件 %q 的 version 不能为空", i+1, u.Kind)

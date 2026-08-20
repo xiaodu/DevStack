@@ -15,6 +15,7 @@ import (
 
 	"github.com/xiaodu/DevStack/internal/config"
 	"github.com/xiaodu/DevStack/internal/core"
+	"github.com/xiaodu/DevStack/internal/orchestrator"
 	"github.com/xiaodu/DevStack/internal/process"
 	"github.com/xiaodu/DevStack/internal/provider"
 	"github.com/xiaodu/DevStack/internal/reactive"
@@ -31,16 +32,30 @@ type Manager struct {
 	services   map[string]*ServiceInstance
 	dependents map[string][]string
 	reactive   *reactive.Engine
+	orch       *orchestrator.Engine // 服务编排引擎（Windows Job Object）
 }
 
 type ServiceInstance struct {
 	Info         core.ServiceInfo
 	process      *process.ProcessHandle
 	stopped      chan struct{}
+	stoppedFlag  bool // true when user explicitly called Stop — watcher must not trigger restart
 	restartCount int
 }
 
 func NewManager(cfg *config.Config, procMgr *process.Manager, resMgr *resource.Manager, reactiveEng *reactive.Engine) *Manager {
+	// 创建服务编排引擎
+	orch, err := orchestrator.NewEngine(
+		orchestrator.WithLogCallback(func(msg string) {
+			// 日志可以通过 reactive 引擎传递到前端
+		}),
+	)
+	if err != nil {
+		// 编排引擎创建失败，记录错误但不影响服务管理器初始化
+		// 服务管理器将回退到 provider 模式
+		orch = nil
+	}
+
 	m := &Manager{
 		cfg:        cfg,
 		procMgr:    procMgr,
@@ -48,6 +63,7 @@ func NewManager(cfg *config.Config, procMgr *process.Manager, resMgr *resource.M
 		services:   make(map[string]*ServiceInstance),
 		dependents: make(map[string][]string),
 		reactive:   reactiveEng,
+		orch:       orch,
 	}
 	m.registerDefaults()
 	return m
@@ -109,6 +125,36 @@ func (m *Manager) registerDefaults() {
 			s.Info.PID = pid
 		}
 	}
+}
+
+// LoadProcfile 加载 Procfile 到编排引擎
+//
+// 从指定路径加载 Procfile，将服务定义注册到编排引擎。
+// 如果编排引擎未初始化，此方法静默返回 nil。
+func (m *Manager) LoadProcfile(path string) error {
+	if m.orch == nil {
+		return nil
+	}
+	return m.orch.LoadProcfile(path)
+}
+
+// GetOrchestrator 返回编排引擎实例（用于外部调用）
+func (m *Manager) GetOrchestrator() *orchestrator.Engine {
+	return m.orch
+}
+
+// findServiceByName 根据服务名称查找服务实例
+//
+// 编排引擎使用服务名称（如 "Nginx"），而 service.Manager 使用 ID（如 "nginx@1.26"）。
+// 此方法通过名称匹配查找对应的服务实例。
+func (m *Manager) findServiceByName(name string) *ServiceInstance {
+	lowerName := strings.ToLower(name)
+	for _, s := range m.services {
+		if strings.ToLower(s.Info.Name) == lowerName || strings.ToLower(s.Info.Kind) == lowerName {
+			return s
+		}
+	}
+	return nil
 }
 
 var serviceOrder = []string{"nginx", "apache", "mysql", "postgresql", "mongodb", "redis", "memcached", "node", "python", "composer"}
@@ -311,10 +357,22 @@ func (m *Manager) Start(id string) error {
 	version := s.Info.Version
 	port := s.Info.Port
 	s.Info.Status = core.StatusStarting
+	s.Info.Error = ""
 	m.mu.Unlock()
 
+	m.publishServiceEvent(reactive.EventServiceStarting, id, nil)
+
+	// 使用 Provider 启动服务（保留原有逻辑）
 	p := provider.Get(kind)
 	if p == nil {
+		m.mu.Lock()
+		if si, ok := m.services[id]; ok {
+			si.Info.Status = core.StatusStopped
+		}
+		m.mu.Unlock()
+		m.publishServiceEvent(reactive.EventServiceError, id, map[string]interface{}{
+			"error": fmt.Sprintf("不支持的服务类型: %s", kind),
+		})
 		return fmt.Errorf("不支持的的服务类型: %s", id)
 	}
 
@@ -327,22 +385,35 @@ func (m *Manager) Start(id string) error {
 		m.mu.Lock()
 		if si, ok := m.services[id]; ok {
 			si.Info.Status = core.StatusStopped
+			si.Info.Error = err.Error()
 		}
 		m.mu.Unlock()
+		m.publishServiceEvent(reactive.EventServiceError, id, map[string]interface{}{
+			"error": err.Error(),
+		})
 		return err
 	}
 	if err := entity.Start(context.Background()); err != nil {
 		m.mu.Lock()
 		if si, ok := m.services[id]; ok {
 			si.Info.Status = core.StatusStopped
+			si.Info.Error = err.Error()
 		}
 		m.mu.Unlock()
+		m.publishServiceEvent(reactive.EventServiceError, id, map[string]interface{}{
+			"error": err.Error(),
+		})
 		return err
 	}
 	pid := process.FindPIDByPort(port)
 	proc := &process.ProcessHandle{PID: pid, Started: time.Now()}
 	if pid <= 0 {
 		proc = nil
+	}
+
+	// 将进程加入 Job Object（如果编排引擎可用）
+	if m.orch != nil && pid > 0 {
+		m.orch.AssignPID(kind, pid)
 	}
 
 	m.mu.Lock()
@@ -352,6 +423,8 @@ func (m *Manager) Start(id string) error {
 		return core.ErrServiceNotFound
 	}
 	s.Info.Status = core.StatusRunning
+	s.Info.Error = ""
+	s.stoppedFlag = false
 	if proc != nil && proc.PID > 0 {
 		s.Info.PID = proc.PID
 	}
@@ -361,6 +434,8 @@ func (m *Manager) Start(id string) error {
 
 	stoppedChan := s.stopped
 	m.mu.Unlock()
+
+	m.publishServiceEvent(reactive.EventServiceStarted, id, nil)
 
 	if proc != nil {
 		go m.watchProcess(id, stoppedChan)
@@ -390,11 +465,14 @@ func (m *Manager) Stop(id string) error {
 	kind := kindFromID(id)
 	version := s.Info.Version
 	port := s.Info.Port
+	installDir := m.cfg.Get().InstallDir
 
+	s.Info.Status = core.StatusStopping
 	m.mu.Unlock()
 
-	// 在锁外执行外部进程停止操作
-	installDir := m.cfg.Get().InstallDir
+	m.publishServiceEvent(reactive.EventServiceStopping, id, nil)
+
+	// 使用 Provider 停止服务（保留原有逻辑）
 	var stopErr error
 	p := provider.Get(kind)
 	if p != nil {
@@ -404,59 +482,73 @@ func (m *Manager) Stop(id string) error {
 		}
 		entity, err := p.NewInstance(context.Background(), config)
 		if err != nil {
-			return err
-		}
-		if err := entity.Stop(context.Background()); err != nil {
-			// 不立即返回：先按真实进程状态判定并回写，避免"停止失败"与"未在运行"并存
-			stopErr = err
-		}
-	} else {
-		pid := process.FindPIDByPort(port)
-		if pid > 0 && exePathMatchesPID(pid, installDir, kind, version) {
 			m.mu.Lock()
 			if si, ok := m.services[id]; ok {
-				si.Info.Status = core.StatusStopping
+				si.Info.Status = core.StatusStopped
+				si.Info.Error = err.Error()
 			}
 			m.mu.Unlock()
-			m.procMgr.Stop(pid)
+			m.publishServiceEvent(reactive.EventServiceError, id, map[string]interface{}{
+				"error": err.Error(),
+			})
+			return err
+		}
+		stopErr = entity.Stop(context.Background())
+	} else {
+		// 无 provider 注册的服务：按端口反查本实例进程并终止
+		pid := process.FindPIDByPort(port)
+		if pid > 0 && exePathMatchesPID(pid, installDir, kind, version) {
+			stopErr = m.procMgr.Stop(pid)
 		}
 	}
 
-	// 等待本服务进程退出（最多约 2 秒），随后以真实进程状态回写
-	if port > 0 {
-		for j := 0; j < 4; j++ {
-			pid := process.FindPIDByPort(port)
-			if pid <= 0 || !exePathMatchesPID(pid, installDir, kind, version) {
-				break
-			}
-			time.Sleep(500 * time.Millisecond)
+	// 从 Job Object 中释放进程
+	if m.orch != nil {
+		m.mu.RLock()
+		var pid int
+		if si, ok := m.services[id]; ok && si.process != nil {
+			pid = si.process.PID
+		}
+		m.mu.RUnlock()
+		if pid > 0 {
+			m.orch.ReleasePID(kind, pid)
 		}
 	}
 
-	pid := process.FindPIDByPort(port)
-	owned := pid > 0 && exePathMatchesPID(pid, installDir, kind, version)
-	if owned && stopErr == nil {
-		stopErr = fmt.Errorf("服务 %s 停止失败: 端口 %d 仍被进程 %d 占用", id, port, pid)
-	}
-
-	// 更新状态：端口占用者仍为本服务进程 → 仍在运行；否则视为已停止
+	// 更新最终状态
 	m.mu.Lock()
 	if si, ok := m.services[id]; ok {
-		if owned {
-			si.Info.Status = core.StatusRunning
-			si.Info.PID = pid
+		if stopErr != nil {
+			si.Info.Status = core.StatusError
+			si.Info.Error = stopErr.Error()
 		} else {
 			si.process = nil
 			si.Info.Status = core.StatusStopped
 			si.Info.PID = 0
+			si.Info.Error = ""
 		}
 	}
 	m.mu.Unlock()
 
-	if stopErr != nil && owned {
+	if stopErr != nil {
+		m.publishServiceEvent(reactive.EventServiceError, id, map[string]interface{}{
+			"error": stopErr.Error(),
+		})
 		return stopErr
 	}
+
+	m.publishServiceEvent(reactive.EventServiceStopped, id, nil)
 	return nil
+}
+
+func (m *Manager) publishServiceEvent(eventType reactive.EventType, serviceID string, extra map[string]interface{}) {
+	data := map[string]interface{}{
+		"serviceID": serviceID,
+	}
+	for k, v := range extra {
+		data[k] = v
+	}
+	m.reactive.Publish(reactive.NewEvent(eventType, serviceID, data))
 }
 
 const maxRestartCount = 3
@@ -469,7 +561,7 @@ func (m *Manager) watchProcess(id string, stopped <-chan struct{}) {
 		case <-time.After(5 * time.Second):
 			m.mu.RLock()
 			s2 := m.services[id]
-			if s2 == nil || s2.stopped == nil || s2.Info.Status != core.StatusRunning {
+			if s2 == nil || s2.stoppedFlag || s2.Info.Status != core.StatusRunning {
 				m.mu.RUnlock()
 				return
 			}
@@ -482,7 +574,7 @@ func (m *Manager) watchProcess(id string, stopped <-chan struct{}) {
 					m.mu.Lock()
 					s3 := m.services[id]
 					// 复检：重检期间服务可能已被用户停止或状态已变化，不再触发自愈
-					if s3 == nil || s3.stopped == nil || s3.Info.Status != core.StatusRunning {
+					if s3 == nil || s3.stoppedFlag || s3.Info.Status != core.StatusRunning {
 						m.mu.Unlock()
 						return
 					}
@@ -827,6 +919,7 @@ func (m *Manager) CheckMySQLRootAuth() (bool, error) {
 	}
 
 	args := []string{
+		"--host=127.0.0.1",
 		fmt.Sprintf("--port=%d", port),
 		"-u", "root",
 		"-e", "SELECT 1;",
@@ -878,10 +971,11 @@ func (m *Manager) UninstallVersion(serviceType, version string) error {
 				m.mu.Unlock()
 				return nil
 			}
-			if s.stopped != nil {
-				close(s.stopped)
-				s.stopped = nil
-			}
+	if s.stopped != nil {
+		close(s.stopped)
+		s.stopped = nil
+	}
+	s.stoppedFlag = true
 			var pids []int
 			if s.process != nil {
 				pids = append(pids, s.process.PID)
@@ -1054,4 +1148,14 @@ func removeAll(path string) error {
 	rd := exec.Command("cmd", "/c", "rd", "/s", "/q", path)
 	rd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	return rd.Run()
+}
+
+// Shutdown 关闭服务管理器，清理编排引擎
+//
+// 在应用退出时调用，确保所有通过编排引擎管理的进程被正确终止。
+func (m *Manager) Shutdown(ctx context.Context) error {
+	if m.orch != nil {
+		return m.orch.Shutdown(ctx)
+	}
+	return nil
 }

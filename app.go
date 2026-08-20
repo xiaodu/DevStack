@@ -58,6 +58,8 @@ var serviceNames = map[string]string{
 	"nginx": "Nginx", "mysql": "MySQL", "redis": "Redis",
 }
 
+var wailsLogFile *os.File
+
 var runtimeNames = map[string]string{
 	"php": "PHP", "node": "Node.js", "python": "Python",
 }
@@ -82,6 +84,7 @@ func NewApp() *App {
 		wailsLogPath := filepath.Join(installDir, "logs", "wails.log")
 		logFile, err := os.OpenFile(wailsLogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 		if err == nil {
+			wailsLogFile = logFile
 			stdlog.SetOutput(logFile)
 			stdlog.Println("[WAILS] 日志文件初始化: " + wailsLogPath)
 		} else {
@@ -131,6 +134,19 @@ func NewApp() *App {
 	svcMgr := service.NewManager(cfg, procMgr, resMgr, reactiveEng)
 	services := svcMgr.List()
 	opStore.LogInfo("[INIT] 服务管理器初始化完成, 已注册服务数: %d", len(services))
+
+	// 加载 Procfile 到编排引擎
+	procfilePath := filepath.Join(installDir, "Procfile")
+	if _, err := os.Stat(procfilePath); err == nil {
+		opStore.LogInfo("[INIT] 加载 Procfile: %s", procfilePath)
+		if err := svcMgr.LoadProcfile(procfilePath); err != nil {
+			opStore.LogWarn("[INIT] 加载 Procfile 失败: %v", err)
+		} else {
+			opStore.LogInfo("[INIT] Procfile 加载成功")
+		}
+	} else {
+		opStore.LogInfo("[INIT] Procfile 不存在，跳过加载")
+	}
 
 	opStore.LogInfo("[INIT] 初始化运行时管理器...")
 	rtMgr := runtime.NewManager(cfg, procMgr, resMgr)
@@ -272,9 +288,12 @@ func (a *App) startup(ctx context.Context) {
 		eventTypes := []reactive.EventType{
 			reactive.EventServiceStarted,
 			reactive.EventServiceStopped,
+			reactive.EventServiceStarting,
+			reactive.EventServiceStopping,
 			reactive.EventServiceCrashed,
 			reactive.EventServiceHealthFailed,
 			reactive.EventServiceRestarted,
+			reactive.EventServiceError,
 			reactive.EventPortConflict,
 			reactive.EventConfigChanged,
 			reactive.EventConfigReloaded,
@@ -1132,6 +1151,7 @@ func (a *App) DownloadService(serviceType, version, url string) error {
 	}()
 
 	var urls []string
+	var checksum string
 	if url != "" {
 		urls = append(urls, url)
 	}
@@ -1147,6 +1167,7 @@ func (a *App) DownloadService(serviceType, version, url string) error {
 			if r.MirrorURL != "" {
 				urls = append(urls, r.MirrorURL)
 			}
+			checksum = r.Checksum
 			break
 		}
 	}
@@ -1169,7 +1190,7 @@ func (a *App) DownloadService(serviceType, version, url string) error {
 		}
 	}
 
-	if err := a.dlMgr.TryDownloadAndExtract(progressKey, urls, destDir, progressFn); err != nil {
+	if err := a.dlMgr.TryDownloadAndExtract(progressKey, urls, destDir, progressFn, checksum); err != nil {
 		name := serviceNames[serviceType]
 		if name == "" {
 			name = runtimeNames[serviceType]
@@ -1404,4 +1425,53 @@ func (a *App) GetSnapshotDetail(snapshotID string) (engine.EnvironmentState, err
 
 func (a *App) DeleteSnapshot(snapshotID string) error {
 	return a.reconciler.SnapshotManager().DeleteSnapshot(a.ctx, snapshotID)
+}
+
+// TakeSnapshot 保存当前环境状态为快照，返回快照标识。
+func (a *App) TakeSnapshot() (string, error) {
+	if a.opStore != nil {
+		a.opStore.LogDebug("[API] TakeSnapshot 调用")
+	}
+	state, err := a.stateStore.Load()
+	if err != nil {
+		if a.opStore != nil {
+			a.opStore.LogError("[API] TakeSnapshot 读取状态失败: %v", err)
+		}
+		return "", err
+	}
+	snapshotID, err := a.reconciler.SnapshotManager().TakeSnapshot(a.ctx, state)
+	if err != nil {
+		if a.opStore != nil {
+			a.opStore.LogError("[API] TakeSnapshot 失败: %v", err)
+		}
+		return "", err
+	}
+	if a.opStore != nil {
+		a.opStore.LogDebug("[API] TakeSnapshot 完成: %s", snapshotID)
+	}
+	return snapshotID, nil
+}
+
+// RollbackSnapshot 恢复指定快照保存的环境状态（覆盖当前状态文件）。
+func (a *App) RollbackSnapshot(snapshotID string) error {
+	if a.opStore != nil {
+		a.opStore.LogDebug("[API] RollbackSnapshot 调用: %s", snapshotID)
+	}
+	state, err := a.reconciler.SnapshotManager().LoadSnapshot(a.ctx, snapshotID)
+	if err != nil {
+		if a.opStore != nil {
+			a.opStore.LogError("[API] RollbackSnapshot 加载失败: %v", err)
+		}
+		return err
+	}
+	if err := a.stateStore.Save(state); err != nil {
+		if a.opStore != nil {
+			a.opStore.LogError("[API] RollbackSnapshot 写入失败: %v", err)
+		}
+		return err
+	}
+	if a.opStore != nil {
+		a.opStore.LogDebug("[API] RollbackSnapshot 完成")
+	}
+	return nil
 }

@@ -4,15 +4,16 @@ import { api } from '../lib/api'
 import { safeInvoke } from '../lib/safeInvoke'
 import { addToast, refreshSignal } from '../lib/stores'
 
-let snapshots = $state([])
+let snapshots = $state<string[]>([])
 let loading = $state(true)
 let busy = $state(false)
-let confirmRollbackId = $state(null)
-let confirmDeleteId = null
+let confirmRollbackId = $state<string | null>(null)
+let confirmDeleteId = $state<string | null>(null)
 
 async function load() {
   loading = true
   await safeInvoke(
+    'loadSnapshots',
     async () => {
       snapshots = await api.getSnapshots()
     },
@@ -22,43 +23,61 @@ async function load() {
 }
 
 async function createSnapshot() {
-  await safeInvoke(
-    async () => {
-      const id = await api.takeSnapshot()
-      await load()
-      return id
-    },
-    { successMsg: '快照已创建', errorPrefix: '创建快照失败' },
-  )
+  if (busy) return
+  busy = true
+  try {
+    await safeInvoke(
+      'createSnapshot',
+      async () => {
+        await api.takeSnapshot()
+        await load()
+      },
+      { successMsg: '快照已创建', errorPrefix: '创建快照失败' },
+    )
+  } finally {
+    busy = false
+  }
 }
 
 async function doRollback() {
   if (!confirmRollbackId || busy) return
+  const id = confirmRollbackId
   busy = true
-  await safeInvoke(
-    async () => {
-      await api.rollbackSnapshot(confirmRollbackId)
-      confirmRollbackId = null
-      refreshSignal.update((n) => n + 1)
-    },
-    { successMsg: '已回滚', errorPrefix: '回滚失败' },
-  )
-  busy = false
+  try {
+    await safeInvoke(
+      'rollbackSnapshot',
+      async () => {
+        await api.rollbackSnapshot(id)
+        confirmRollbackId = null
+        refreshSignal.update((n) => n + 1)
+      },
+      { successMsg: '已回滚', errorPrefix: '回滚失败' },
+    )
+  } finally {
+    busy = false
+  }
 }
 
 async function doDelete() {
   if (!confirmDeleteId || busy) return
+  const id = confirmDeleteId
   busy = true
-  await safeInvoke(
-    async () => {
-      confirmDeleteId = null
-    },
-    { successMsg: '已删除', errorPrefix: '删除失败' },
-  )
-  busy = false
+  try {
+    await safeInvoke(
+      'deleteSnapshot',
+      async () => {
+        await api.deleteSnapshot(id)
+        confirmDeleteId = null
+        await load()
+      },
+      { successMsg: '已删除', errorPrefix: '删除失败' },
+    )
+  } finally {
+    busy = false
+  }
 }
 
-function formatTime(snapshotId) {
+function formatTime(snapshotId: string) {
   if (!snapshotId?.startsWith('snapshot-')) return snapshotId
   const ts = snapshotId.replace('snapshot-', '')
   if (ts.length !== 13) return snapshotId
@@ -99,6 +118,7 @@ onMount(load)
               <div class="text-xs text-base-content/60 mt-0.5">{formatTime(snap)}</div>
             </div>
             <button class="btn btn-sm btn-outline" onclick={() => confirmRollbackId = snap} disabled={busy}>回滚</button>
+            <button class="btn btn-sm btn-ghost btn-error" onclick={() => confirmDeleteId = snap} disabled={busy}>删除</button>
           </div>
         </div>
       {/each}
@@ -118,4 +138,17 @@ onMount(load)
     </div>
   </div>
   <form method="dialog" class="modal-backdrop"><button onclick={() => confirmRollbackId = null}>关闭</button></form>
+</dialog>
+
+<!-- Delete confirm modal -->
+<dialog class="modal" class:modal-open={!!confirmDeleteId}>
+  <div class="modal-box">
+    <h3 class="font-bold text-lg">确认删除</h3>
+    <p class="py-2 text-sm text-base-content/70">确定要删除快照 <code class="bg-base-300 px-1.5 py-0.5 rounded text-xs font-mono">{confirmDeleteId}</code> 吗？</p>
+    <div class="modal-action">
+      <button class="btn btn-ghost" onclick={() => confirmDeleteId = null}>取消</button>
+      <button class="btn btn-error" onclick={doDelete} disabled={busy}>确认删除</button>
+    </div>
+  </div>
+  <form method="dialog" class="modal-backdrop"><button onclick={() => confirmDeleteId = null}>关闭</button></form>
 </dialog>

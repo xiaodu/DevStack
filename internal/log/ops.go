@@ -33,8 +33,6 @@ func (s *OpStore) SetLogger(logger *FileLogger) {
 
 func (s *OpStore) Add(action, service, detail, status string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	timestamp := time.Now().Format("15:04:05")
 	s.buf = append(s.buf, OpEntry{
 		Time:    timestamp,
@@ -46,8 +44,10 @@ func (s *OpStore) Add(action, service, detail, status string) {
 	if len(s.buf) > s.max {
 		s.buf = s.buf[len(s.buf)-s.max:]
 	}
+	logger := s.logger
+	s.mu.Unlock()
 
-	if s.logger != nil {
+	if logger != nil {
 		logLevel := LevelInfo
 		if status == "failed" || status == "error" || status == "失败" {
 			logLevel = LevelError
@@ -56,7 +56,7 @@ func (s *OpStore) Add(action, service, detail, status string) {
 		if service != "" {
 			entry = fmt.Sprintf("[%s] %s", service, entry)
 		}
-		s.logger.log(logLevel, entry)
+		logger.log(logLevel, entry)
 	}
 }
 
