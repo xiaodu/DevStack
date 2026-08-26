@@ -34,7 +34,9 @@ func NewManager(installDir string) *Manager {
 		envs:     make(map[string]Environment),
 	}
 	m.builtins = m.defaultBuiltins()
-	_ = os.MkdirAll(filepath.Dir(m.filePath), 0755)
+	if installDir != "" {
+		_ = os.MkdirAll(filepath.Dir(m.filePath), 0755)
+	}
 	m.load()
 	m.mergeBuiltins()
 	return m
