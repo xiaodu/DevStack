@@ -102,91 +102,120 @@ func NewApp() *App {
 		opStore.LogWarn("[INIT] 安装目录为空，将显示设置向导")
 	}
 
-	logDir := filepath.Join(installDir, "logs")
-	opStore.LogInfo("[INIT] 初始化文件日志系统, 日志目录: %s", logDir)
-	var err error
-	fileLogger, err = log.NewFileLogger(log.FileLoggerConfig{
-		LogDir:  logDir,
-		MaxSize: 10 * 1024 * 1024,
-		MaxDays: 30,
-		Level:   log.LevelDebug,
-	})
-	if err != nil {
-		opStore.LogError("[INIT] 文件日志系统初始化失败: %v", err)
+	if installDir != "" {
+		logDir := filepath.Join(installDir, "logs")
+		opStore.LogInfo("[INIT] 初始化文件日志系统, 日志目录: %s", logDir)
+		var err error
+		fileLogger, err = log.NewFileLogger(log.FileLoggerConfig{
+			LogDir:  logDir,
+			MaxSize: 10 * 1024 * 1024,
+			MaxDays: 30,
+			Level:   log.LevelDebug,
+		})
+		if err != nil {
+			opStore.LogError("[INIT] 文件日志系统初始化失败: %v", err)
+		} else {
+			opStore.SetLogger(fileLogger)
+			opStore.LogInfo("[INIT] 文件日志系统初始化成功")
+		}
 	} else {
-		opStore.SetLogger(fileLogger)
-		opStore.LogInfo("[INIT] 文件日志系统初始化成功")
+		opStore.LogInfo("[INIT] 安装目录为空，跳过文件日志系统初始化")
 	}
 
 	opStore.LogInfo("[INIT] 初始化进程管理器...")
 	procMgr := process.NewManager()
 	opStore.LogInfo("[INIT] 进程管理器初始化完成")
 
-	opStore.LogInfo("[INIT] 初始化资源管理器...")
-	resMgr := resource.NewManager(filepath.Join(installDir, "config"))
-	opStore.LogInfo("[INIT] 资源管理器初始化完成")
+	var resMgr *resource.Manager
+	if installDir != "" {
+		opStore.LogInfo("[INIT] 初始化资源管理器...")
+		resMgr = resource.NewManager(filepath.Join(installDir, "config"))
+		opStore.LogInfo("[INIT] 资源管理器初始化完成")
+	} else {
+		opStore.LogInfo("[INIT] 安装目录为空，跳过资源管理器初始化")
+	}
 
 	opStore.LogInfo("[INIT] 初始化响应式引擎...")
 	reactiveEng := reactive.NewEngine(100)
 	opStore.LogInfo("[INIT] 响应式引擎创建完成")
 
-	opStore.LogInfo("[INIT] 初始化服务管理器...")
-	svcMgr := service.NewManager(cfg, procMgr, resMgr, reactiveEng)
-	services := svcMgr.List()
-	opStore.LogInfo("[INIT] 服务管理器初始化完成, 已注册服务数: %d", len(services))
+	var svcMgr *service.Manager
+	var rtMgr *runtime.Manager
+	var projMgr *project.Manager
+	var envMgr *environment.Manager
+	var dlMgr *download.Manager
+	var stateStore *engine.StateStore
+	var reconciler *engine.ReconcilerImpl
 
-	// 加载 Procfile 到编排引擎
-	procfilePath := filepath.Join(installDir, "Procfile")
-	if _, err := os.Stat(procfilePath); err == nil {
-		opStore.LogInfo("[INIT] 加载 Procfile: %s", procfilePath)
-		if err := svcMgr.LoadProcfile(procfilePath); err != nil {
-			opStore.LogWarn("[INIT] 加载 Procfile 失败: %v", err)
+	if installDir != "" {
+		opStore.LogInfo("[INIT] 初始化服务管理器...")
+		svcMgr = service.NewManager(cfg, procMgr, resMgr, reactiveEng)
+		services := svcMgr.List()
+		opStore.LogInfo("[INIT] 服务管理器初始化完成, 已注册服务数: %d", len(services))
+
+		// 加载 Procfile 到编排引擎
+		procfilePath := filepath.Join(installDir, "Procfile")
+		if _, err := os.Stat(procfilePath); err == nil {
+			opStore.LogInfo("[INIT] 加载 Procfile: %s", procfilePath)
+			if err := svcMgr.LoadProcfile(procfilePath); err != nil {
+				opStore.LogWarn("[INIT] 加载 Procfile 失败: %v", err)
+			} else {
+				opStore.LogInfo("[INIT] Procfile 加载成功")
+			}
 		} else {
-			opStore.LogInfo("[INIT] Procfile 加载成功")
+			opStore.LogInfo("[INIT] Procfile 不存在，跳过加载")
 		}
+
+		opStore.LogInfo("[INIT] 初始化运行时管理器...")
+		rtMgr = runtime.NewManager(cfg, procMgr, resMgr)
+		runtimes := rtMgr.List()
+		opStore.LogInfo("[INIT] 运行时管理器初始化完成, 已注册运行时数: %d", len(runtimes))
+
+		opStore.LogInfo("[INIT] 初始化项目管理器...")
+		projMgr = project.NewManager(installDir, "1.26.0", rtMgr, resMgr)
+		projMgr.SetServiceManager(svcMgr)
+		projMgr.SetRuntimeManager(rtMgr)
+		projects := projMgr.List()
+		opStore.LogInfo("[INIT] 项目管理器初始化完成, 项目数: %d", len(projects))
+
+		opStore.LogInfo("[INIT] 初始化环境管理器 (Environment Profiles)...")
+		envMgr = environment.NewManager(installDir)
+		opStore.LogInfo("[INIT] 环境管理器初始化完成, 内置预设已注册")
+
+		opStore.LogInfo("[INIT] 初始化下载管理器...")
+		dlMgr = download.NewManager(installDir)
+		opStore.LogInfo("[INIT] 下载管理器初始化完成")
+
+		opStore.LogInfo("[INIT] 初始化状态存储...")
+		dataDir := filepath.Join(installDir, "config")
+		stateStore = engine.NewStateStore(dataDir)
+		opStore.LogInfo("[INIT] 状态存储初始化完成, 数据目录: %s", dataDir)
+
+		opStore.LogInfo("[INIT] 初始化协调器(Reconciler)...")
+		reconciler = engine.NewReconciler(stateStore, svcMgr, projMgr, rtMgr)
+		opStore.LogInfo("[INIT] 协调器初始化完成")
+
+		opStore.LogInfo("[INIT] 注册服务提供者...")
+		provider.NewNginxProvider(cfg, procMgr, resMgr)
+		provider.NewMySQLProvider(cfg, procMgr)
+		provider.NewRedisProvider(cfg, procMgr)
+		provider.NewPHPProvider(cfg, procMgr, resMgr)
+		opStore.LogInfo("[INIT] 服务提供者注册完成")
 	} else {
-		opStore.LogInfo("[INIT] Procfile 不存在，跳过加载")
+		opStore.LogInfo("[INIT] 安装目录为空，跳过服务/运行时/项目/环境/下载/状态/协调器初始化")
+		// 创建空的管理器实例，避免 nil 指针
+		svcMgr = service.NewManager(cfg, procMgr, nil, reactiveEng)
+		rtMgr = runtime.NewManager(cfg, procMgr, nil)
+		projMgr = project.NewManager("", "1.26.0", rtMgr, nil)
+		envMgr = environment.NewManager("")
+		dlMgr = download.NewManager("")
+		stateStore = engine.NewStateStore("")
+		reconciler = engine.NewReconciler(stateStore, svcMgr, projMgr, rtMgr)
 	}
-
-	opStore.LogInfo("[INIT] 初始化运行时管理器...")
-	rtMgr := runtime.NewManager(cfg, procMgr, resMgr)
-	runtimes := rtMgr.List()
-	opStore.LogInfo("[INIT] 运行时管理器初始化完成, 已注册运行时数: %d", len(runtimes))
-
-	opStore.LogInfo("[INIT] 初始化项目管理器...")
-	projMgr := project.NewManager(installDir, "1.26.0", rtMgr, resMgr)
-	projMgr.SetServiceManager(svcMgr)
-	projMgr.SetRuntimeManager(rtMgr)
-	projects := projMgr.List()
-	opStore.LogInfo("[INIT] 项目管理器初始化完成, 项目数: %d", len(projects))
-
-	opStore.LogInfo("[INIT] 初始化环境管理器 (Environment Profiles)...")
-	envMgr := environment.NewManager(installDir)
-	opStore.LogInfo("[INIT] 环境管理器初始化完成, 内置预设已注册")
 
 	opStore.LogInfo("[INIT] 初始化日志监视器...")
 	logWatcher := log.NewLogWatcher()
 	opStore.LogInfo("[INIT] 日志监视器初始化完成")
-
-	opStore.LogInfo("[INIT] 初始化下载管理器...")
-	dlMgr := download.NewManager(installDir)
-	opStore.LogInfo("[INIT] 下载管理器初始化完成")
-
-	opStore.LogInfo("[INIT] 初始化状态存储...")
-	dataDir := filepath.Join(installDir, "config")
-	stateStore := engine.NewStateStore(dataDir)
-	opStore.LogInfo("[INIT] 状态存储初始化完成, 数据目录: %s", dataDir)
-
-	opStore.LogInfo("[INIT] 初始化协调器(Reconciler)...")
-	reconciler := engine.NewReconciler(stateStore, svcMgr, projMgr, rtMgr)
-	opStore.LogInfo("[INIT] 协调器初始化完成")
-
-	opStore.LogInfo("[INIT] 注册服务提供者...")
-	provider.NewNginxProvider(cfg, procMgr, resMgr)
-	provider.NewMySQLProvider(cfg, procMgr)
-	provider.NewRedisProvider(cfg, procMgr)
-	provider.NewPHPProvider(cfg, procMgr, resMgr)
-	opStore.LogInfo("[INIT] 服务提供者注册完成")
 
 	opStore.LogInfo("[INIT] 注册内置响应式规则...")
 	reactive.RegisterBuiltinRules(reactiveEng,
@@ -197,8 +226,11 @@ func NewApp() *App {
 			return svcMgr.Start(serviceID)
 		},
 		func(owner string, oldPort int) (int, error) {
-			resMgr.Ports().Release(oldPort, owner)
-			return resMgr.Ports().Allocate(owner, 0)
+			if resMgr != nil {
+				resMgr.Ports().Release(oldPort, owner)
+				return resMgr.Ports().Allocate(owner, 0)
+			}
+			return 0, fmt.Errorf("资源管理器未初始化")
 		},
 		func(eventType reactive.EventType, source string, data map[string]interface{}) {
 			opStore.Add("告警", string(eventType), source, fmt.Sprintf("%v", data))
@@ -272,9 +304,14 @@ func (a *App) startup(ctx context.Context) {
 	// ── 系统托盘 ──
 	if a.tray != nil {
 		a.tray.SetContext(ctx)
-		a.tray.Start(trayIcon)
-		if a.opStore != nil {
-			a.opStore.LogInfo("[STARTUP] 系统托盘已启动")
+		// 仅在启用"最小化到系统托盘"时创建图标，未启用则不占用通知区域。
+		if a.cfg.Get().MinimizeToTray {
+			a.tray.Start(trayIcon)
+			if a.opStore != nil {
+				a.opStore.LogInfo("[STARTUP] 系统托盘已启动")
+			}
+		} else if a.opStore != nil {
+			a.opStore.LogInfo("[STARTUP] 未启用最小化到托盘, 跳过托盘启动")
 		}
 	}
 
@@ -386,12 +423,18 @@ func (a *App) ActivateEnvironment(envID string) error {
 	if err != nil {
 		return fmt.Errorf("读取当前激活环境失败: %w", err)
 	}
-	if oldActiveID != "" && oldActiveID != envID {
+	// 同一环境重复激活（如修改 units 版本后再次启动）也要先停旧实例：
+	// 否则按旧版本运行的组件无人清理，新版本组件会因端口被占而启动失败。
+	if oldActiveID != "" {
 		if e, err := a.envMgr.Get(oldActiveID); err == nil {
 			oldEnv = e
-			if a.opStore != nil {
-				a.opStore.LogInfo("[API] 停止旧环境 %q", oldActiveID)
+			if oldActiveID != envID {
+				if a.opStore != nil {
+					a.opStore.LogInfo("[API] 停止旧环境 %q", oldActiveID)
+				}
 			}
+		} else if oldActiveID != envID {
+			return fmt.Errorf("环境 %q 未找到: %w", oldActiveID, err)
 		}
 	}
 
@@ -1094,7 +1137,27 @@ func (a *App) SaveSettings(s core.AppSettings) error {
 			a.opStore.Add("设置", "开机自启", "", "已关闭")
 		}
 	}
-	return a.cfg.Update(s)
+	if err := a.cfg.Update(s); err != nil {
+		return err
+	}
+	a.syncTray(s.MinimizeToTray)
+	return nil
+}
+
+// syncTray 使托盘状态与"最小化到系统托盘"设置保持一致：
+// 启用时确保托盘已启动；禁用时移除图标并停止消息循环。
+func (a *App) syncTray(enable bool) {
+	if a.tray == nil {
+		return
+	}
+	switch {
+	case enable && !a.tray.Running():
+		a.tray.Start(trayIcon)
+		a.opStore.Add("设置", "系统托盘", "", "已启用托盘图标")
+	case !enable && a.tray.Running():
+		a.tray.Quit()
+		a.opStore.Add("设置", "系统托盘", "", "已移除托盘图标")
+	}
 }
 
 // GetConfigPath 返回配置文件的绝对路径，便于排查保存问题
@@ -1398,6 +1461,259 @@ func isSafePathComponent(name string) bool {
 		return false
 	}
 	return true
+}
+
+// ==================== Setup Wizard APIs ====================
+
+// SelectInstallDir 打开目录选择对话框
+func (a *App) SelectInstallDir(defaultPath string) (string, error) {
+	path, err := wailsruntime.OpenDirectoryDialog(a.ctx, wailsruntime.OpenDialogOptions{
+		Title:            "选择 DevStack 安装目录",
+		DefaultDirectory: defaultPath,
+	})
+	if err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+// PortConflict 端口冲突信息
+type PortConflict struct {
+	Port       int    `json:"port"`
+	Service    string `json:"service"`
+	InUse      bool   `json:"inUse"`
+	PID        int    `json:"pid"`
+	ExePath    string `json:"exePath"`
+	OwnedByUs  bool   `json:"ownedByUs"`
+	Message    string `json:"message"`
+}
+
+// CheckSetupPorts 检查向导阶段的默认端口冲突
+func (a *App) CheckSetupPorts(services []string) []PortConflict {
+	if a.opStore != nil {
+		a.opStore.LogInfo("[SETUP] 检查端口冲突, services: %v", services)
+	}
+	defaultPorts := map[string]int{
+		"nginx": 80,
+		"mysql": 3306,
+		"redis": 6379,
+		"php":   9000,
+	}
+	var conflicts []PortConflict
+	for _, svc := range services {
+		port, ok := defaultPorts[svc]
+		if !ok {
+			continue
+		}
+		status := a.resMgr.Ports().CheckPort(port)
+		conflict := PortConflict{
+			Port:      port,
+			Service:   svc,
+			InUse:     status.InUse,
+			PID:       status.PID,
+			ExePath:   status.ExePath,
+			OwnedByUs: status.OwnedByUs,
+		}
+		if status.InUse && !status.OwnedByUs {
+			conflict.Message = fmt.Sprintf("端口 %d 已被外部进程占用 (PID=%d: %s)", port, status.PID, status.ExePath)
+		} else if status.InUse && status.OwnedByUs {
+			conflict.Message = fmt.Sprintf("端口 %d 已被 DevStack 占用 (PID=%d)", port, status.PID)
+		} else {
+			conflict.Message = fmt.Sprintf("端口 %d 可用", port)
+		}
+		conflicts = append(conflicts, conflict)
+	}
+	return conflicts
+}
+
+// CompleteSetupArgs 向导完成参数
+type CompleteSetupArgs struct {
+	InstallDir string   `json:"installDir"`
+	Services   []string `json:"services"`
+}
+
+// CompleteSetup 完成向导：写配置、下载服务、创建默认环境
+func (a *App) CompleteSetup(args CompleteSetupArgs) error {
+	if a.opStore != nil {
+		a.opStore.LogInfo("[SETUP] 完成向导, installDir: %s, services: %v", args.InstallDir, args.Services)
+	}
+
+	// 1. 再次检查端口冲突（阻断性）
+	conflicts := a.CheckSetupPorts(args.Services)
+	for _, c := range conflicts {
+		if c.InUse && !c.OwnedByUs {
+			return fmt.Errorf("端口冲突: %s", c.Message)
+		}
+	}
+
+	// 2. 写入安装目录配置
+	settings := a.cfg.Get()
+	settings.InstallDir = args.InstallDir
+	if err := a.cfg.Update(settings); err != nil {
+		return fmt.Errorf("保存配置失败: %w", err)
+	}
+	config.EnsureDirs(args.InstallDir)
+
+	// 3. 重新初始化依赖安装目录的管理器
+	if err := a.reinitManagers(args.InstallDir); err != nil {
+		return fmt.Errorf("重新初始化管理器失败: %w", err)
+	}
+
+	// 4. 下载选中服务（串行，带进度）
+	for _, svc := range args.Services {
+		versions, err := a.dlMgr.GetAvailableVersions(svc)
+		if err != nil || len(versions) == 0 {
+			if a.opStore != nil {
+				a.opStore.LogWarn("[SETUP] 获取 %s 版本列表失败: %v", svc, err)
+			}
+			continue
+		}
+		latest := versions[len(versions)-1].Version
+		if a.opStore != nil {
+			a.opStore.LogInfo("[SETUP] 开始下载 %s %s", svc, latest)
+		}
+		progressKey := fmt.Sprintf("setup-download:%s:%s", svc, latest)
+		progressFn := func(downloaded, total int64) {
+			if a.ctx != nil {
+				wailsruntime.EventsEmit(a.ctx, "setup:download-progress", map[string]interface{}{
+					"key":        progressKey,
+					"service":    svc,
+					"version":    latest,
+					"downloaded": downloaded,
+					"total":      total,
+				})
+			}
+		}
+		destDir := joinPath(args.InstallDir, "programs", svc, latest)
+		if err := a.dlMgr.TryDownloadAndExtract(progressKey, []string{versions[len(versions)-1].URL}, destDir, progressFn, versions[len(versions)-1].Checksum); err != nil {
+			if a.opStore != nil {
+				a.opStore.LogError("[SETUP] 下载 %s %s 失败: %v", svc, latest, err)
+			}
+			return fmt.Errorf("下载 %s %s 失败: %w", svc, latest, err)
+		}
+		if svcNames, ok := serviceNames[svc]; ok && svcNames != "" {
+			a.svcMgr.MarkInstalled(svc, latest)
+			if a.opStore != nil {
+				a.opStore.Add("下载", serviceNames[svc], latest, "成功")
+			}
+			_ = a.svcMgr.Configure(svc + "@" + latest)
+		}
+	}
+
+	// 5. 创建并激活默认环境
+	units := make([]environment.UnitSpec, 0)
+	for _, svc := range args.Services {
+		vers := a.svcMgr.GetInstalledVersions(svc)
+		if len(vers) > 0 {
+			name := serviceNames[svc]
+			if name == "" {
+				name = runtimeNames[svc]
+			}
+			units = append(units, environment.UnitSpec{Kind: svc, Version: vers[0], Name: name})
+		}
+	}
+	if len(units) > 0 {
+		env := environment.Environment{
+			Name:        "默认环境",
+			Description: "首次运行自动创建",
+			Units:       units,
+		}
+		created, err := a.envMgr.Create(env)
+		if err != nil {
+			return fmt.Errorf("创建默认环境失败: %w", err)
+		}
+		// 仅标记激活，不启动服务
+		if err := a.reconciler.ActivateOnly(created.ID); err != nil {
+			return fmt.Errorf("激活默认环境失败: %w", err)
+		}
+		if a.opStore != nil {
+			a.opStore.LogInfo("[SETUP] 默认环境已创建并激活: %s", created.ID)
+		}
+	}
+
+	if a.opStore != nil {
+		a.opStore.LogInfo("[SETUP] 向导完成")
+	}
+	return nil
+}
+
+// reinitManagers 向导完成后重新初始化依赖安装目录的管理器
+func (a *App) reinitManagers(installDir string) error {
+	// 重新初始化资源管理器（端口池等）
+	a.resMgr = resource.NewManager(filepath.Join(installDir, "config"))
+
+	// 重新初始化项目管理器
+	a.projMgr = project.NewManager(installDir, "1.26.0", a.rtMgr, a.resMgr)
+	a.projMgr.SetServiceManager(a.svcMgr)
+	a.projMgr.SetRuntimeManager(a.rtMgr)
+
+	// 重新初始化环境管理器
+	a.envMgr = environment.NewManager(installDir)
+
+	// 重新初始化下载管理器
+	a.dlMgr = download.NewManager(installDir)
+
+	// 重新初始化状态存储
+	dataDir := filepath.Join(installDir, "config")
+	a.stateStore = engine.NewStateStore(dataDir)
+
+	// 重新初始化协调器
+	a.reconciler = engine.NewReconciler(a.stateStore, a.svcMgr, a.projMgr, a.rtMgr)
+	a.reconciler.SetReporter(a)
+
+	// 重新注册响应式规则（需要新的端口分配器）
+	a.reactiveEng = reactive.NewEngine(100)
+	reactive.RegisterBuiltinRules(a.reactiveEng,
+		func(serviceID string) error {
+			if strings.HasPrefix(serviceID, "php@") {
+				return a.rtMgr.Start(serviceID)
+			}
+			return a.svcMgr.Start(serviceID)
+		},
+		func(owner string, oldPort int) (int, error) {
+			a.resMgr.Ports().Release(oldPort, owner)
+			return a.resMgr.Ports().Allocate(owner, 0)
+		},
+		func(eventType reactive.EventType, source string, data map[string]interface{}) {
+			a.opStore.Add("告警", string(eventType), source, fmt.Sprintf("%v", data))
+		},
+	)
+	a.reactiveEng.Start()
+
+	// 重新订阅响应式事件到前端
+	if a.ctx != nil {
+		eventTypes := []reactive.EventType{
+			reactive.EventServiceStarted, reactive.EventServiceStopped,
+			reactive.EventServiceStarting, reactive.EventServiceStopping,
+			reactive.EventServiceCrashed, reactive.EventServiceHealthFailed,
+			reactive.EventServiceRestarted, reactive.EventServiceError,
+			reactive.EventPortConflict, reactive.EventConfigChanged,
+			reactive.EventConfigReloaded, reactive.EventResourceAllocated,
+			reactive.EventResourceReleased, reactive.EventProjectCreated,
+			reactive.EventProjectDeleted, reactive.EventProjectEnabled,
+			reactive.EventProjectDisabled,
+		}
+		for _, et := range eventTypes {
+			etCopy := et
+			a.reactiveEng.Subscribe(et, func(event *reactive.Event) {
+				wailsruntime.EventsEmit(a.ctx, "reactive:"+string(etCopy), map[string]interface{}{
+					"id":        event.ID,
+					"type":      string(event.Type),
+					"source":    event.Source,
+					"timestamp": event.Timestamp,
+					"data":      event.Data,
+				})
+			})
+		}
+	}
+
+	// 重新加载 Procfile
+	procfilePath := filepath.Join(installDir, "Procfile")
+	if _, err := os.Stat(procfilePath); err == nil {
+		_ = a.svcMgr.LoadProcfile(procfilePath)
+	}
+
+	return nil
 }
 
 // ==================== Snapshot APIs ====================

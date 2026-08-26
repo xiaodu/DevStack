@@ -4,8 +4,10 @@ import {
   ActivateEnvironmentOnly,
   ApplyServiceConfig,
   CheckMySQLRootAuth,
+  CheckSetupPorts,
   CheckVersionInstalled,
   ClearLogs,
+  CompleteSetup,
   CreateEnvironment,
   CreateProject,
   DeactivateEnvironment,
@@ -45,6 +47,7 @@ import {
   SaveProjectAsEnvironment,
   SaveServiceConfig,
   SaveSettings,
+  SelectInstallDir,
   SetServiceVersion,
   StartRuntime,
   StartService,
@@ -378,6 +381,9 @@ export const api = {
   getConfigPath: () => callOrMock(GetConfigPath, 'C:/DevStack/config' as any),
   getSystemInfo: () => callOrMock(GetSystemInfo, mockSystemInfo as any),
   openDirectory: (path: string) => callOrMock(() => OpenDirectory(path), { success: true } as any),
+  selectInstallDir: (defaultPath?: string) => callOrMock(() => SelectInstallDir(defaultPath || ''), '' as any),
+  checkSetupPorts: (services: string[]) => callOrMock(() => CheckSetupPorts(services), [] as any),
+  completeSetup: (args: { installDir: string; services: string[] }) => callOrMock(() => CompleteSetup(args), { success: true } as any),
 
   // ====== 日志 ======
   getRecentOps: (limit: number) => callOrMock(() => GetRecentOps(limit), mockOps as any),
@@ -388,6 +394,15 @@ export const api = {
 
   // ====== MySQL ======
   checkMySQLRootAuth: () => callOrMock(CheckMySQLRootAuth, false as any),
+
+  // ====== Setup Wizard ======
+  onSetupDownloadProgress: (callback: (data: any) => void) => {
+    if (isWailsEnv) {
+      const unsub = (window as any).go.runtime.EventsOn('setup:download-progress', callback)
+      return () => unsub()
+    }
+    return () => {}
+  },
 }
 
 export type Api = typeof api

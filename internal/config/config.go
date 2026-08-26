@@ -58,8 +58,11 @@ func NewConfigForDir(installDir string) *Config {
 
 	settings := defaultSettings(installDir)
 
-	if err := v.ReadInConfig(); err == nil {
-		v.Unmarshal(&settings)
+	// 只有当 installDir 非空时才尝试读取配置文件，避免相对路径读取到错误位置的配置
+	if installDir != "" {
+		if err := v.ReadInConfig(); err == nil {
+			v.Unmarshal(&settings)
+		}
 	}
 
 	settings.InstallDir = installDir
@@ -248,6 +251,9 @@ func (c *Config) Update(s core.AppSettings) error {
 }
 
 func EnsureDirs(installDir string) {
+	if installDir == "" {
+		return
+	}
 	dirs := []string{
 		installDir,
 		filepath.Join(installDir, "config"),

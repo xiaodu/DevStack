@@ -41,16 +41,27 @@ let activeEnvName = $derived.by(() => {
   return p?.name || id
 })
 
-// 运行中组件数 / 总组件数（services + runtimes）
-let runningCount = $derived.by(() => {
-  if (!envState) return 0
-  const svcs = Object.values(envState.services || {})
-  const rts = Object.values(envState.runtimes || {})
-  return [...svcs, ...rts].filter((s: any) => s?.state === 'running').length
-})
-let totalCount = $derived.by(() => {
-  if (!envState) return 0
-  return Object.keys(envState.services || {}).length + Object.keys(envState.runtimes || {}).length
+// 运行中的组件名称列表（services + runtimes），用于状态栏展示
+let runningServices = $derived.by(() => {
+  if (!envState) return [] as string[]
+  const labels: Record<string, string> = {
+    nginx: 'Nginx',
+    mysql: 'MySQL',
+    redis: 'Redis',
+    php: 'PHP',
+    node: 'Node',
+    python: 'Python',
+  }
+  const entries = [...Object.entries(envState.services || {}), ...Object.entries(envState.runtimes || {})]
+  return entries
+    .filter(([, s]: [string, any]) => s?.state === 'running')
+    .map(([id]) => {
+      const at = id.indexOf('@')
+      const kind = at > 0 ? id.slice(0, at) : id
+      const version = at > 0 ? id.slice(at + 1) : ''
+      const label = labels[kind] || kind
+      return version ? `${label} ${version}` : label
+    })
 })
 
 // Nginx 是否运行中（重启按钮禁用依据）
@@ -130,7 +141,10 @@ onMount(() => {
 
   new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('timeout')), 15000)
-    api.getSettings().then(resolve, reject).finally(() => clearTimeout(timer))
+    api
+      .getSettings()
+      .then(resolve, reject)
+      .finally(() => clearTimeout(timer))
   })
     .then((settings) => {
       applyTheme(settings.theme)
@@ -171,9 +185,9 @@ async function startAll() {
 
 async function stopAll() {
   const env = await api.getEnvironment().catch(() => ({ services: {}, runtimes: {} }))
-  const runningServices = Object.entries(env.services || {}).filter(([, s]) => s.state === 'running')
+  const runningSvcEntries = Object.entries(env.services || {}).filter(([, s]) => s.state === 'running')
   const runningRuntimes = Object.entries(env.runtimes || {}).filter(([, r]) => r.state === 'running')
-  const total = runningServices.length + runningRuntimes.length
+  const total = runningSvcEntries.length + runningRuntimes.length
   if (total === 0) {
     pushToast('没有正在运行的服务', 'info')
     return
@@ -185,7 +199,7 @@ async function stopAll() {
     title: '正在停止全部组件',
     call: async () => {
       const results = await Promise.all([
-        ...runningServices.map(([id]) =>
+        ...runningSvcEntries.map(([id]) =>
           api
             .stopService(id)
             .then(() => true)
@@ -267,15 +281,25 @@ let pageTitle = $derived(
     </main>
 
     <footer class="flex items-center gap-4 px-6 py-1.5 bg-base-100 border-t border-base-300 text-xs text-base-content/60 shrink-0">
-      <span class="flex items-center gap-1.5">
+      <span class="flex items-center gap-1.5 min-w-0">
         <span>环境:</span>
-        <strong class="text-base-content/80">{activeEnvName}</strong>
+        <strong class="text-base-content/80 shrink-0">{activeEnvName}</strong>
+        {#if runningServices.length > 0}
+          <span class="shrink-0">(</span>
+          <span class="flex items-center gap-3.5 min-w-0">
+            {#each runningServices as svc (svc)}
+              <span class="flex items-center gap-1 whitespace-nowrap">
+                <span class="w-1.5 h-1.5 rounded-full bg-success shrink-0"></span>
+                <span>{svc}</span>
+              </span>
+            {/each}
+          </span>
+          <span class="shrink-0">)</span>
+        {:else}
+          <span class="text-base-content/40">(已停止)</span>
+        {/if}
       </span>
-      <span class="flex items-center gap-1.5">
-        <span>运行:</span>
-        <span class={runningCount > 0 ? 'text-success font-medium' : ''}>{runningCount}/{totalCount}</span>
-      </span>
-      <span class="flex items-center gap-1.5">
+      <span class="flex items-center gap-1.5 ml-auto">
         {#if $syncInfo.syncing}
           <span class="loading loading-spinner loading-xs text-primary"></span>
           <span>{$syncInfo.msg}</span>
@@ -285,7 +309,6 @@ let pageTitle = $derived(
           <span>上次同步 {$syncInfo.at}</span>
         {/if}
       </span>
-      <span class="ml-auto">DevStack</span>
     </footer>
   </div>
 </div>

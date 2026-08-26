@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/xiaodu/DevStack/internal/atomicfile"
+	"github.com/xiaodu/DevStack/internal/process"
 )
 
 const (
@@ -157,4 +158,37 @@ func (p *PortPool) ListAllocated() map[int]string {
 		result[k] = v
 	}
 	return result
+}
+
+// PortStatus 端口状态信息
+type PortStatus struct {
+	Port      int
+	Owner     string
+	InUse     bool
+	PID       int
+	ExePath   string
+	OwnedByUs bool
+}
+
+// CheckPort 检查端口状态（不限于池内端口）
+func (p *PortPool) CheckPort(port int) *PortStatus {
+	status := &PortStatus{
+		Port: port,
+	}
+
+	// 检查分配表
+	if owner, ok := p.GetOwner(port); ok {
+		status.Owner = owner
+	}
+
+	// 检查端口是否实际在使用
+	pid := process.FindPIDByPort(port)
+	if pid > 0 {
+		status.InUse = true
+		status.PID = pid
+		status.ExePath = process.GetExecutablePath(pid)
+		// 注意：PortPool 无法验证归属，OwnedByUs 需要上层判断
+	}
+
+	return status
 }
