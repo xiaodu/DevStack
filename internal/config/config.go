@@ -193,20 +193,15 @@ func defaultSettings(installDir string) core.AppSettings {
 }
 
 func (c *Config) save() error {
+	// 首次运行（installDir 为空）不写入磁盘
+	if c.installDir == "" {
+		return nil
+	}
 	data, err := toml.Marshal(c.Settings)
 	if err != nil {
 		return fmt.Errorf("序列化配置失败: %w", err)
 	}
-	if c.Settings.InstallDir != "" {
-		EnsureDirs(c.Settings.InstallDir)
-	} else {
-		dir := filepath.Dir(c.filePath)
-		if dir != "" && dir != "." {
-			if err := os.MkdirAll(dir, 0755); err != nil {
-				return err
-			}
-		}
-	}
+	EnsureDirs(c.installDir)
 	if err := atomicfile.WriteFile(c.filePath, data, 0644); err != nil {
 		return fmt.Errorf("写入配置文件失败: %w", err)
 	}
