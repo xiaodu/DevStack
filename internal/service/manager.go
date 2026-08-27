@@ -49,6 +49,16 @@ func NewManager(cfg *config.Config, procMgr *process.Manager, resMgr *resource.M
 		orchestrator.WithLogCallback(func(msg string) {
 			// 日志可以通过 reactive 引擎传递到前端
 		}),
+		orchestrator.WithStartFunc(func(name string) (int, error) {
+			// 启动函数：由 service.Manager 提供，调用 provider 启动服务
+			// 编排引擎调用此函数来实际启动服务
+			return 0, fmt.Errorf("启动函数未设置: %s", name)
+		}),
+		orchestrator.WithStopFunc(func(name string) error {
+			// 停止函数：由 service.Manager 提供，调用 provider 停止服务
+			// 编排引擎调用此函数来实际停止服务
+			return fmt.Errorf("停止函数未设置: %s", name)
+		}),
 	)
 	if err != nil {
 		// 编排引擎创建失败，记录错误但不影响服务管理器初始化
@@ -65,6 +75,17 @@ func NewManager(cfg *config.Config, procMgr *process.Manager, resMgr *resource.M
 		reactive:   reactiveEng,
 		orch:       orch,
 	}
+
+	// 设置编排引擎的启动和停止回调
+	if orch != nil {
+		orch.SetStartFunc(func(name string) (int, error) {
+			return m.startServiceByName(name)
+		})
+		orch.SetStopFunc(func(name string) error {
+			return m.stopServiceByName(name)
+		})
+	}
+
 	m.registerDefaults()
 	return m
 }
@@ -145,9 +166,17 @@ func (m *Manager) GetOrchestrator() *orchestrator.Engine {
 
 // findServiceByName 根据服务名称查找服务实例
 //
-// 编排引擎使用服务名称（如 "Nginx"），而 service.Manager 使用 ID（如 "nginx@1.26"）。
+// 编排引擎使用服务名称（如 "Nginx"），而 service.Manager 使用 ID（如 "nginx@1.26.0"）。
 // 此方法通过名称匹配查找对应的服务实例。
+//
+// 精确 ID 必须优先：注册表按 programs\<kind>\<version> 扫描出多份同 kind 实例
+// （如 nginx@1.20.2 与 nginx@1.26.0），若按 kind 模糊匹配，Go map 的随机遍历
+// 会导致每次激活随机启动/停止任意版本——这正是"环境写的是 1.26.0 却拉起了
+// 1.20.2"的根源。
 func (m *Manager) findServiceByName(name string) *ServiceInstance {
+	if s, ok := m.services[name]; ok {
+		return s
+	}
 	lowerName := strings.ToLower(name)
 	for _, s := range m.services {
 		if strings.ToLower(s.Info.Name) == lowerName || strings.ToLower(s.Info.Kind) == lowerName {
@@ -155,6 +184,82 @@ func (m *Manager) findServiceByName(name string) *ServiceInstance {
 		}
 	}
 	return nil
+}
+
+// startServiceByName 由 orchestrator 调用，实际启动服务并返回 PID
+//
+// 编排引擎通过 StartFunc 回调调用此方法。
+// 方法内部调用 provider 启动服务，返回启动后的 PID。
+func (m *Manager) startServiceByName(name string) (int, error) {
+	m.mu.Lock()
+	s := m.findServiceByName(name)
+	if s == nil {
+		m.mu.Unlock()
+		return 0, fmt.Errorf("服务 %s 不存在", name)
+	}
+
+	kind := kindFromID(s.Info.ID)
+	version := s.Info.Version
+	port := s.Info.Port
+	m.mu.Unlock()
+
+	// 使用 Provider 启动服务
+	p := provider.Get(kind)
+	if p == nil {
+		return 0, fmt.Errorf("不支持的服务类型: %s", kind)
+	}
+
+	config := map[string]interface{}{
+		"version": version,
+		"port":    port,
+	}
+	entity, err := p.NewInstance(context.Background(), config)
+	if err != nil {
+		return 0, err
+	}
+
+	if err := entity.Start(context.Background()); err != nil {
+		return 0, err
+	}
+
+	// 获取启动后的 PID
+	pid := process.FindPIDByPort(port)
+	return pid, nil
+}
+
+// stopServiceByName 由 orchestrator 调用，实际停止服务
+//
+// 编排引擎通过 StopFunc 回调调用此方法。
+// 方法内部调用 provider 停止服务。
+func (m *Manager) stopServiceByName(name string) error {
+	m.mu.Lock()
+	s := m.findServiceByName(name)
+	if s == nil {
+		m.mu.Unlock()
+		return fmt.Errorf("服务 %s 不存在", name)
+	}
+
+	kind := kindFromID(s.Info.ID)
+	version := s.Info.Version
+	port := s.Info.Port
+	m.mu.Unlock()
+
+	// 使用 Provider 停止服务
+	p := provider.Get(kind)
+	if p == nil {
+		return fmt.Errorf("不支持的服务类型: %s", kind)
+	}
+
+	config := map[string]interface{}{
+		"version": version,
+		"port":    port,
+	}
+	entity, err := p.NewInstance(context.Background(), config)
+	if err != nil {
+		return err
+	}
+
+	return entity.Stop(context.Background())
 }
 
 var serviceOrder = []string{"nginx", "apache", "mysql", "postgresql", "mongodb", "redis", "memcached", "node", "python", "composer"}
@@ -362,7 +467,66 @@ func (m *Manager) Start(id string) error {
 
 	m.publishServiceEvent(reactive.EventServiceStarting, id, nil)
 
-	// 使用 Provider 启动服务（保留原有逻辑）
+	// 使用编排引擎启动（如果可用）
+	if m.orch != nil {
+		// 确保服务已在编排引擎中注册。
+		// 必须用完整 ID（kind@version）注册与启动：按裸 kind 启动会让
+		// startServiceByName 走模糊匹配，随机启动其它已安装版本。
+		if !m.orch.HasService(id) {
+			m.orch.RegisterService(id, "", nil, nil, "", 5)
+		}
+
+		// 使用编排引擎启动服务（依赖检查、端口冲突检测、健康等待）
+		ctx := context.Background()
+		if err := m.orch.Start(ctx, id); err != nil {
+			// 编排引擎启动失败，更新状态
+			m.mu.Lock()
+			if si, ok := m.services[id]; ok {
+				si.Info.Status = core.StatusStopped
+				si.Info.Error = err.Error()
+			}
+			m.mu.Unlock()
+			m.publishServiceEvent(reactive.EventServiceError, id, map[string]interface{}{
+				"error": err.Error(),
+			})
+			return err
+		}
+
+		// 获取启动后的 PID
+		pid := process.FindPIDByPort(port)
+		proc := &process.ProcessHandle{PID: pid, Started: time.Now()}
+		if pid <= 0 {
+			proc = nil
+		}
+
+		m.mu.Lock()
+		s = m.services[id]
+		if s == nil {
+			m.mu.Unlock()
+			return core.ErrServiceNotFound
+		}
+		s.Info.Status = core.StatusRunning
+		s.Info.Error = ""
+		s.stoppedFlag = false
+		if proc != nil && proc.PID > 0 {
+			s.Info.PID = proc.PID
+		}
+		s.process = proc
+		s.stopped = make(chan struct{})
+		s.restartCount = 0
+
+		stoppedChan := s.stopped
+		m.mu.Unlock()
+
+		m.publishServiceEvent(reactive.EventServiceStarted, id, nil)
+
+		if proc != nil {
+			go m.watchProcess(id, stoppedChan)
+		}
+		return nil
+	}
+
+	// 回退到 provider 模式（编排引擎不可用时）
 	p := provider.Get(kind)
 	if p == nil {
 		m.mu.Lock()
@@ -472,7 +636,41 @@ func (m *Manager) Stop(id string) error {
 
 	m.publishServiceEvent(reactive.EventServiceStopping, id, nil)
 
-	// 使用 Provider 停止服务（保留原有逻辑）
+	// 使用编排引擎停止（如果可用）
+	if m.orch != nil {
+		ctx := context.Background()
+		// 与 Start 对应：必须用完整 ID 停止，否则可能停掉同 kind 的其它版本
+		if err := m.orch.Stop(ctx, id); err != nil {
+			// 编排引擎停止失败，记录错误但继续更新状态
+			// 编排引擎内部已经尝试了强制停止
+		}
+
+		// 从 Job Object 中释放进程
+		m.mu.RLock()
+		var pid int
+		if si, ok := m.services[id]; ok && si.process != nil {
+			pid = si.process.PID
+		}
+		m.mu.RUnlock()
+		if pid > 0 {
+			m.orch.ReleasePID(kind, pid)
+		}
+
+		// 更新状态
+		m.mu.Lock()
+		if si, ok := m.services[id]; ok {
+			si.process = nil
+			si.Info.Status = core.StatusStopped
+			si.Info.PID = 0
+			si.Info.Error = ""
+		}
+		m.mu.Unlock()
+
+		m.publishServiceEvent(reactive.EventServiceStopped, id, nil)
+		return nil
+	}
+
+	// 回退到 provider 模式（编排引擎不可用时）
 	var stopErr error
 	p := provider.Get(kind)
 	if p != nil {

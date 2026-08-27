@@ -343,32 +343,36 @@ func (i *NginxInstance) Start(ctx context.Context) error {
 
 	i.status = core.StatusStarting
 
+	// 端口被同 kind 其它版本的残留实例占用（如环境切换版本后旧版本孤儿仍在跑）：
+	// 自动停掉它再启动；被外部程序占用则报错。否则新起的 nginx 会因绑定失败退出，
+	// 而旧代码在进程存活窗口内误判成功，导致"激活成功但实际未运行"的假状态。
+	if err := ensurePortFree(i.port, kindDirOf(i.nginxDir), 10*time.Second); err != nil {
+		i.status = core.StatusError
+		return err
+	}
+
 	pid, err := i.pm.Start("nginx", i.nginxExe, nil, nil, i.nginxDir)
 	if err != nil {
 		i.status = core.StatusError
 		return err
 	}
 
-	for j := 0; j < 10; j++ {
+	for j := 0; j < 20; j++ {
 		time.Sleep(500 * time.Millisecond)
 		if p := ownedPIDByPort(i.port, i.nginxDir); p > 0 {
 			i.pid = p
 			break
 		}
-		// 端口被其它程序占用且不属于本实例：不接管，避免误杀外部进程
-		if process.FindPIDByPort(i.port) > 0 {
-			break
-		}
 	}
 
 	if i.pid <= 0 {
-		if !i.pm.IsRunning(pid) {
-			i.pm.Stop(pid)
-			i.status = core.StatusError
-			return fmt.Errorf("Nginx start failed: port %d not responding or occupied by another process", i.port)
+		// 只有本版本真正监听端口才算启动成功；其余一律明确失败。
+		i.pm.Stop(pid)
+		i.status = core.StatusError
+		if occ := process.FindPIDByPort(i.port); occ > 0 {
+			return fmt.Errorf("Nginx 启动失败: 端口 %d 被 %s (PID %d) 占用", i.port, process.GetExecutablePath(occ), occ)
 		}
-		// 进程存活但尚未监听端口：跟踪自身进程
-		i.pid = pid
+		return fmt.Errorf("Nginx 启动失败: 进程未监听端口 %d，请查看 %s\\logs\\error.log", i.port, filepath.Join(i.nginxDir, "logs"))
 	}
 
 	i.mpid = pid

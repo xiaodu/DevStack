@@ -28,7 +28,10 @@ import { dismissOperation, operation } from '../lib/stores'
         {/if}
         <div class="min-w-0">
           <div class="font-semibold text-sm truncate">{$operation.title}</div>
-          <div class="text-xs text-base-content/60 mt-0.5">{$operation.message}</div>
+          {#if $operation.steps.length === 0 && $operation.message}
+            <!-- 无步骤清单时才显示全局消息，避免与步骤列表重复 -->
+            <div class="text-xs text-base-content/60 mt-0.5 truncate">{$operation.message}</div>
+          {/if}
         </div>
       </div>
 
@@ -41,13 +44,13 @@ import { dismissOperation, operation } from '../lib/stores'
               {:else if step.state === 'error'}
                 <span class="w-4 text-error shrink-0">✕</span>
               {:else if step.state === 'active'}
-                <span class="w-4 flex justify-center shrink-0"><span class="loading loading-spinner loading-xs text-primary"></span></span>
+                <span class="w-4 flex justify-center shrink-0"><span class="loading loading-dots loading-xs text-primary"></span></span>
               {:else}
                 <span class="w-2 h-2 rounded-full bg-base-content/30 shrink-0 ml-1"></span>
               {/if}
               <span class="text-base-content/80">{step.label}</span>
               {#if step.message && step.state !== 'pending'}
-                <span class="ml-auto text-xs text-base-content/50 truncate max-w-[120px]">{step.message}</span>
+                <span class="ml-auto text-xs text-base-content/50 truncate max-w-[160px]" title={step.message}>{step.message}</span>
               {/if}
             </li>
           {/each}

@@ -271,6 +271,13 @@ func (i *MySQLInstance) configPath() string {
 
 // startServer 启动正常 mysqld 实例并等待端口就绪，同步更新 i.pid。
 func (i *MySQLInstance) startServer() error {
+	// 端口被同 kind 其它版本的残留实例占用（如切换 MySQL 版本后旧实例仍在跑）：
+	// 自动停掉它；被外部程序占用则明确报错。必须在启动前处理，
+	// 否则 mysqld 绑定失败退出，而旧代码会误把残留进程认领为本实例。
+	if err := ensurePortFree(i.port, kindDirOf(i.mysqlDir), 10*time.Second); err != nil {
+		return err
+	}
+
 	args := []string{
 		"--datadir=" + i.dataDir,
 		"--port=" + fmt.Sprintf("%d", i.port),
@@ -284,29 +291,21 @@ func (i *MySQLInstance) startServer() error {
 		return err
 	}
 
-	for j := 0; j < 10; j++ {
+	// 冷启动/InnoDB 崩溃恢复可能较慢，最多等待 15 秒
+	for j := 0; j < 30; j++ {
 		time.Sleep(500 * time.Millisecond)
 		if p := ownedPIDByPort(i.port, i.mysqlDir); p > 0 {
 			i.pid = p
 			return nil
 		}
-		// 端口被其它程序占用且不属于本实例：不接管，避免误杀外部进程
-		if process.FindPIDByPort(i.port) > 0 {
-			break
-		}
 	}
 
-	if p := process.FindPIDByPort(i.port); p > 0 {
-		i.pid = p
-		return nil
+	// 只有本版本真正监听端口才算启动成功。
+	i.pm.Stop(pid)
+	if occ := process.FindPIDByPort(i.port); occ > 0 {
+		return fmt.Errorf("MySQL 启动失败: 端口 %d 被 %s (PID %d) 占用", i.port, process.GetExecutablePath(occ), occ)
 	}
-	if !i.pm.IsRunning(pid) {
-		i.pm.Stop(pid)
-		return fmt.Errorf("MySQL 启动失败: 端口 %d 无响应或已被其它程序占用，请检查配置或查看错误日志", i.port)
-	}
-	// 进程存活但尚未监听端口（如首次初始化较慢）：跟踪自身进程
-	i.pid = pid
-	return nil
+	return fmt.Errorf("MySQL 启动失败: 进程未监听端口 %d，请查看 %s", i.port, filepath.Join(filepath.Dir(i.dataDir), "..", "logs"))
 }
 
 func (i *MySQLInstance) Stop(ctx context.Context) error {

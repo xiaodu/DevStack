@@ -181,7 +181,12 @@ export async function runOperation(opts: RunOperationOptions): Promise<boolean> 
   // 整体看门狗：后端挂起时强制结束遮罩，避免永久锁死（F2）
   const timeoutMs = opts.timeoutMs || 60000
   opTimeout = window.setTimeout(() => {
-    nanoOperation.set({ ...nanoOperation.get(), status: 'error', error: '操作超时，请检查后端状态', message: '操作超时' })
+    nanoOperation.set({
+      ...nanoOperation.get(),
+      status: 'error',
+      error: '操作超时，请检查后端状态',
+      message: '操作超时',
+    })
     scheduleOperationClose('error', '操作超时，请检查后端状态', 4500)
   }, timeoutMs)
 

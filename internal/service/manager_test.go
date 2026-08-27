@@ -163,6 +163,36 @@ func TestManager_StopClearsAndIdempotent(t *testing.T) {
 	}
 }
 
+// probe: 多版本共存时，精确 ID 必须稳定命中对应版本——不能按 kind 模糊匹配
+// （Go map 随机遍历会导致随机启动/停止任意版本，即"环境写 1.26.0 却拉起
+// 1.20.2"的根源）。模糊匹配仅作为显示名/kind 查询的兜底保留。
+func TestManager_FindServiceByNameExactIDWins(t *testing.T) {
+	m, _ := newTestManager(t, false)
+	m.mu.Lock()
+	for _, ver := range []string{"1.20.2", "1.24.0", "1.26.0"} {
+		id := "nginx@" + ver
+		m.services[id] = &ServiceInstance{
+			Info: core.ServiceInfo{
+				ID: id, Kind: "nginx", Name: "Nginx",
+				Version: ver, Port: 80, Status: core.StatusStopped,
+			},
+		}
+	}
+	m.mu.Unlock()
+
+	// map 遍历顺序随机，多次查询确保精确 ID 始终命中同一实例
+	for i := 0; i < 100; i++ {
+		s := m.findServiceByName("nginx@1.26.0")
+		if s == nil || s.Info.Version != "1.26.0" {
+			t.Fatalf("第 %d 次: 精确 ID 应命中 1.26.0, 实际 %+v", i, s)
+		}
+	}
+	// 兜底：按显示名/kind 仍可查到（返回哪个版本均可）
+	if s := m.findServiceByName("Nginx"); s == nil {
+		t.Fatalf("按显示名应能查到服务")
+	}
+}
+
 // probe: 并发 Start/Stop 不应 panic / data race，且不丢失服务实例。
 func TestManager_ConcurrentStartStop(t *testing.T) {
 	m, _ := newTestManager(t, false)

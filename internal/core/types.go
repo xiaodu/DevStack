@@ -209,11 +209,8 @@ type MySQLSettings struct {
 }
 
 type SystemInfo struct {
-	GoVersion    string `json:"goVersion"`
-	Platform     string `json:"platform"`
-	Arch         string `json:"arch"`
-	CPU          string `json:"cpu"`
-	Memory       string `json:"memory"`
-	AppVersion   string `json:"appVersion"`
-	InstallDir   string `json:"installDir"`
+	Platform   string `json:"platform"`
+	Arch       string `json:"arch"`
+	AppVersion string `json:"appVersion"`
+	InstallDir string `json:"installDir"`
 }

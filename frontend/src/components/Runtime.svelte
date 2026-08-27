@@ -1,10 +1,10 @@
 <script lang="ts">
 import { createEventDispatcher, onMount } from 'svelte'
+import type { runtime } from '../../wailsjs/go/models'
 import { api } from '../lib/api'
 import { safeInvoke } from '../lib/safeInvoke'
-import type { runtime } from '../../wailsjs/go/models'
 
-let { service } = $props()
+let { service, installDir = '' } = $props()
 const dispatch = createEventDispatcher()
 
 let pc = $state<Record<string, any>>({})
@@ -167,9 +167,6 @@ async function toggle() {
       {service.name}
       <span class="text-base font-normal text-base-content/50">{service.version}</span>
     </h2>
-    <button class="btn btn-sm {service.running ? 'btn-error' : 'btn-success'}" onclick={toggle}>
-      {service.running ? '停止' : '启动'}
-    </button>
   </div>
 
   <div class="flex items-center gap-2 px-3.5 py-2.5 bg-base-200 rounded-lg mb-6 text-sm">
@@ -178,6 +175,9 @@ async function toggle() {
     {#if service.active}<span class="text-xs px-2 py-0.5 rounded bg-primary/10 text-primary">命令行默认</span>{/if}
     {#if service.port}<span class="text-xs px-2 py-0.5 rounded bg-primary/10 text-primary">端口 {service.port}</span>{/if}
     {#if service.running && service.uptime}<span class="text-base-content/60">运行 {service.uptime}</span>{/if}
+    <button class="btn btn-xs ml-auto {service.running ? 'btn-error' : 'btn-success'}" onclick={toggle}>
+      {service.running ? '停止' : '启动'}
+    </button>
   </div>
 
   {#if service.type === 'php'}
@@ -200,7 +200,7 @@ async function toggle() {
           </div>
           <div class="grid grid-cols-2 gap-3">
             <label class="form-control w-full"><div class="label"><span class="label-text">Realpath 缓存大小</span></div><select class="select select-bordered w-full select-sm" bind:value={pc.realpathCacheSize}>{#each realpathOptions as opt}<option>{opt}</option>{/each}</select><div class="label"><span class="label-text-alt text-base-content/50">{getRecommendedHint('realpathCacheSize', 'Windows 性能关键')}</span></div></label>
-            <label class="form-control w-full"><div class="label"><span class="label-text">配置文件</span></div><input class="input input-bordered w-full input-sm" value="php/{service.version}/php.ini" readonly /></label>
+            <label class="form-control w-full"><div class="label"><span class="label-text">配置文件</span></div><input class="input input-bordered w-full input-sm" value="{installDir}/php/{service.version}/php.ini" readonly /></label>
           </div>
         </div>
       </div>
@@ -291,7 +291,7 @@ async function toggle() {
         <label class="form-control w-full"><div class="label"><span class="label-text">版本</span></div><input class="input input-bordered w-full input-sm" value={service.version} readonly /></label>
         <label class="form-control w-full"><div class="label"><span class="label-text">安装路径</span></div><input class="input input-bordered w-full input-sm" value={service.path || '-'} readonly /></label>
         {#if service.type === 'node' || service.type === 'python'}
-          <label class="form-control w-full"><div class="label"><span class="label-text">可执行文件</span></div><input class="input input-bordered w-full input-sm" value="{service.type}/{service.version}/{service.type}.exe" readonly /></label>
+          <label class="form-control w-full"><div class="label"><span class="label-text">可执行文件</span></div><input class="input input-bordered w-full input-sm" value="{installDir}/{service.type}/{service.version}/{service.type}.exe" readonly /></label>
         {/if}
         {#if service.running}
           <label class="form-control w-full"><div class="label"><span class="label-text">PID</span></div><input class="input input-bordered w-full input-sm" value={service.pid || '-'} readonly /></label>

@@ -2,16 +2,7 @@
 import { onMount } from 'svelte'
 import { api } from '../lib/api'
 import { subscribeOperationEvents } from '../lib/events'
-import {
-  addToast,
-  globalLoading,
-  nanoLoading,
-  nanoRefresh,
-  nanoStatusMsg,
-  nanoSyncInfo,
-  refreshSignal,
-  statusMessage,
-} from '../lib/stores'
+import { nanoRefresh, nanoSyncInfo, refreshSignal } from '../lib/stores'
 
 let services = $state<any[]>([])
 let runtimes = $state<any[]>([])
@@ -28,8 +19,11 @@ let ops = $state<any[]>([])
 let activeEnv = $state<any>(null)
 let profiles = $state<any[]>([])
 
-// 并发去重标志：防止 refreshSignal 频繁触发导致多个 load() 并发执行
+// 并发去重：进行中不重复发起请求，但不丢弃 —— 记录待刷标记，当前加载结束后补跑一次。
+// 否则批量停止时（多个 reactive:service.stopped 密集到达 + onDone 刷新），
+// 最后一次刷新会被正在进行的旧加载吞掉，卡片停留在操作中途的过期快照上。
 let isLoading = false
+let pendingReload = false
 
 const serviceMeta: Record<string, any> = {
   nginx: { label: 'Nginx', cls: 'icon-nginx', color: '#009639' },
@@ -44,32 +38,29 @@ const runtimeMeta: Record<string, any> = {
   python: { color: '#3776AB', label: 'Python', cls: 'icon-python' },
 }
 
-async function load(silent = false) {
-  // 并发去重：如果已经在加载中，跳过本次请求
+async function load() {
   if (isLoading) {
+    pendingReload = true
     return
   }
   isLoading = true
   loadError = false
-  // 仅在首次加载显示全屏遮罩；进入其他页面触发的同步在状态栏提示，避免遮罩打扰
-  const showOverlay = !silent || !hasLoaded
-  if (showOverlay) {
-    nanoLoading.set(true)
-    nanoStatusMsg.set('正在加载服务数据…')
-  }
+  // 不再使用全屏遮罩：首次加载由卡片骨架屏占位，刷新进度统一在状态栏提示
   nanoSyncInfo.set({ syncing: true, msg: '正在同步服务状态…', at: nanoSyncInfo.get().at })
 
-  // 全局超时保护：确保 nanoLoading 不会被永久卡住
+  // 全局超时保护：确保同步状态不会被永久卡住
   let globalTimedOut = false
   const globalTimeout = setTimeout(() => {
     globalTimedOut = true
     console.warn('[Dashboard] load 全局超时(10s)，强制结束加载状态')
-    nanoLoading.set(false)
-    nanoStatusMsg.set('')
     nanoSyncInfo.set({ syncing: false, msg: '同步超时', at: '' })
     loadError = true
     hasLoaded = true
     isLoading = false
+    if (pendingReload) {
+      pendingReload = false
+      void load()
+    }
   }, 10000)
 
   try {
@@ -100,8 +91,14 @@ async function load(silent = false) {
     const rtEntries = Object.entries((env as any)?.runtimes || {})
     const projEntries = Object.entries((env as any)?.projects || {})
     envSummary = {
-services: { total: svcEntries.length, running: svcEntries.filter(([, v]: [string, any]) => v.state === 'running').length },
-      runtimes: { total: rtEntries.length, running: rtEntries.filter(([, v]: [string, any]) => v.state === 'running').length },
+      services: {
+        total: svcEntries.length,
+        running: svcEntries.filter(([, v]: [string, any]) => v.state === 'running').length,
+      },
+      runtimes: {
+        total: rtEntries.length,
+        running: rtEntries.filter(([, v]: [string, any]) => v.state === 'running').length,
+      },
       projects: { total: projEntries.length, enabled: projEntries.filter(([, v]: [string, any]) => v.enabled).length },
     }
     lastSnapshot = snaps?.length > 0 ? snaps[snaps.length - 1] : null
@@ -114,15 +111,16 @@ services: { total: svcEntries.length, running: svcEntries.filter(([, v]: [string
     clearTimeout(globalTimeout)
     if (!globalTimedOut) {
       isLoading = false
-      if (showOverlay) {
-        nanoLoading.set(false)
-        if (!loadError) nanoStatusMsg.set('就绪')
-      }
       nanoSyncInfo.set({
         syncing: false,
         msg: loadError ? '同步失败' : '',
         at: new Date().toLocaleTimeString('zh-CN', { hour12: false }),
       })
+    }
+    // 加载期间又有新刷新请求进来 → 补跑一次，拿到最终状态
+    if (pendingReload) {
+      pendingReload = false
+      void load()
     }
   }
 }
@@ -204,7 +202,7 @@ function cardBorderCls(s: string) {
   return ''
 }
 
-const unsub = refreshSignal.subscribe(() => load(true))
+const unsub = refreshSignal.subscribe(() => load())
 let lastOpRefresh = 0
 const unsubOp = subscribeOperationEvents((name, data) => {
   if (name === 'step' && data?.state === 'done') {

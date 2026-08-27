@@ -244,7 +244,7 @@ async function installEnvComponents(env: any) {
       task.status = 'done'
       task.progress = 100
       installTasks = [...installTasks]
-} catch (e: any) {
+    } catch (e: any) {
       task.status = 'error'
       installTasks = [...installTasks]
       if (!installCancelled) {
@@ -264,7 +264,7 @@ async function installEnvComponents(env: any) {
   await load()
   busy = false
 
-if (installCancelled) {
+  if (installCancelled) {
     // 已由 cancelInstall 提示
   } else if (installTasks.every((t) => t.status === 'done')) {
     addToast('所有组件安装完成，可点击「激活并运行」启动环境', 'success', 3500)
@@ -275,7 +275,7 @@ function cancelInstall() {
   if (installCancelled) return
   installCancelled = true
   // 立即反馈：未完成任务标记为已取消并关闭弹窗，不必等待正在进行的下载结束
-installTasks = installTasks.map((t) => (t.status === 'done' ? t : { ...t, status: 'cancelled', progress: 0 }))
+  installTasks = installTasks.map((t) => (t.status === 'done' ? t : { ...t, status: 'cancelled', progress: 0 }))
   installModal = false
   addToast('已取消安装', 'warning', 3500)
 }
@@ -297,7 +297,7 @@ function closeInstallModal() {
 }
 
 async function saveEnv() {
-if (!editingEnv.name?.trim()) {
+  if (!editingEnv.name?.trim()) {
     addToast('请填写环境名称', 'error', 3500)
     return
   }
@@ -343,7 +343,7 @@ async function doDeleteSnapshot() {
     if (selectedSnapshotId === id) selectedSnapshotId = null
     confirmDeleteId = null
     snapshots = snapshots.filter((s) => s !== id)
-addToast('快照已删除', 'success', 3500)
+    addToast('快照已删除', 'success', 3500)
   } catch (e: any) {
     addToast(`删除失败: ${e.message || e}`, 'error', 3500)
   } finally {
@@ -359,7 +359,12 @@ function formatTime(snapshotId: string) {
 }
 
 function stateLabel(state: string) {
-  const labels: Record<string, string> = { running: '运行中', stopped: '已停止', starting: '启动中', stopping: '停止中' }
+  const labels: Record<string, string> = {
+    running: '运行中',
+    stopped: '已停止',
+    starting: '启动中',
+    stopping: '停止中',
+  }
   return labels[state] || state || '未知'
 }
 
@@ -570,14 +575,13 @@ onMount(() => {
           {@const isActive = activeEnvID === env.id}
           {@const installCheck = checkEnvInstalled(env)}
           {@const envUnits = env.units ? (Array.isArray(env.units) ? env.units : Object.values(env.units)) : []}
-          <div class="card bg-base-100 border border-base-300 overflow-hidden transition-all hover:border-primary hover:-translate-y-0.5 {isActive ? 'border-primary shadow-md' : ''} {env.isBuiltin ? 'bg-gradient-to-br from-base-100 to-base-200' : ''}">
+          <div class="card bg-base-100 border border-base-300 overflow-hidden transition-all hover:border-primary hover:-translate-y-0.5 {isActive ? 'border-l-4 border-l-success border-primary shadow-md' : ''} {env.isBuiltin ? 'bg-gradient-to-br from-base-100 to-base-200' : ''}">
             <!-- 卡片头部 -->
-            <div class="px-4 pt-4 pb-3 flex justify-between items-start gap-2">
-              <div class="min-w-0 flex-1">
-                <div class="text-[15px] font-semibold flex items-center gap-2 flex-wrap">
-                  {env.name}
-                  {#if env.isBuiltin}<span class="badge badge-xs badge-ghost">预设</span>{/if}
-                  {#if isActive}<span class="badge badge-xs badge-success">当前在用</span>{/if}
+            <div class="px-4 pt-4 pb-3">
+              <div class="min-w-0">
+                <div class="text-[15px] font-semibold flex items-center gap-1.5">
+                  {#if env.isBuiltin}<span class="text-xs text-base-content/40 font-normal shrink-0">预设</span>{/if}
+                  <span class="truncate">{env.name}</span>
                 </div>
                 {#if env.description}
                   <div class="text-xs text-base-content/60 mt-1 leading-relaxed">{env.description}</div>
@@ -587,11 +591,11 @@ onMount(() => {
 
             <!-- 卡片内容：组件摘要 + 安装状态 -->
             <div class="px-4 pb-3">
-              <div class="text-xs bg-base-200 px-3 py-2.5 rounded-lg min-h-[40px]">
+              <div class="text-xs bg-base-200 rounded-lg overflow-hidden min-h-[40px]">
                 {#if envUnits.length === 0}
-                  <span class="text-base-content/50">空环境</span>
+                  <div class="px-3 py-2.5"><span class="text-base-content/50">空环境</span></div>
                 {:else}
-                  <div class="flex flex-wrap gap-x-4 gap-y-1.5">
+                  <div class="px-3 py-2.5 flex flex-wrap gap-x-4 gap-y-1.5">
                     {#each envUnits as u}
                       <span class="inline-flex items-center gap-1.5">
                         {#if iconMap[u.kind]}
@@ -605,23 +609,21 @@ onMount(() => {
                     {/each}
                   </div>
                 {/if}
-              </div>
-              {#if installStatusReady}
-                {#if installCheck.total > 0}
-                  <div class="flex items-center gap-1.5 mt-2 text-xs">
+                {#if installStatusReady && installCheck.total > 0}
+                  <div class="px-3 py-1.5 border-t border-base-300/50 flex items-center gap-1.5">
                     {#if installCheck.allInstalled}
-                      <span class="text-success">✓ 全部组件已安装</span>
+                      <span class="text-success">✓ 全部已安装</span>
                     {:else}
                       <span class="text-warning">⚠ {installCheck.missing.length} 项未安装: {installCheck.missing.slice(0, 3).join('，')}{installCheck.missing.length > 3 ? '...' : ''}</span>
                     {/if}
                   </div>
+                {:else if !installStatusReady}
+                  <div class="px-3 py-1.5 border-t border-base-300/50 flex items-center gap-1.5">
+                    <span class="loading loading-dots loading-xs text-primary"></span>
+                    <span class="text-base-content/40">检查中...</span>
+                  </div>
                 {/if}
-              {:else}
-                <div class="flex items-center gap-1.5 mt-2 text-xs">
-                  <span class="loading loading-dots loading-xs text-primary"></span>
-                  <span class="text-base-content/40">检查安装状态...</span>
-                </div>
-              {/if}
+              </div>
             </div>
 
             <!-- 卡片底部：操作按钮 -->
@@ -629,7 +631,7 @@ onMount(() => {
               {#if !installStatusReady}
                 <button class="btn btn-sm btn-disabled" disabled>检查中...</button>
               {:else if isActive}
-                <button class="btn btn-sm btn-disabled" disabled>当前在用</button>
+                <span class="text-xs text-success font-medium px-1">当前在用</span>
               {:else if installCheck.allInstalled}
                 <button class="btn btn-sm btn-ghost" onclick={() => activateEnvOnly(env)} disabled={$operation.active || busy} title="仅切换当前环境标记，不启动组件">激活</button>
                 <button class="btn btn-sm btn-primary" onclick={() => activateEnv(env)} disabled={$operation.active || busy} title="切换标记并启动全部组件">激活并运行</button>
@@ -637,8 +639,13 @@ onMount(() => {
                 <button class="btn btn-sm btn-warning" onclick={() => installEnvComponents(env)} disabled={$operation.active || busy}>安装</button>
                 <button class="btn btn-sm btn-ghost" onclick={() => activateEnvOnly(env)} disabled={$operation.active || busy} title="仅切换当前环境标记">激活</button>
               {/if}
-              <button class="btn btn-sm btn-ghost" onclick={() => openEditEnv(env)} disabled={$operation.active || busy}>编辑</button>
-              <button class="btn btn-sm btn-ghost text-error" onclick={() => confirmDeleteEnvId = env.id} disabled={$operation.active || busy}>删除</button>
+              <div class="flex-1"></div>
+              <button class="btn btn-sm btn-ghost btn-square" onclick={() => openEditEnv(env)} disabled={$operation.active || busy} title="编辑环境">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg>
+              </button>
+              <button class="btn btn-sm btn-ghost btn-square text-base-content/40 hover:text-error" onclick={() => confirmDeleteEnvId = env.id} disabled={$operation.active || busy} title="删除环境">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+              </button>
             </div>
           </div>
         {/each}

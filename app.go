@@ -49,6 +49,7 @@ type App struct {
 	tray        *tray.Tray
 	AppVersion  string
 	envOpMu     sync.Mutex // 串行化环境启停操作，防止并发激活
+	isQuitting  bool       // 标记正在退出，防止 HandleWindowClose 拦截退出
 
 	downloadMu sync.Mutex               // 保护 downloads 单飞去重表
 	downloads  map[string]struct{}      // 正在下载中的 service@version
@@ -65,6 +66,17 @@ var runtimeNames = map[string]string{
 }
 
 func NewApp() *App {
+	debugFile := filepath.Join("G:\\DevStack", "devstack-debug.log")
+	debugLog := func(format string, args ...interface{}) {
+		f, err := os.OpenFile(debugFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err == nil {
+			fmt.Fprintf(f, "[%s] "+format+"\n", append([]interface{}{time.Now().Format("15:04:05.000")}, args...)...)
+			f.Close()
+		}
+	}
+
+	debugLog("[NewApp] ====== 程序启动 ======")
+
 	var fileLogger *log.FileLogger
 	var opStore *log.OpStore
 
@@ -76,9 +88,11 @@ func NewApp() *App {
 	cfgSettings := cfg.Get()
 	installDir := cfgSettings.InstallDir
 
+	debugLog("[NewApp] installDir=[%s] len=%d", installDir, len(installDir))
+
 	opStore.LogInfo("[INIT] NewApp 开始初始化, 当前时间: %s", time.Now().Format("2006-01-02 15:04:05"))
 	opStore.LogInfo("[INIT] 配置文件路径: %s", cfg.FilePath())
-	opStore.LogInfo("[INIT] 安装目录: %s", installDir)
+	opStore.LogInfo("[INIT] 安装目录: [%s] (len=%d)", installDir, len(installDir))
 
 	if installDir != "" {
 		wailsLogPath := filepath.Join(installDir, "logs", "wails.log")
@@ -254,7 +268,7 @@ func NewApp() *App {
 		stateStore:  stateStore,
 		reconciler:  reconciler,
 		reactiveEng: reactiveEng,
-		AppVersion:  "0.2.0",
+		AppVersion:  version,
 		downloads:   map[string]struct{}{},
 	}
 	app.tray = tray.New(
@@ -266,10 +280,10 @@ func NewApp() *App {
 			wailsruntime.WindowUnminimise(app.ctx)
 		},
 		func() {
+			app.isQuitting = true
 			if app.ctx != nil {
 				wailsruntime.Quit(app.ctx)
 			}
-			app.tray.Quit()
 		},
 	)
 	opStore.LogInfo("[INIT] 系统托盘初始化完成")
@@ -361,6 +375,9 @@ func (a *App) startup(ctx context.Context) {
 
 // HandleWindowClose 返回是否阻止窗口关闭：启用"最小化到系统托盘"时隐藏窗口而不是退出。
 func (a *App) HandleWindowClose(ctx context.Context) bool {
+	if a.isQuitting {
+		return false
+	}
 	settings := a.cfg.Get()
 	if settings.MinimizeToTray && a.tray != nil && a.tray.Running() {
 		wailsruntime.WindowHide(ctx)
@@ -372,10 +389,14 @@ func (a *App) HandleWindowClose(ctx context.Context) bool {
 	return false
 }
 
-// Shutdown 应用退出前清理托盘图标。
+// Shutdown 应用退出前清理所有资源。
 func (a *App) Shutdown() {
+	a.isQuitting = true
 	if a.tray != nil {
 		a.tray.Quit()
+	}
+	if a.opStore != nil {
+		a.opStore.LogInfo("[SHUTDOWN] 应用正在退出")
 	}
 }
 
@@ -1110,14 +1131,27 @@ func (a *App) ClearLogs() error {
 }
 
 func (a *App) GetSettings() core.AppSettings {
-	if a.opStore != nil {
-		a.opStore.LogDebug("[API] GetSettings 调用")
+	debugFile := filepath.Join("G:\\DevStack", "devstack-debug.log")
+	debugLog := func(format string, args ...interface{}) {
+		f, err := os.OpenFile(debugFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err == nil {
+			fmt.Fprintf(f, "[%s] "+format+"\n", append([]interface{}{time.Now().Format("15:04:05.000")}, args...)...)
+			f.Close()
+		}
 	}
+	debugLog("[GetSettings] 被调用")
 	result := a.cfg.Get()
-	if a.opStore != nil {
-		a.opStore.LogDebug("[API] GetSettings 返回, installDir: %s, theme: %s", result.InstallDir, result.Theme)
-	}
+	debugLog("[GetSettings] 返回 installDir=[%s] len=%d theme=[%s]", result.InstallDir, len(result.InstallDir), result.Theme)
 	return result
+}
+
+func (a *App) DebugLog(msg string) {
+	debugFile := filepath.Join("G:\\DevStack", "devstack-debug.log")
+	f, err := os.OpenFile(debugFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err == nil {
+		fmt.Fprintf(f, "[%s] [Frontend] %s\n", time.Now().Format("15:04:05.000"), msg)
+		f.Close()
+	}
 }
 
 func (a *App) SaveSettings(s core.AppSettings) error {
@@ -1380,7 +1414,6 @@ func (a *App) GetSystemInfo() core.SystemInfo {
 		a.opStore.LogDebug("[API] GetSystemInfo 调用")
 	}
 	result := core.SystemInfo{
-		GoVersion:  goruntime.Version(),
 		Platform:   goruntime.GOOS,
 		Arch:       goruntime.GOARCH,
 		AppVersion: a.AppVersion,
@@ -1505,21 +1538,22 @@ func (a *App) CheckSetupPorts(services []string) []PortConflict {
 		if !ok {
 			continue
 		}
-		status := a.resMgr.Ports().CheckPort(port)
 		conflict := PortConflict{
-			Port:      port,
-			Service:   svc,
-			InUse:     status.InUse,
-			PID:       status.PID,
-			ExePath:   status.ExePath,
-			OwnedByUs: status.OwnedByUs,
+			Port:    port,
+			Service: svc,
+			Message: fmt.Sprintf("端口 %d 可用", port),
 		}
-		if status.InUse && !status.OwnedByUs {
-			conflict.Message = fmt.Sprintf("端口 %d 已被外部进程占用 (PID=%d: %s)", port, status.PID, status.ExePath)
-		} else if status.InUse && status.OwnedByUs {
-			conflict.Message = fmt.Sprintf("端口 %d 已被 DevStack 占用 (PID=%d)", port, status.PID)
-		} else {
-			conflict.Message = fmt.Sprintf("端口 %d 可用", port)
+		if a.resMgr != nil {
+			status := a.resMgr.Ports().CheckPort(port)
+			conflict.InUse = status.InUse
+			conflict.PID = status.PID
+			conflict.ExePath = status.ExePath
+			conflict.OwnedByUs = status.OwnedByUs
+			if status.InUse && !status.OwnedByUs {
+				conflict.Message = fmt.Sprintf("端口 %d 已被外部进程占用 (PID=%d: %s)", port, status.PID, status.ExePath)
+			} else if status.InUse && status.OwnedByUs {
+				conflict.Message = fmt.Sprintf("端口 %d 已被 DevStack 占用 (PID=%d)", port, status.PID)
+			}
 		}
 		conflicts = append(conflicts, conflict)
 	}

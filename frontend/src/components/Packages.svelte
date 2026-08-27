@@ -177,8 +177,8 @@ let filtered = $derived(selected === 'all' ? packages : packages.filter((p) => p
 onMount(load)
 </script>
 
-<div class="grid grid-cols-[220px_1fr] h-[calc(100vh-48px)] -m-6 -mx-8 bg-base-100">
-  <div class="border-r border-base-300 flex flex-col">
+<div class="grid grid-cols-[220px_1fr] bg-base-100">
+  <div class="border-r border-base-300 flex flex-col sticky top-0 h-screen">
     <div class="p-4 border-b border-base-300"><h3 class="text-base font-semibold">软件仓库</h3></div>
     <div class="flex-1 p-2 overflow-y-auto">
       {#each categories as cat}
@@ -190,7 +190,7 @@ onMount(load)
     </div>
   </div>
 
-  <div class="overflow-y-auto">
+  <div class="flex flex-col min-h-0">
     <div class="px-6 py-4 border-b border-base-300"><h2 class="text-lg font-semibold">{categories.find(c => c.id === selected)?.label || ''}</h2></div>
 
     {#if loading}
@@ -246,7 +246,7 @@ onMount(load)
                     {#if uninstalling[key]}
                       <span class="loading loading-spinner loading-xs"></span>
                     {:else}
-                      <button class="btn btn-ghost btn-sm text-error" onclick={() => uninstall(pkg)} title="卸载">🗑 卸载</button>
+                      <button class="btn btn-outline btn-error btn-sm" onclick={() => uninstall(pkg)} title="卸载">卸载</button>
                     {/if}
                 {:else if installing[key]}
                   {#if cancelling[key]}

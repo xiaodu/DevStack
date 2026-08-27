@@ -1,13 +1,13 @@
 <script lang="ts">
 import { onMount } from 'svelte'
 import { api } from '../lib/api'
-import { safeInvoke } from '../lib/safeInvoke'
-import { addToast } from '../lib/stores'
 
 let settings = $state({ installDir: '', startOnBoot: false, minimizeToTray: true, theme: 'light', language: 'zh-CN' })
 let systemInfo = $state({})
 let loading = $state(true)
 let configPath = $state('')
+let saveTimer: ReturnType<typeof setTimeout> | null = null
+const infoLabels: Record<string, string> = { platform: '操作系统', arch: '架构', appVersion: '版本', installDir: '安装目录' }
 
 async function load() {
   try {
@@ -26,22 +26,24 @@ function applyTheme(theme: string) {
   document.documentElement.setAttribute('data-theme', theme)
 }
 
-function handleThemeChange() {
-  applyTheme(settings.theme)
+function scheduleSave() {
+  if (saveTimer) clearTimeout(saveTimer)
+  saveTimer = setTimeout(async () => {
+    try {
+      await api.saveSettings(settings)
+    } catch (e) {
+      console.error('自动保存失败:', e)
+    }
+  }, 500)
 }
 
-async function save() {
-  await safeInvoke(
-    async () => {
-      await api.saveSettings(settings)
-      const verified = await api.getSettings()
-      if (verified.theme !== settings.theme) {
-        throw new Error(`保存验证失败：期望主题 "${settings.theme}"，实际 "${verified.theme}"`)
-      }
-      applyTheme(settings.theme)
-    },
-    { successMsg: '保存成功', errorPrefix: '保存失败' },
-  )
+function handleThemeChange() {
+  applyTheme(settings.theme)
+  scheduleSave()
+}
+
+function handleChange() {
+  scheduleSave()
 }
 
 onMount(load)
@@ -57,7 +59,7 @@ onMount(load)
         <div class="flex flex-col gap-3">
           <label class="form-control w-full">
             <div class="label"><span class="label-text">安装目录</span></div>
-            <input class="input input-bordered w-full" bind:value={settings.installDir} placeholder="服务安装路径" />
+            <input class="input input-bordered w-full" bind:value={settings.installDir} oninput={handleChange} placeholder="服务安装路径" />
           </label>
         </div>
       </div>
@@ -66,12 +68,12 @@ onMount(load)
         <h3 class="text-sm font-semibold mb-3.5 text-primary">通用设置</h3>
         <div class="flex flex-col gap-3">
           <label class="flex items-center gap-2 cursor-pointer">
-            <input type="checkbox" class="toggle toggle-primary" bind:checked={settings.startOnBoot} />
+            <input type="checkbox" class="toggle toggle-primary" bind:checked={settings.startOnBoot} onchange={handleChange} />
             <span class="text-sm">开机自启</span>
           </label>
           <p class="text-xs text-base-content/50 -mt-1">登录 Windows 后自动启动 DevStack</p>
           <label class="flex items-center gap-2 cursor-pointer">
-            <input type="checkbox" class="toggle toggle-primary" bind:checked={settings.minimizeToTray} />
+            <input type="checkbox" class="toggle toggle-primary" bind:checked={settings.minimizeToTray} onchange={handleChange} />
             <span class="text-sm">最小化到系统托盘</span>
           </label>
           <p class="text-xs text-base-content/50 -mt-1">关闭窗口时最小化到系统托盘，可从托盘图标恢复或退出</p>
@@ -94,7 +96,7 @@ onMount(load)
           </label>
           <label class="form-control w-full">
             <div class="label"><span class="label-text">语言</span></div>
-            <select class="select select-bordered w-full" bind:value={settings.language}>
+            <select class="select select-bordered w-full" bind:value={settings.language} onchange={handleChange}>
               <option value="zh-CN">简体中文</option>
               <option value="en">English</option>
             </select>
@@ -107,7 +109,7 @@ onMount(load)
         <div class="grid grid-cols-2 gap-2.5">
           {#each Object.entries(systemInfo) as [key, val]}
             <div class="flex flex-col gap-0.5">
-              <span class="text-xs text-base-content/60">{key}</span>
+              <span class="text-xs text-base-content/60">{infoLabels[key] || key}</span>
               <span class="text-sm break-all">{val}</span>
             </div>
           {/each}
@@ -119,10 +121,6 @@ onMount(load)
           </div>
         {/if}
       </div>
-    </div>
-
-    <div class="flex items-center gap-3">
-      <button class="btn btn-primary btn-lg" onclick={save}>保存设置</button>
     </div>
   {/if}
 </div>

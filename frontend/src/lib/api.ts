@@ -59,6 +59,7 @@ import {
   UninstallVersion,
   UpdateEnvironment,
   UpdateProject,
+  DebugLog,
 } from '../../wailsjs/go/main/App.js'
 
 // 检测是否运行在 Wails 环境中（浏览器预览模式时 window.go 不存在）
@@ -216,11 +217,8 @@ const mockProjects = [
 ]
 
 const mockSystemInfo = {
-  goVersion: 'go1.22.0',
   platform: 'windows',
   arch: 'amd64',
-  cpu: 'Intel Core i7',
-  memory: '16GB',
   appVersion: '0.2.0',
   installDir: 'C:/DevStack',
 }
@@ -402,6 +400,14 @@ export const api = {
       return () => unsub()
     }
     return () => {}
+  },
+
+  // ====== Debug ======
+  debugLog: (msg: string) => {
+    if (isWailsEnv) {
+      return DebugLog(msg)
+    }
+    return Promise.resolve()
   },
 }
 

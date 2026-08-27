@@ -79,12 +79,29 @@ type Engine struct {
 	services map[string]*Service
 	procfile *Procfile
 
+	// 启动函数（由 service.Manager 提供，调用 provider 启动服务）
+	startFunc func(name string) (pid int, err error)
+
+	// 停止函数（由 service.Manager 提供，调用 provider 停止服务）
+	stopFunc func(name string) error
+
 	// 状态变更回调
 	onStateChange func(name string, oldState, newState ServiceState, err error)
 
 	// 日志回调
 	onLog func(msg string)
 }
+
+// StartFunc 启动函数类型
+//
+// 由 service.Manager 提供，内部调用 provider 启动服务。
+// 返回启动后的 PID。
+type StartFunc func(name string) (pid int, err error)
+
+// StopFunc 停止函数类型
+//
+// 由 service.Manager 提供，内部调用 provider 停止服务。
+type StopFunc func(name string) error
 
 // EngineOption 引擎选项
 type EngineOption func(*Engine)
@@ -101,6 +118,34 @@ func WithLogCallback(fn func(msg string)) EngineOption {
 	return func(e *Engine) {
 		e.onLog = fn
 	}
+}
+
+// WithStartFunc 设置启动函数
+func WithStartFunc(fn StartFunc) EngineOption {
+	return func(e *Engine) {
+		e.startFunc = fn
+	}
+}
+
+// WithStopFunc 设置停止函数
+func WithStopFunc(fn StopFunc) EngineOption {
+	return func(e *Engine) {
+		e.stopFunc = fn
+	}
+}
+
+// SetStartFunc 设置启动函数（运行时设置）
+func (e *Engine) SetStartFunc(fn StartFunc) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.startFunc = fn
+}
+
+// SetStopFunc 设置停止函数（运行时设置）
+func (e *Engine) SetStopFunc(fn StopFunc) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.stopFunc = fn
 }
 
 // NewEngine 创建编排引擎
@@ -413,37 +458,56 @@ func (e *Engine) Start(ctx context.Context, name string) error {
 		return err
 	}
 
-	// 3. 启动进程
-	proc, err := e.group.Start(
-		svc.Name,
-		svc.Command,
-		svc.Args,
-		svc.buildEnv(),
-		svc.WorkDir,
-		svc.GraceSec,
-	)
-	if err != nil {
-		e.setError(name, err)
-		return err
+	// 3. 启动进程（使用 startFunc 回调，由 provider 实际启动）
+	var pid int
+	if e.startFunc != nil {
+		var err error
+		pid, err = e.startFunc(name)
+		if err != nil {
+			e.setError(name, err)
+			return err
+		}
+	} else {
+		// 回退到直接启动（Procfile 模式）
+		proc, err := e.group.Start(
+			svc.Name,
+			svc.Command,
+			svc.Args,
+			svc.buildEnv(),
+			svc.WorkDir,
+			svc.GraceSec,
+		)
+		if err != nil {
+			e.setError(name, err)
+			return err
+		}
+		pid = proc.PID
 	}
 
-	// 4. 等待服务就绪
+	// 4. 将进程加入 Job Object 管理
+	if pid > 0 {
+		if err := e.group.AssignPID(pid, name, svc.GraceSec); err != nil {
+			e.log(fmt.Sprintf("将进程 %s 加入 Job Object 失败: %v", name, err))
+		}
+	}
+
+	// 5. 等待服务就绪
 	if err := e.waitForReady(svc, 10*time.Second); err != nil {
 		// 启动超时或失败，停止进程
-		e.group.Stop(proc.PID)
+		e.group.Stop(pid)
 		e.setError(name, err)
 		return err
 	}
 
-	// 5. 更新状态
+	// 6. 更新状态
 	e.mu.Lock()
-	svc.PID = proc.PID
+	svc.PID = pid
 	svc.State = StateRunning
 	svc.Started = time.Now()
 	e.mu.Unlock()
 
 	e.notifyStateChange(name, StateStarting, StateRunning, nil)
-	e.log(fmt.Sprintf("%s 启动成功 (PID=%d)", name, proc.PID))
+	e.log(fmt.Sprintf("%s 启动成功 (PID=%d)", name, pid))
 
 	return nil
 }
@@ -472,11 +536,20 @@ func (e *Engine) Stop(ctx context.Context, name string) error {
 		e.log(fmt.Sprintf("警告: %s 被以下服务依赖: %v", name, deps))
 	}
 
-	// 2. 优雅停止
-	if err := e.group.Stop(svc.PID); err != nil {
-		// 优雅停止失败，强制停止
-		e.log(fmt.Sprintf("优雅停止 %s 失败，尝试强制停止: %v", name, err))
-		e.group.ForceStop(svc.PID)
+	// 2. 优雅停止（使用 stopFunc 回调，由 provider 实际停止）
+	if e.stopFunc != nil {
+		if err := e.stopFunc(name); err != nil {
+			e.log(fmt.Sprintf("停止 %s 失败: %v", name, err))
+			// 回退到强制停止
+			e.group.ForceStop(svc.PID)
+		}
+	} else {
+		// 回退到直接停止（Procfile 模式）
+		if err := e.group.Stop(svc.PID); err != nil {
+			// 优雅停止失败，强制停止
+			e.log(fmt.Sprintf("优雅停止 %s 失败，尝试强制停止: %v", name, err))
+			e.group.ForceStop(svc.PID)
+		}
 	}
 
 	// 3. 等待进程退出

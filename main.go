@@ -23,6 +23,8 @@ var assets embed.FS
 //go:embed build/windows/icon.ico
 var trayIcon []byte
 
+var version = "dev"
+
 // appCtx 保存 Wails 上下文，供 SingleInstanceLock 回调在第二个实例启动时使用。
 var appCtx context.Context
 

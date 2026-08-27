@@ -3,7 +3,7 @@ import { createEventDispatcher, onMount } from 'svelte'
 import { api } from '../lib/api'
 import { safeInvoke } from '../lib/safeInvoke'
 
-let { service }: { service: any } = $props()
+let { service, installDir = '' }: { service: any; installDir?: string } = $props()
 const dispatch = createEventDispatcher()
 
 let nc = $state<Record<string, any>>({})
@@ -88,16 +88,16 @@ async function toggle() {
       {service.name}
       <span class="text-base font-normal text-base-content/50">{service.version}</span>
     </h2>
-    <button class="btn btn-sm {service.running ? 'btn-error' : 'btn-success'}" onclick={toggle}>
-      {service.running ? '停止' : '启动'}
-    </button>
   </div>
 
   <div class="flex items-center gap-2 px-3.5 py-2.5 bg-base-200 rounded-lg mb-6 text-sm">
     <span class="w-2 h-2 rounded-full {service.running ? 'bg-success' : 'bg-base-content/40'}"></span>
     <span class="text-base-content/70">{service.running ? '运行中' : '已停止'}</span>
     {#if service.running && service.uptime}<span class="text-base-content/60">运行 {service.uptime}</span>{/if}
-    {#if service.port}<span class="ml-auto text-xs px-2 py-0.5 rounded bg-primary/10 text-primary">端口 {service.port}</span>{/if}
+    {#if service.port}<span class="text-xs px-2 py-0.5 rounded bg-primary/10 text-primary">端口 {service.port}</span>{/if}
+    <button class="btn btn-xs ml-auto {service.running ? 'btn-error' : 'btn-success'}" onclick={toggle}>
+      {service.running ? '停止' : '启动'}
+    </button>
   </div>
 
   {#if service.kind === 'nginx'}
@@ -156,7 +156,7 @@ async function toggle() {
       <div class="card bg-base-100 border border-base-300 p-5 mb-4">
         <h3 class="text-sm font-semibold text-primary mb-3.5">文件信息</h3>
         <div class="grid grid-cols-2 gap-3">
-          <label class="form-control w-full"><div class="label"><span class="label-text">配置文件</span></div><input class="input input-bordered w-full input-sm" value="nginx/{service.version}/conf/nginx.conf" readonly /></label>
+            <label class="form-control w-full"><div class="label"><span class="label-text">配置文件</span></div><input class="input input-bordered w-full input-sm" value="{installDir}/nginx/{service.version}/conf/nginx.conf" readonly /></label>
           <label class="form-control w-full"><div class="label"><span class="label-text">默认网站根目录</span></div><input class="input input-bordered w-full input-sm" value="www/" readonly /></label>
         </div>
       </div>

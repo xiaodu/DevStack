@@ -170,11 +170,18 @@ func startBootstrap(c Config) (int, error) {
 	return 0, fmt.Errorf("MySQL 引导实例未监听端口 %d", c.Port)
 }
 
-// createRootIPAccount 创建 root@127.0.0.1（空密码、全权限），与 root@localhost 等价。
+// createRootIPAccount 创建 root@127.0.0.1（克隆 root@localhost 行：同密码、同权限）。
+//
+// 引导实例以 --skip-grant-tables 运行时的两条限制决定了实现方式：
+//  1. 账号管理语句（CREATE USER/GRANT）被禁止（ERROR 1290）；
+//  2. FLUSH PRIVILEGES 会重新加载授权表并立即恢复访问控制，之后本函数的
+//     新连接会被拒（ERROR 1130/1045），导致引导死循环。
+//
+// 因此只能对授权表做普通 DML：用临时表克隆 root@localhost 行并改写 Host，
+// 不硬编码列结构，兼容 5.7 / 8.x。所有语句必须在同一次客户端调用中执行
+// （同一会话内 TEMPORARY 表才可见）。新账号在实例重启加载授权表后生效；
+// 引导实例随后被停止，正常实例启动时自然读到最新数据。
 func createRootIPAccount(c Config) error {
-	if err := runSQL(c, "FLUSH PRIVILEGES;"); err != nil {
-		return fmt.Errorf("刷新权限表失败: %w", err)
-	}
 	out, err := runSQLOutput(c, "SELECT COUNT(*) FROM mysql.user WHERE User='root' AND Host='127.0.0.1';")
 	if err != nil {
 		return fmt.Errorf("查询 root@127.0.0.1 失败: %w", err)
@@ -182,10 +189,16 @@ func createRootIPAccount(c Config) error {
 	if n, _ := strconv.Atoi(strings.TrimSpace(firstLine(out))); n > 0 {
 		return nil
 	}
-	if mysqlVersionAtLeast8(c.Version) {
-		return runSQL(c, "CREATE USER IF NOT EXISTS 'root'@'127.0.0.1' IDENTIFIED BY ''; GRANT ALL PRIVILEGES ON *.* TO 'root'@'127.0.0.1' WITH GRANT OPTION;")
+	clone := "DELETE FROM mysql.user WHERE User='root' AND Host='127.0.0.1';" +
+		"CREATE TEMPORARY TABLE mysql.devstack_tmp_user LIKE mysql.user;" +
+		"INSERT INTO mysql.devstack_tmp_user SELECT * FROM mysql.user WHERE User='root' AND Host='localhost';" +
+		"UPDATE mysql.devstack_tmp_user SET Host='127.0.0.1', authentication_string='', password_expired='N', account_locked='N';" +
+		"INSERT INTO mysql.user SELECT * FROM mysql.devstack_tmp_user;" +
+		"DROP TEMPORARY TABLE mysql.devstack_tmp_user;"
+	if err := runSQL(c, clone); err != nil {
+		return fmt.Errorf("创建 root@127.0.0.1 失败: %w", err)
 	}
-	return runSQL(c, "CREATE USER 'root'@'127.0.0.1' IDENTIFIED BY ''; GRANT ALL PRIVILEGES ON *.* TO 'root'@'127.0.0.1' WITH GRANT OPTION;")
+	return nil
 }
 
 func firstLine(s string) string {
@@ -193,12 +206,6 @@ func firstLine(s string) string {
 		return s[:i]
 	}
 	return s
-}
-
-func mysqlVersionAtLeast8(version string) bool {
-	fields := strings.SplitN(version, ".", 2)
-	major, err := strconv.Atoi(fields[0])
-	return err == nil && major >= 8
 }
 
 func fileExists(path string) bool {
@@ -221,5 +228,10 @@ func runSQLOutput(c Config, sql string) (string, error) {
 	cmd := exec.Command(c.mysqlBin(), args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	out, err := cmd.CombinedOutput()
+	if err != nil {
+		if msg := strings.TrimSpace(string(out)); msg != "" {
+			return string(out), fmt.Errorf("%w: %s", err, msg)
+		}
+	}
 	return string(out), err
 }

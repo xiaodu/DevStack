@@ -30,6 +30,7 @@ let selected = $state<any>(null)
 let expandedCat = $state<string | null>('webserver')
 let loading = $state(true)
 let loadingNow = false
+let installDir = $state('')
 
 // 直接引用 serviceItems/runtimeItems，使每个分类下的列表与计数对数据加载保持响应式
 let grouped = $derived(
@@ -44,11 +45,14 @@ function itemsFor(catId: string) {
 }
 
 function toItem(x: any) {
+  const name = x.name || ''
+  const version = x.version || ''
+  const displayName = version && name.endsWith(' ' + version) ? name.slice(0, -(version.length + 1)) : name
   return {
     id: x.id,
     kind: x.kind || x.type,
     type: x.type || x.kind,
-    name: x.name,
+    name: displayName,
     version: x.version,
     status: x.status,
     running: !!(x.running ?? x.status === 'running'),
@@ -61,16 +65,33 @@ function toItem(x: any) {
   }
 }
 
+// 并发去重：进行中不重复发起，但不丢弃 —— 结束后补跑一次，保证批量启停后状态最终一致
+let pendingReload = false
+
 async function load() {
-  if (loadingNow) return
+  if (loadingNow) {
+    pendingReload = true
+    return
+  }
   loadingNow = true
   try {
-    const [all, rts] = await Promise.all([api.getServices().catch(() => []), api.getRuntimes().catch(() => [])])
-serviceItems = (all || []).filter((s: any) => s.installed).map((s: any) => toItem({ ...s, source: 'service' }))
-    runtimeItems = (rts || []).filter((r: any) => r.installed !== false).map((r: any) => toItem({ ...r, source: 'runtime' }))
+    const [all, rts, settings] = await Promise.all([
+      api.getServices().catch(() => []),
+      api.getRuntimes().catch(() => []),
+      api.getSettings().catch(() => ({})),
+    ])
+    installDir = (settings as any).installDir || ''
+    serviceItems = (all || []).filter((s: any) => s.installed).map((s: any) => toItem({ ...s, source: 'service' }))
+    runtimeItems = (rts || [])
+      .filter((r: any) => r.installed !== false)
+      .map((r: any) => toItem({ ...r, source: 'runtime' }))
   } finally {
     loadingNow = false
     loading = false
+    if (pendingReload) {
+      pendingReload = false
+      void load()
+    }
   }
 }
 
@@ -122,8 +143,8 @@ onDestroy(() => {
 })
 </script>
 
-<div class="grid grid-cols-[280px_1fr] h-full bg-base-100">
-  <div class="border-r border-base-300 flex flex-col">
+<div class="grid grid-cols-[280px_1fr] bg-base-100">
+  <div class="border-r border-base-300 flex flex-col sticky top-0 h-screen">
     <div class="p-4 border-b border-base-300"><h3 class="text-base font-semibold">软件管理</h3></div>
     <div class="flex-1 p-2.5 flex flex-col gap-2 overflow-y-auto">
       {#each grouped as cat}
@@ -177,11 +198,11 @@ onDestroy(() => {
     {:else if selected}
       {#key selected.id}
         {#if selected.category === 'webserver'}
-          <WebServer {service} on:change={handleChange} />
+          <WebServer {service} {installDir} on:change={handleChange} />
         {:else if selected.category === 'database'}
-          <Database {service} on:change={handleChange} />
+          <Database {service} {installDir} on:change={handleChange} />
         {:else}
-          <Runtime {service} on:change={handleChange} />
+          <Runtime {service} {installDir} on:change={handleChange} />
         {/if}
       {/key}
     {:else}

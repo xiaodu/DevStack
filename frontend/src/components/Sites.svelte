@@ -12,16 +12,13 @@ let editing = $state<any>(null)
 let loading = $state(true)
 let searchQuery = $state('')
 let busy = $state(false)
-let phpVersions = $state<any[]>([])
-let mysqlVersions = $state<any[]>([])
-let nginxVersions = $state<any[]>([])
 let profiles = $state<any[]>([])
 let profilesLoading = $state(false)
 
 async function load() {
   try {
     sites = await api.getProjects()
-    await Promise.all([loadPHPVersions(), loadMySQLVersions(), loadNginxVersions(), loadProfiles()])
+    await loadProfiles()
     if (!selectedId && sites.length > 0) selectSite(sites[0].id)
   } catch (e) {
     console.error(e)
@@ -38,42 +35,6 @@ async function loadProfiles() {
     profiles = []
   } finally {
     profilesLoading = false
-  }
-}
-
-async function loadPHPVersions() {
-  try {
-    const registry = await api.getPHPRegistry()
-    if (registry?.length > 0) {
-      phpVersions = registry.map((v) => ({ version: v.version, port: v.port }))
-      return
-    }
-  } catch (e) {
-    /* fallthrough */
-  }
-  try {
-    const installed = await api.getInstalledVersions('php')
-    phpVersions = (installed || []).map((v) => ({ version: v, port: 0 }))
-  } catch (e) {
-    phpVersions = []
-  }
-}
-
-async function loadMySQLVersions() {
-  try {
-    const installed = await api.getInstalledVersions('mysql')
-    mysqlVersions = (installed || []).map((v) => ({ version: v }))
-  } catch (e) {
-    mysqlVersions = []
-  }
-}
-
-async function loadNginxVersions() {
-  try {
-    const installed = await api.getInstalledVersions('nginx')
-    nginxVersions = (installed || []).map((v) => ({ version: v }))
-  } catch (e) {
-    nginxVersions = []
   }
 }
 
@@ -138,28 +99,6 @@ async function activateProjectEnvironment() {
 
 let selectedProfile = $derived(editing?.environmentID ? profiles.find((p) => p.id === editing.environmentID) : null)
 
-// 从环境模板（units: {kind, version}）读取指定组件版本
-function profileUnit(kind: string) {
-  return selectedProfile?.units?.find((u) => u.kind === kind) || null
-}
-
-// 从模板提取版本（只读展示）
-let templateNginxVersion = $derived((() => {
-  const u = profileUnit('nginx')
-  return u ? 'Nginx ' + u.version : '未指定'
-})())
-let templateMySQLVersion = $derived((() => {
-  const u = profileUnit('mysql')
-  return u ? 'MySQL ' + u.version : '未指定'
-})())
-let templatePHPVersion = $derived((() => {
-  const u = profileUnit('php')
-  return u ? 'PHP ' + u.version : '未指定'
-})())
-let templateRuntimeBadges = $derived((selectedProfile?.units || [])
-  .filter((u) => u.kind === 'php' || u.kind === 'node' || u.kind === 'python')
-  .map((u) => ({ runtimeId: u.kind, version: u.version })))
-
 async function save() {
   if (!editing) return
   await safeInvoke(
@@ -211,11 +150,13 @@ async function toggleProject(id) {
   )
 }
 
-let filteredSites = $derived(sites.filter(
-  (s) =>
-    s.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    s.domain.toLowerCase().includes(searchQuery.toLowerCase()),
-))
+let filteredSites = $derived(
+  sites.filter(
+    (s) =>
+      s.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      s.domain.toLowerCase().includes(searchQuery.toLowerCase()),
+  ),
+)
 let showTargetPort = $derived(editing && (editing.type === 'node' || editing.type === 'python'))
 let showProxyPass = $derived(editing && editing.type === 'proxy')
 let showPHP = $derived(editing && editing.type === 'php')
@@ -230,8 +171,8 @@ async function browseDirectory() {
 onMount(load)
 </script>
 
-<div class="grid grid-cols-[300px_1fr] h-[calc(100vh-48px)] -m-6 -mx-8 bg-base-100">
-  <div class="border-r border-base-300 flex flex-col overflow-hidden">
+<div class="grid grid-cols-[300px_1fr] bg-base-100">
+  <div class="border-r border-base-300 flex flex-col sticky top-0 h-screen">
     <div class="flex justify-between items-center p-4 border-b border-base-300">
       <h3 class="text-base font-semibold">项目</h3>
       <button class="w-7 h-7 rounded-full bg-primary text-primary-content text-base flex items-center justify-center hover:brightness-110 border-none" onclick={newSite} title="添加项目">+</button>
@@ -277,140 +218,113 @@ onMount(load)
         <h2 class="text-xl font-semibold">{editing.id === '__new__' ? '新建项目' : editing.name}</h2>
         <div class="flex gap-2">
           {#if editing.id && editing.id !== '__new__'}
-            <button class="btn btn-sm btn-outline" onclick={activateProjectEnvironment} disabled={busy}>{busy ? '处理中...' : '激活此项目环境'}</button>
-            <button class="btn btn-sm btn-circle bg-error/10 text-error hover:bg-error/20 border-none" onclick={remove} title="删除">🗑</button>
+            <button class="btn btn-outline btn-error btn-sm" onclick={remove}>删除</button>
           {/if}
-          <button class="btn btn-sm btn-circle bg-success text-success-content hover:brightness-110 border-none" onclick={save} title="保存">✓</button>
+          <button class="btn btn-primary btn-sm" onclick={save}>保存</button>
         </div>
       </div>
 
-      <div class="flex flex-col gap-4 max-w-[700px]">
-        <label class="form-control w-full"><div class="label"><span class="label-text">名字</span></div><input class="input input-bordered w-full input-sm" bind:value={editing.name} /></label>
-        <label class="form-control w-full"><div class="label"><span class="label-text">域名</span></div><input class="input input-bordered w-full input-sm" bind:value={editing.domain} placeholder="example.dev" /></label>
-
-        <div class="grid grid-cols-3 gap-3">
-          <label class="form-control"><div class="label"><span class="label-text">HTTP Port</span></div><input class="input input-bordered w-full input-sm" type="number" bind:value={editing.port} /></label>
-          <label class="form-control"><div class="label"><span class="label-text">HTTPS Port</span></div><input class="input input-bordered w-full input-sm" type="number" bind:value={editing.httpsPort} placeholder="443" /></label>
-          <label class="flex items-center gap-2 cursor-pointer pt-9">
-            <input type="checkbox" class="toggle toggle-sm toggle-primary" bind:checked={editing.ssl} />
-            <span class="text-sm text-base-content/70">SSL</span>
-          </label>
-        </div>
-
-        <div class="grid grid-cols-3 gap-3">
-          <label class="form-control"><div class="label"><span class="label-text">项目类型</span></div>
-            <select class="select select-bordered w-full select-sm" bind:value={editing.type}>
-              <option value="static">静态</option><option value="php">PHP</option><option value="node">Node.js</option><option value="python">Python</option><option value="proxy">反向代理</option>
-            </select>
-          </label>
-
-          {#if showPHP}
-            <label class="form-control col-span-2"><div class="label"><span class="label-text">Rewrite 规则</span></div>
-              <select class="select select-bordered w-full select-sm" bind:value={editing.rewrite}>
-                <option value="default">Default</option><option value="laravel">Laravel</option><option value="thinkphp">ThinkPHP</option>
-              </select>
-            </label>
-          {:else if showTargetPort}
-            <label class="form-control"><div class="label"><span class="label-text">应用端口</span></div><input class="input input-bordered w-full input-sm" type="number" bind:value={editing.targetPort} /></label>
-            <label class="form-control"><div class="label"><span class="label-text">说明</span></div><input class="input input-bordered w-full input-sm" value="自行启动进程" readonly /></label>
-          {:else if showProxyPass}
-            <label class="form-control col-span-2"><div class="label"><span class="label-text">目标地址</span></div><input class="input input-bordered w-full input-sm" bind:value={editing.proxyPass} placeholder="http://127.0.0.1:3000" /></label>
-          {:else}
-            <div></div><div></div>
-          {/if}
-        </div>
-
-        <label class="form-control w-full">
-          <div class="label"><span class="label-text">项目根目录</span></div>
-          <div class="flex gap-2">
-            <input class="input input-bordered w-full input-sm" bind:value={editing.root} placeholder="E:\projects\my-project" />
-            <button class="btn btn-sm btn-outline" onclick={browseDirectory}>浏览</button>
-          </div>
-        </label>
-
-        <label class="flex items-center gap-2 cursor-pointer">
-          <input type="checkbox" class="toggle toggle-sm toggle-primary" bind:checked={editing.enabled} />
-          <span class="text-sm">启用项目</span>
-        </label>
-
-        <!-- 环境配置（合并：关联模板 + 版本配置） -->
-        <div class="mt-2 p-4 bg-base-200 rounded-xl border border-base-300">
-          <div class="flex justify-between items-center mb-3">
-            <h3 class="text-sm font-semibold text-primary">环境配置</h3>
-            {#if selectedProfile}
-              <span class="badge badge-sm badge-primary">继承自「{selectedProfile.name}」</span>
-            {:else}
-              <span class="badge badge-sm badge-ghost">独立配置</span>
-            {/if}
-          </div>
-
-          <!-- 关联环境模板选择 -->
-          <label class="form-control w-full mb-3">
-            <div class="label"><span class="label-text">关联环境模板</span></div>
-            {#if profilesLoading}
-              <input class="input input-bordered w-full input-sm" value="加载环境列表中..." readonly />
-            {:else}
-              <select class="select select-bordered w-full select-sm" bind:value={editing.environmentID}>
-                <option value="">（不使用模板，独立配置）</option>
-                {#each profiles as profile}<option value={profile.id}>{profile.name}{profile.isBuiltin ? '  [预设]' : ''}</option>{/each}
-              </select>
-            {/if}
-            {#if selectedProfile}
-              <div class="label"><span class="label-text-alt text-base-content/60 leading-relaxed">
-                {selectedProfile.description}
-              </span></div>
-            {:else}
-              <div class="label"><span class="label-text-alt text-base-content/60">不关联模板时，下方版本独立生效</span></div>
-            {/if}
-          </label>
-
-          {#if selectedProfile}
-            <!-- 关联模板：只读展示从模板继承的版本 -->
-            <div class="grid grid-cols-3 gap-3">
-              <div class="form-control">
-                <div class="label"><span class="label-text">Nginx 版本</span></div>
-                <input class="input input-bordered w-full input-sm" value={templateNginxVersion} readonly />
-              </div>
-              <div class="form-control">
-                <div class="label"><span class="label-text">MySQL 版本</span></div>
-                <input class="input input-bordered w-full input-sm" value={templateMySQLVersion} readonly />
-              </div>
-              <div class="form-control">
-                <div class="label"><span class="label-text">PHP 版本</span></div>
-                <input class="input input-bordered w-full input-sm" value={templatePHPVersion} readonly />
-              </div>
+      <div class="flex flex-col gap-5 max-w-[700px]">
+        <!-- 基本信息 -->
+        <div>
+          <h3 class="text-xs font-semibold text-base-content/50 uppercase tracking-wide mb-2">基本信息</h3>
+          <div class="flex flex-col gap-3">
+            <div class="grid grid-cols-2 gap-3">
+              <label class="form-control"><div class="label"><span class="label-text">名字</span></div><input class="input input-bordered w-full input-sm" bind:value={editing.name} /></label>
+              <label class="form-control"><div class="label"><span class="label-text">域名</span></div><input class="input input-bordered w-full input-sm" bind:value={editing.domain} placeholder="example.dev" /></label>
             </div>
-            {#if templateRuntimeBadges.length > 0}
-              <div class="mt-2 text-xs text-base-content/60">
-                运行时：
-                {#each templateRuntimeBadges as rt}
-                  <span class="badge badge-sm badge-ghost mr-1">{rt.runtimeId} {rt.version}</span>
+            <label class="form-control w-full">
+              <div class="label"><span class="label-text">项目根目录</span></div>
+              <div class="flex gap-2">
+                <input class="input input-bordered w-full input-sm" bind:value={editing.root} placeholder="E:\projects\my-project" />
+                <button class="btn btn-sm btn-outline" onclick={browseDirectory}>浏览</button>
+              </div>
+            </label>
+            <label class="flex items-center gap-2 cursor-pointer">
+              <input type="checkbox" class="toggle toggle-sm toggle-primary" bind:checked={editing.enabled} />
+              <span class="text-sm">启用项目</span>
+            </label>
+          </div>
+        </div>
+
+        <!-- 站点配置 -->
+        <div>
+          <h3 class="text-xs font-semibold text-base-content/50 uppercase tracking-wide mb-2">站点配置</h3>
+          <div class="flex flex-col gap-3">
+            <div class="grid grid-cols-2 gap-3">
+              <label class="form-control">
+                <div class="label"><span class="label-text">项目类型</span></div>
+                <select class="select select-bordered w-full select-sm" bind:value={editing.type}>
+                  <option value="static">静态</option><option value="php">PHP</option><option value="node">Node.js</option><option value="python">Python</option><option value="proxy">反向代理</option>
+                </select>
+              </label>
+              {#if showPHP}
+                <label class="form-control">
+                  <div class="label"><span class="label-text">Rewrite 规则</span></div>
+                  <select class="select select-bordered w-full select-sm" bind:value={editing.rewrite}>
+                    <option value="default">Default</option><option value="laravel">Laravel</option><option value="thinkphp">ThinkPHP</option>
+                  </select>
+                </label>
+              {:else if showTargetPort}
+                <label class="form-control">
+                  <div class="label"><span class="label-text">应用端口</span></div>
+                  <input class="input input-bordered w-full input-sm" type="number" bind:value={editing.targetPort} />
+                </label>
+              {:else if showProxyPass}
+                <label class="form-control">
+                  <div class="label"><span class="label-text">目标地址</span></div>
+                  <input class="input input-bordered w-full input-sm" bind:value={editing.proxyPass} placeholder="http://127.0.0.1:3000" />
+                </label>
+              {/if}
+            </div>
+            <div class="grid grid-cols-3 gap-3">
+              <label class="form-control"><div class="label"><span class="label-text">HTTP Port</span></div><input class="input input-bordered w-full input-sm" type="number" bind:value={editing.port} /></label>
+              <label class="form-control"><div class="label"><span class="label-text">HTTPS Port</span></div><input class="input input-bordered w-full input-sm" type="number" bind:value={editing.httpsPort} placeholder="443" /></label>
+              <label class="flex items-center gap-2 cursor-pointer pt-9">
+                <input type="checkbox" class="toggle toggle-sm toggle-primary" bind:checked={editing.ssl} />
+                <span class="text-sm text-base-content/70">SSL</span>
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <!-- 环境配置 -->
+        <div>
+          <h3 class="text-xs font-semibold text-base-content/50 uppercase tracking-wide mb-2">环境配置</h3>
+          <div class="p-4 bg-base-200 rounded-xl border border-base-300">
+            <label class="form-control w-full mb-3">
+              <div class="label"><span class="label-text">关联环境模板</span></div>
+              {#if profilesLoading}
+                <input class="input input-bordered w-full input-sm" value="加载环境列表中..." readonly />
+              {:else}
+                <select class="select select-bordered w-full select-sm" bind:value={editing.environmentID}>
+                  <option value="">请选择环境模板</option>
+                  {#each profiles as profile}<option value={profile.id}>{profile.name}{profile.isBuiltin ? '  [预设]' : ''}</option>{/each}
+                </select>
+              {/if}
+              {#if selectedProfile}
+                <div class="label"><span class="label-text-alt text-base-content/60 leading-relaxed">{selectedProfile.description}</span></div>
+              {/if}
+            </label>
+
+            {#if selectedProfile}
+              <div class="flex flex-wrap gap-1.5 mb-3">
+                {#each selectedProfile.units as u}
+                  <span class="badge badge-sm badge-ghost">{u.kind} {u.version}</span>
                 {/each}
               </div>
+            {:else}
+              <p class="text-xs text-base-content/50">请先选择一个环境模板</p>
             {/if}
-          {:else}
-            <!-- 独立配置：可选择的版本下拉 -->
-            <div class="grid grid-cols-3 gap-3">
-              <label class="form-control"><div class="label"><span class="label-text">Nginx 版本</span></div>
-                <select class="select select-bordered w-full select-sm" bind:value={editing.nginxVersion}>
-                  <option value="">默认</option>
-                  {#each nginxVersions as nv}<option value={nv.version}>Nginx {nv.version}</option>{/each}
-                </select>
-              </label>
-              <label class="form-control"><div class="label"><span class="label-text">MySQL 版本</span></div>
-                <select class="select select-bordered w-full select-sm" bind:value={editing.mysqlVersion}>
-                  <option value="">不使用</option>
-                  {#each mysqlVersions as mv}<option value={mv.version}>MySQL {mv.version}</option>{/each}
-                </select>
-              </label>
-              <label class="form-control"><div class="label"><span class="label-text">PHP 版本</span></div>
-                <select class="select select-bordered w-full select-sm" bind:value={editing.phpVersion}>
-                  <option value="">不使用</option>
-                  {#each phpVersions as pv}<option value={pv.version}>PHP {pv.version} (端口 {pv.port})</option>{/each}
-                </select>
-              </label>
-            </div>
-          {/if}
+
+            {#if editing.id && editing.id !== '__new__'}
+              <div class="pt-3 border-t border-base-300">
+                <button class="btn btn-sm btn-primary" onclick={activateProjectEnvironment} disabled={busy || !selectedProfile}>
+                  {busy ? '处理中...' : '切换到此环境'}
+                </button>
+              </div>
+            {/if}
+          </div>
         </div>
       </div>
     {:else}

@@ -36,6 +36,44 @@
   --sidebar-user-plan: rgba(255,255,255,0.5);
 }
 
+[data-theme="dim"] .border-base-300,
+[data-theme="night"] .border-base-300,
+[data-theme="business"] .border-base-300,
+[data-theme="dark"] .border-base-300 {
+  border-color: rgba(255,255,255,0.08) !important;
+}
+[data-theme="dim"] .border-base-200,
+[data-theme="night"] .border-base-200,
+[data-theme="business"] .border-base-200,
+[data-theme="dark"] .border-base-200 {
+  border-color: rgba(255,255,255,0.05) !important;
+}
+
+[data-theme="dim"] .card,
+[data-theme="night"] .card,
+[data-theme="business"] .card,
+[data-theme="dark"] .card {
+  border-color: rgba(255,255,255,0.06);
+}
+
+[data-theme="dim"] .table tbody tr,
+[data-theme="night"] .table tbody tr,
+[data-theme="business"] .table tbody tr,
+[data-theme="dark"] .table tbody tr {
+  border-color: rgba(255,255,255,0.05);
+}
+
+[data-theme="dim"] .input,
+[data-theme="night"] .input,
+[data-theme="business"] .input,
+[data-theme="dark"] .input,
+[data-theme="dim"] .select,
+[data-theme="night"] .select,
+[data-theme="business"] .select,
+[data-theme="dark"] .select {
+  border-color: rgba(255,255,255,0.1);
+}
+
 @layer base {
   * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -44,7 +82,7 @@
     width: 100%;
     overflow: hidden;
     font-family: var(--font);
-    background: var(--color-base-100);
+    background: var(--color-base-200);
     color: var(--color-base-content);
     font-size: 14px;
     -webkit-font-smoothing: antialiased;
@@ -52,8 +90,8 @@
 
   ::-webkit-scrollbar { width: 6px; height: 6px; }
   ::-webkit-scrollbar-track { background: transparent; }
-  ::-webkit-scrollbar-thumb { background: oklch(0.5 0 0 / 0.3); border-radius: 3px; }
-  ::-webkit-scrollbar-thumb:hover { background: oklch(0.5 0 0 / 0.5); }
+  ::-webkit-scrollbar-thumb { background: oklch(0.5 0 0 / 0.2); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: oklch(0.5 0 0 / 0.35); }
 
   ::selection { background: var(--color-primary); color: var(--color-primary-content); }
 
@@ -66,6 +104,73 @@
     font-family: inherit;
     font-size: inherit;
   }
+}
+
+/* ── 柔和阴影 & 圆角 ── */
+.card {
+  border-radius: 12px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.04), 0 1px 2px rgba(0,0,0,0.02);
+}
+
+header, footer, .rounded-none {
+  border-radius: 0 !important;
+}
+
+/* 面板 / 侧边栏边框 */
+.border-base-300 {
+  border-color: rgba(0,0,0,0.06) !important;
+}
+.border-base-200 {
+  border-color: rgba(0,0,0,0.04) !important;
+}
+
+/* 表格行分隔线 */
+.table tbody tr {
+  border-color: rgba(0,0,0,0.04);
+}
+
+/* 输入框、选择框 — 柔和边框 */
+.input, .select, .textarea {
+  border-radius: 8px;
+  border-color: rgba(0,0,0,0.1);
+  box-shadow: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.input:focus, .select:focus, .textarea:focus {
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px oklch(from var(--color-primary) l c h / 0.1);
+}
+
+/* 按钮 — 稍微圆润 */
+.btn {
+  border-radius: 8px;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+}
+
+/* badge — 更柔和 */
+.badge {
+  border-radius: 6px;
+  font-weight: 500;
+}
+
+/* toggle 开关 */
+.toggle {
+  border-radius: 999px;
+}
+
+/* 状态栏 / 信息条 */
+.bg-base-200 {
+  border-radius: 10px;
+}
+
+/* 下拉菜单 */
+.select {
+  border-radius: 8px;
+}
+
+/* 卡片内容区 */
+.card {
+  border: 1px solid rgba(0,0,0,0.04);
 }
 
 @font-face {

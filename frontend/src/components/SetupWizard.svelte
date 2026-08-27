@@ -244,6 +244,7 @@ async function startInstall() {
 }
 
 onMount(() => {
+  api.debugLog('SetupWizard onMount 触发, step=' + step)
   const unsub = api.onSetupDownloadProgress((data: any) => {
     const idx = installProgress.findIndex((p) => p.name.includes(data.service) && p.name.includes(data.version))
     if (idx >= 0) {
@@ -263,7 +264,7 @@ function finish() {
 }
 </script>
 
-<div class="h-screen flex flex-col bg-white" data-theme="light">
+<div class="fixed inset-0 z-[9999] h-screen flex flex-col bg-white" data-theme="light">
   <div class="bg-gradient-to-r from-slate-900 via-indigo-950 to-indigo-600 px-12 py-8">
     <div class="flex items-center gap-3.5">
       <svg width="40" height="40" viewBox="0 0 32 32" fill="none"><rect width="32" height="32" rx="8" fill="rgba(255,255,255,0.2)"/><path d="M10 16h12M16 10v12" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/></svg>

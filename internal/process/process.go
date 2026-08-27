@@ -251,22 +251,13 @@ func IsProcessRunning(pid int) bool {
 	return code == 259 // STILL_ACTIVE
 }
 
+// FindPIDByPort 返回当前监听指定端口的进程 ID；无人监听时返回 0。
+//
+// 必须精确匹配端口号（复用 FindAllPIDsByPort 的解析），
+// 不能用 Contains(":80") 之类的子串匹配——那会把 :8001/:8080 误判为 :80。
 func FindPIDByPort(port int) int {
-	cmd := exec.Command("netstat", "-ano")
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	out, err := cmd.Output()
-	if err != nil {
-		return 0
-	}
-	portStr := fmt.Sprintf(":%d", port)
-	for _, line := range strings.Split(string(out), "\n") {
-		if strings.Contains(line, portStr) && strings.Contains(line, "LISTEN") {
-			fields := strings.Fields(line)
-			if len(fields) >= 5 {
-				pid, _ := strconv.Atoi(fields[len(fields)-1])
-				return pid
-			}
-		}
+	if pid, ok := FindAllPIDsByPort()[port]; ok {
+		return pid
 	}
 	return 0
 }

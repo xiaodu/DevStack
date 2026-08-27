@@ -4,7 +4,7 @@ import { run } from 'svelte/legacy'
 import { api } from '../lib/api'
 import { safeInvoke } from '../lib/safeInvoke'
 
-let { service } = $props()
+let { service, installDir = '' } = $props()
 const dispatch = createEventDispatcher()
 
 let mc = $state<Record<string, any>>({})
@@ -168,16 +168,16 @@ run(() => {
       {service.name}
       <span class="text-base font-normal text-base-content/50">{service.version}</span>
     </h2>
-    <button class="btn btn-sm {service.running ? 'btn-error' : 'btn-success'}" onclick={toggle}>
-      {service.running ? '停止' : '启动'}
-    </button>
   </div>
 
   <div class="flex items-center gap-2 px-3.5 py-2.5 bg-base-200 rounded-lg mb-6 text-sm">
     <span class="w-2 h-2 rounded-full {service.running ? 'bg-success' : 'bg-base-content/40'}"></span>
     <span class="text-base-content/70">{service.running ? '运行中' : '已停止'}</span>
     {#if service.running && service.uptime}<span class="text-base-content/60">运行 {service.uptime}</span>{/if}
-    {#if service.port}<span class="ml-auto text-xs px-2 py-0.5 rounded bg-primary/10 text-primary">端口 {service.port}</span>{/if}
+    {#if service.port}<span class="text-xs px-2 py-0.5 rounded bg-primary/10 text-primary">端口 {service.port}</span>{/if}
+    <button class="btn btn-xs ml-auto {service.running ? 'btn-error' : 'btn-success'}" onclick={toggle}>
+      {service.running ? '停止' : '启动'}
+    </button>
   </div>
 
   {#if service.kind === 'mysql'}
@@ -309,7 +309,7 @@ run(() => {
         <h3 class="text-sm font-semibold text-primary mb-3.5">文件信息</h3>
         <div class="grid grid-cols-2 gap-3 max-w-[700px]">
           <label class="form-control w-full"><div class="label"><span class="label-text">数据目录</span></div><input class="input input-bordered w-full input-sm" value="db/mysql/" readonly /></label>
-          <label class="form-control w-full"><div class="label"><span class="label-text">配置文件</span></div><input class="input input-bordered w-full input-sm" value="mysql/{service.version}/my.ini" readonly /></label>
+          <label class="form-control w-full"><div class="label"><span class="label-text">配置文件</span></div><input class="input input-bordered w-full input-sm" value="{installDir}/mysql/{service.version}/my.ini" readonly /></label>
         </div>
       </div>
     {/if}

@@ -91,6 +91,8 @@ onMount(() => {
   hideSplash()
   loadEnvBar()
 
+  api.debugLog('onMount 开始, isWailsEnv=' + (typeof window !== 'undefined' && (window as any).go !== undefined))
+
   // Subscribe to backend reactive events → auto-refresh stores
   const unsubEvents = subscribeReactiveEvents()
 
@@ -141,16 +143,20 @@ onMount(() => {
 
   new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('timeout')), 15000)
+    api.debugLog('getSettings 开始调用')
     api
       .getSettings()
       .then(resolve, reject)
       .finally(() => clearTimeout(timer))
   })
-    .then((settings) => {
+.then((settings) => {
       applyTheme(settings.theme)
+      api.debugLog('getSettings 成功, installDir=[' + settings.installDir + '] len=' + (settings.installDir?.length || 0) + ' showWizard=' + !settings.installDir)
+      console.log('[DevStack] getSettings installDir:', JSON.stringify(settings.installDir), 'len:', settings.installDir?.length)
       if (!settings.installDir) showWizard = true
     })
     .catch((e) => {
+      api.debugLog('getSettings 失败: ' + e.message)
       // 仅在不超时且确无 installDir 时才引导；超时/网络等任意失败不应弹设置向导（F11）
       console.warn('[DevStack] getSettings 失败，使用默认设置:', e)
     })
@@ -254,19 +260,21 @@ let pageTitle = $derived(
   <Sidebar {currentView} on:navigate={(e) => navigate(e.detail)} />
 
   <div class="flex-1 flex flex-col overflow-hidden">
-    <header class="flex justify-between items-center px-6 py-2.5 bg-base-100 border-b border-base-300 shrink-0">
+    <header class="flex justify-between items-center px-6 py-2.5 bg-base-100 border-b border-base-300 shrink-0 rounded-none">
       <div class="text-base font-semibold">{pageTitle}</div>
-      <div class="flex gap-2">
-        <button class="btn btn-circle btn-sm bg-success text-white border-none hover:brightness-110" title="激活当前项目所需环境" onclick={startAll} disabled={$operation.active}>
-          <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16"><path d="M8 5v14l11-7z"/></svg>
-        </button>
-        <button class="btn btn-circle btn-sm bg-warning text-white border-none hover:brightness-110" title={nginxRunning ? '重启 Nginx' : 'Nginx 未运行'} onclick={restartNginx} disabled={$operation.active || !nginxRunning}>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
-        </button>
-        <button class="btn btn-circle btn-sm bg-error text-white border-none hover:brightness-110" title="停止全部服务" onclick={stopAll} disabled={$operation.active}>
-          <svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>
-        </button>
-      </div>
+      {#if currentView === 'dashboard'}
+        <div class="flex gap-2">
+          <button class="btn btn-circle btn-sm bg-success text-white border-none hover:brightness-110" title="激活当前项目所需环境" onclick={startAll} disabled={$operation.active}>
+            <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16"><path d="M8 5v14l11-7z"/></svg>
+          </button>
+          <button class="btn btn-circle btn-sm bg-warning text-white border-none hover:brightness-110" title={nginxRunning ? '重启 Nginx' : 'Nginx 未运行'} onclick={restartNginx} disabled={$operation.active || !nginxRunning}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+          </button>
+          <button class="btn btn-circle btn-sm bg-error text-white border-none hover:brightness-110" title="停止全部服务" onclick={stopAll} disabled={$operation.active}>
+            <svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>
+          </button>
+        </div>
+      {/if}
     </header>
 
     <main class="flex-1 overflow-y-auto overflow-x-hidden px-8 py-6 bg-base-200">
@@ -280,7 +288,7 @@ let pageTitle = $derived(
       {#if currentView === 'settings'}<Settings />{/if}
     </main>
 
-    <footer class="flex items-center gap-4 px-6 py-1.5 bg-base-100 border-t border-base-300 text-xs text-base-content/60 shrink-0">
+    <footer class="flex items-center gap-4 px-6 py-1.5 bg-base-100 border-t border-base-300 text-xs text-base-content/60 shrink-0 rounded-none">
       <span class="flex items-center gap-1.5 min-w-0">
         <span>环境:</span>
         <strong class="text-base-content/80 shrink-0">{activeEnvName}</strong>
