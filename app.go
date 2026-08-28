@@ -1274,6 +1274,9 @@ func (a *App) DownloadService(serviceType, version, url string) error {
 
 	destDir := joinPath(installDir, "programs", serviceType, version)
 
+	// 阶段: downloading
+	a.emitDownloadPhase(serviceType, version, "downloading", 0, 0)
+
 	progressKey := fmt.Sprintf("download:%s:%s", serviceType, version)
 	progressFn := func(downloaded, total int64) {
 		if a.ctx != nil {
@@ -1293,17 +1296,41 @@ func (a *App) DownloadService(serviceType, version, url string) error {
 			name = runtimeNames[serviceType]
 		}
 		a.opStore.Add("下载", name, version, "失败: "+err.Error())
+		a.emitDownloadPhase(serviceType, version, "error", 0, 0)
 		return err
 	}
+
+	// 阶段: extracting（解压已完成）
+	a.emitDownloadPhase(serviceType, version, "extracting", 0, 0)
+
+	// 阶段: configuring
+	a.emitDownloadPhase(serviceType, version, "configuring", 0, 0)
 
 	if svcNames, ok := serviceNames[serviceType]; ok && svcNames != "" {
 		a.svcMgr.MarkInstalled(serviceType, version)
 		a.opStore.Add("下载", serviceNames[serviceType], version, "成功")
-		return a.svcMgr.Configure(serviceType + "@" + version)
+		err := a.svcMgr.Configure(serviceType + "@" + version)
+		a.emitDownloadPhase(serviceType, version, "done", 0, 0)
+		return err
 	}
 
 	a.opStore.Add("下载", runtimeNames[serviceType], version, "成功")
+	a.emitDownloadPhase(serviceType, version, "done", 0, 0)
 	return nil
+}
+
+// emitDownloadPhase 发送下载阶段进度事件（downloading/extracting/configuring/done/error）
+func (a *App) emitDownloadPhase(serviceType, version, phase string, downloaded, total int64) {
+	if a.ctx == nil {
+		return
+	}
+	wailsruntime.EventsEmit(a.ctx, "download:phase", map[string]interface{}{
+		"service":    serviceType,
+		"version":    version,
+		"phase":      phase,
+		"downloaded": downloaded,
+		"total":      total,
+	})
 }
 
 // CancelDownload 中止指定 key 的下载任务（key 形如 "download:nginx:1.24.0"）。
@@ -1566,7 +1593,9 @@ type CompleteSetupArgs struct {
 	Services   []string `json:"services"`
 }
 
-// CompleteSetup 完成向导：写配置、下载服务、创建默认环境
+// CompleteSetup 完成向导：写配置、下载服务、创建默认环境。
+// 同步完成端口检查、配置写入、管理器重初始化后立即返回，下载与环境创建在后台 goroutine 中执行，
+// 通过 setup:progress / setup:complete / setup:error 事件通知前端。
 func (a *App) CompleteSetup(args CompleteSetupArgs) error {
 	if a.opStore != nil {
 		a.opStore.LogInfo("[SETUP] 完成向导, installDir: %s, services: %v", args.InstallDir, args.Services)
@@ -1593,8 +1622,32 @@ func (a *App) CompleteSetup(args CompleteSetupArgs) error {
 		return fmt.Errorf("重新初始化管理器失败: %w", err)
 	}
 
-	// 4. 下载选中服务（串行，带进度）
-	for _, svc := range args.Services {
+	// 4. 后台执行下载 + 环境创建，不阻塞前端
+	go a.runSetup(args)
+
+	return nil
+}
+
+// emitSetupProgress 发送安装阶段进度事件
+func (a *App) emitSetupProgress(svc, version, phase string, downloaded, total int64) {
+	if a.ctx == nil {
+		return
+	}
+	wailsruntime.EventsEmit(a.ctx, "setup:progress", map[string]interface{}{
+		"service":    svc,
+		"version":    version,
+		"phase":      phase,
+		"downloaded": downloaded,
+		"total":      total,
+	})
+}
+
+// runSetup 在后台 goroutine 中执行下载、配置、创建默认环境的完整流程
+func (a *App) runSetup(args CompleteSetupArgs) {
+	totalServices := len(args.Services)
+	failedServices := []string{}
+
+	for i, svc := range args.Services {
 		versions, err := a.dlMgr.GetAvailableVersions(svc)
 		if err != nil || len(versions) == 0 {
 			if a.opStore != nil {
@@ -1604,8 +1657,12 @@ func (a *App) CompleteSetup(args CompleteSetupArgs) error {
 		}
 		latest := versions[len(versions)-1].Version
 		if a.opStore != nil {
-			a.opStore.LogInfo("[SETUP] 开始下载 %s %s", svc, latest)
+			a.opStore.LogInfo("[SETUP] 开始下载 %s %s (%d/%d)", svc, latest, i+1, totalServices)
 		}
+
+		// 阶段: downloading
+		a.emitSetupProgress(svc, latest, "downloading", 0, 0)
+
 		progressKey := fmt.Sprintf("setup-download:%s:%s", svc, latest)
 		progressFn := func(downloaded, total int64) {
 			if a.ctx != nil {
@@ -1623,8 +1680,16 @@ func (a *App) CompleteSetup(args CompleteSetupArgs) error {
 			if a.opStore != nil {
 				a.opStore.LogError("[SETUP] 下载 %s %s 失败: %v", svc, latest, err)
 			}
-			return fmt.Errorf("下载 %s %s 失败: %w", svc, latest, err)
+			a.emitSetupProgress(svc, latest, "error", 0, 0)
+			failedServices = append(failedServices, svc)
+			continue
 		}
+
+		// 阶段: extracting（解压已完成）
+		a.emitSetupProgress(svc, latest, "extracting", 0, 0)
+
+		// 阶段: configuring
+		a.emitSetupProgress(svc, latest, "configuring", 0, 0)
 		if svcNames, ok := serviceNames[svc]; ok && svcNames != "" {
 			a.svcMgr.MarkInstalled(svc, latest)
 			if a.opStore != nil {
@@ -1632,9 +1697,12 @@ func (a *App) CompleteSetup(args CompleteSetupArgs) error {
 			}
 			_ = a.svcMgr.Configure(svc + "@" + latest)
 		}
+
+		// 阶段: done
+		a.emitSetupProgress(svc, latest, "done", 0, 0)
 	}
 
-	// 5. 创建并激活默认环境
+	// 创建并激活默认环境
 	units := make([]environment.UnitSpec, 0)
 	for _, svc := range args.Services {
 		vers := a.svcMgr.GetInstalledVersions(svc)
@@ -1654,11 +1722,26 @@ func (a *App) CompleteSetup(args CompleteSetupArgs) error {
 		}
 		created, err := a.envMgr.Create(env)
 		if err != nil {
-			return fmt.Errorf("创建默认环境失败: %w", err)
+			if a.opStore != nil {
+				a.opStore.LogError("[SETUP] 创建默认环境失败: %v", err)
+			}
+			if a.ctx != nil {
+				wailsruntime.EventsEmit(a.ctx, "setup:error", map[string]interface{}{
+					"message": fmt.Sprintf("创建默认环境失败: %v", err),
+				})
+			}
+			return
 		}
-		// 仅标记激活，不启动服务
 		if err := a.reconciler.ActivateOnly(created.ID); err != nil {
-			return fmt.Errorf("激活默认环境失败: %w", err)
+			if a.opStore != nil {
+				a.opStore.LogError("[SETUP] 激活默认环境失败: %v", err)
+			}
+			if a.ctx != nil {
+				wailsruntime.EventsEmit(a.ctx, "setup:error", map[string]interface{}{
+					"message": fmt.Sprintf("激活默认环境失败: %v", err),
+				})
+			}
+			return
 		}
 		if a.opStore != nil {
 			a.opStore.LogInfo("[SETUP] 默认环境已创建并激活: %s", created.ID)
@@ -1668,7 +1751,21 @@ func (a *App) CompleteSetup(args CompleteSetupArgs) error {
 	if a.opStore != nil {
 		a.opStore.LogInfo("[SETUP] 向导完成")
 	}
-	return nil
+
+	if a.ctx != nil {
+		if len(failedServices) > 0 {
+			wailsruntime.EventsEmit(a.ctx, "setup:complete", map[string]interface{}{
+				"ok":              true,
+				"failedServices":  failedServices,
+				"message":         "安装完成，部分组件下载失败",
+			})
+		} else {
+			wailsruntime.EventsEmit(a.ctx, "setup:complete", map[string]interface{}{
+				"ok":      true,
+				"message": "安装完成",
+			})
+		}
+	}
 }
 
 // reinitManagers 向导完成后重新初始化依赖安装目录的管理器

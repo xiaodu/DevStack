@@ -11,6 +11,7 @@ import {
   CreateEnvironment,
   CreateProject,
   DeactivateEnvironment,
+  DebugLog,
   DeleteEnvironment,
   DeleteProject,
   DeleteSnapshot,
@@ -59,7 +60,6 @@ import {
   UninstallVersion,
   UpdateEnvironment,
   UpdateProject,
-  DebugLog,
 } from '../../wailsjs/go/main/App.js'
 
 // 检测是否运行在 Wails 环境中（浏览器预览模式时 window.go 不存在）
@@ -381,7 +381,8 @@ export const api = {
   openDirectory: (path: string) => callOrMock(() => OpenDirectory(path), { success: true } as any),
   selectInstallDir: (defaultPath?: string) => callOrMock(() => SelectInstallDir(defaultPath || ''), '' as any),
   checkSetupPorts: (services: string[]) => callOrMock(() => CheckSetupPorts(services), [] as any),
-  completeSetup: (args: { installDir: string; services: string[] }) => callOrMock(() => CompleteSetup(args), { success: true } as any),
+  completeSetup: (args: { installDir: string; services: string[] }) =>
+    callOrMock(() => CompleteSetup(args), { success: true } as any),
 
   // ====== 日志 ======
   getRecentOps: (limit: number) => callOrMock(() => GetRecentOps(limit), mockOps as any),
@@ -397,6 +398,38 @@ export const api = {
   onSetupDownloadProgress: (callback: (data: any) => void) => {
     if (isWailsEnv) {
       const unsub = (window as any).go.runtime.EventsOn('setup:download-progress', callback)
+      return () => unsub()
+    }
+    return () => {}
+  },
+
+  onSetupProgress: (callback: (data: any) => void) => {
+    if (isWailsEnv) {
+      const unsub = (window as any).go.runtime.EventsOn('setup:progress', callback)
+      return () => unsub()
+    }
+    return () => {}
+  },
+
+  onSetupComplete: (callback: (data: any) => void) => {
+    if (isWailsEnv) {
+      const unsub = (window as any).go.runtime.EventsOn('setup:complete', callback)
+      return () => unsub()
+    }
+    return () => {}
+  },
+
+  onSetupError: (callback: (data: any) => void) => {
+    if (isWailsEnv) {
+      const unsub = (window as any).go.runtime.EventsOn('setup:error', callback)
+      return () => unsub()
+    }
+    return () => {}
+  },
+
+  onDownloadPhase: (callback: (data: any) => void) => {
+    if (isWailsEnv) {
+      const unsub = (window as any).go.runtime.EventsOn('download:phase', callback)
       return () => unsub()
     }
     return () => {}

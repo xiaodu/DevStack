@@ -1,7 +1,6 @@
 <script lang="ts">
 import { createEventDispatcher, onMount } from 'svelte'
 import { api } from '../lib/api'
-import { safeInvoke } from '../lib/safeInvoke'
 import { addToast } from '../lib/stores'
 
 const dispatch = createEventDispatcher()
@@ -66,9 +65,7 @@ const presets = [
     icon: '🌐',
     description: '无后端依赖，仅用 Nginx 托管纯静态 HTML、打包后的前端产物',
     tags: ['静态', '纯前端', '轻量'],
-    units: [
-      { kind: 'nginx', version: '1.24.0', name: 'Nginx' },
-    ],
+    units: [{ kind: 'nginx', version: '1.24.0', name: 'Nginx' }],
   },
 ]
 
@@ -196,67 +193,112 @@ async function checkPorts() {
   }
 }
 
-let installProgress = $state<{ name: string; status: 'pending' | 'installing' | 'done' | 'error'; progress?: number }[]>([])
+type ProgressItem = { name: string; phase: string; status: 'pending' | 'active' | 'done' | 'error'; progress?: number }
+let installProgress = $state<ProgressItem[]>([])
 let installing = $state(false)
 let currentInstall = $state('')
 
 async function startInstall() {
   if (!installDir) {
-    addToast('请先选择安装目录', 'error')
+    addToast('请先选择安装目录', 'error', 3500)
     return
   }
   const toInstall = packages.filter((p) => p.checked)
   if (toInstall.length === 0) {
-    addToast('请至少选择一个组件', 'error')
+    addToast('请至少选择一个组件', 'error', 3500)
     return
   }
   await checkPorts()
   const hasBlockingConflict = Object.values(portConflicts).some((c) => c.inUse)
   if (hasBlockingConflict) {
-    addToast('存在端口冲突，请解决后再继续', 'error')
+    addToast('存在端口冲突，请解决后再继续', 'error', 3500)
     return
   }
 
   step = 2
   installing = true
-  installProgress = toInstall.map((p) => ({ name: `${p.name} ${p.selected}`, status: 'pending' as const }))
+  installProgress = toInstall.map((p) => ({
+    name: `${p.name} ${p.selected}`,
+    phase: '',
+    status: 'pending' as const,
+  }))
 
   try {
-    await safeInvoke(
-      async () => {
-        const services = toInstall.map((p) => p.id)
-        await api.completeSetup({ installDir, services })
-      },
-      {
-        successMsg: '初始化完成',
-        errorPrefix: '初始化失败',
-        showSuccessToast: false,
-      },
-    )
-    installProgress = installProgress.map((p) => ({ ...p, status: 'done' as const }))
-    step = 3
+    const services = toInstall.map((p) => p.id)
+    await api.completeSetup({ installDir, services })
   } catch (e) {
     console.error('安装失败:', e)
-    installProgress = installProgress.map((p) => (p.status === 'installing' ? { ...p, status: 'error' as const } : p))
-  } finally {
+    addToast(`初始化失败: ${e}`, 'error', 5000)
     installing = false
   }
 }
 
+function handleSetupProgress(data: any) {
+  const idx = installProgress.findIndex((p) => p.name.includes(data.service) && p.name.includes(data.version))
+  if (idx >= 0) {
+    const phaseLabels: Record<string, string> = {
+      downloading: '下载中',
+      extracting: '解压中',
+      configuring: '配置中',
+      done: '已完成',
+      error: '失败',
+    }
+    const item = installProgress[idx]
+    item.phase = data.phase
+    item.status = data.phase === 'done' ? 'done' : data.phase === 'error' ? 'error' : 'active'
+    if (data.phase === 'downloading' && data.total > 0) {
+      item.progress = Math.round((data.downloaded / data.total) * 100)
+    } else if (data.phase === 'done') {
+      item.progress = 100
+    } else if (data.phase === 'extracting' || data.phase === 'configuring') {
+      item.progress = undefined
+    }
+    currentInstall = `${phaseLabels[data.phase] || data.phase} ${data.service} ${data.version}`
+    installProgress = [...installProgress]
+  }
+}
+
+function handleSetupComplete(data: any) {
+  installProgress = installProgress.map((p) => {
+    if (p.status !== 'done' && p.status !== 'error') {
+      return { ...p, status: 'done' as const, phase: 'done' }
+    }
+    return p
+  })
+  step = 3
+  installing = false
+  if (data.failedServices?.length) {
+    addToast(`安装完成，${data.failedServices.join('、')} 下载失败`, 'warning', 5000)
+  }
+}
+
+function handleSetupError(data: any) {
+  installProgress = installProgress.map((p) =>
+    p.status === 'active' || p.status === 'pending' ? { ...p, status: 'error' as const, phase: 'error' } : p,
+  )
+  installing = false
+  addToast(data.message || '安装失败', 'error', 5000)
+}
+
 onMount(() => {
   api.debugLog('SetupWizard onMount 触发, step=' + step)
-  const unsub = api.onSetupDownloadProgress((data: any) => {
-    const idx = installProgress.findIndex((p) => p.name.includes(data.service) && p.name.includes(data.version))
-    if (idx >= 0) {
-      installProgress[idx] = {
-        ...installProgress[idx],
-        status: 'installing',
-        progress: data.total > 0 ? Math.round((data.downloaded / data.total) * 100) : 0,
+  const unsubs = [
+    api.onSetupProgress(handleSetupProgress),
+    api.onSetupComplete(handleSetupComplete),
+    api.onSetupError(handleSetupError),
+    api.onSetupDownloadProgress((data: any) => {
+      const idx = installProgress.findIndex((p) => p.name.includes(data.service) && p.name.includes(data.version))
+      if (idx >= 0 && data.total > 0) {
+        installProgress[idx] = {
+          ...installProgress[idx],
+          status: 'active',
+          progress: Math.round((data.downloaded / data.total) * 100),
+        }
+        installProgress = [...installProgress]
       }
-      installProgress = [...installProgress]
-    }
-  })
-  return () => unsub()
+    }),
+  ]
+  return () => unsubs.forEach((fn) => fn())
 })
 
 function finish() {
@@ -451,17 +493,26 @@ function finish() {
           <div class="flex items-center gap-2.5 py-2 border-b border-base-200 last:border-none">
             <span class="w-5 text-center text-sm">
               {#if item.status === 'done'}✅
-              {:else if item.status === 'installing'}⏳
+              {:else if item.status === 'active'}⏳
               {:else if item.status === 'error'}❌
               {:else}○
               {/if}
             </span>
             <span class="flex-1 text-sm text-base-content">{item.name}</span>
-            {#if item.progress !== undefined && item.status === 'installing'}
+            {#if item.status === 'active'}
+              <span class="loading loading-spinner loading-xs text-primary"></span>
+            {/if}
+            {#if item.progress !== undefined && item.status === 'active'}
               <div class="w-32 h-1.5 bg-base-200 rounded-full overflow-hidden">
                 <div class="h-full bg-primary transition-all" style="width: {item.progress}%"></div>
               </div>
               <span class="text-xs text-base-content/60 w-10 text-right">{item.progress}%</span>
+            {:else if item.status === 'active'}
+              <span class="text-xs text-primary w-10 text-right">{item.phase === 'downloading' ? '下载中' : item.phase === 'extracting' ? '解压中' : item.phase === 'configuring' ? '配置中' : ''}</span>
+            {:else if item.status === 'done'}
+              <span class="text-xs text-success w-10 text-right">完成</span>
+            {:else if item.status === 'error'}
+              <span class="text-xs text-error w-10 text-right">失败</span>
             {/if}
           </div>
         {/each}

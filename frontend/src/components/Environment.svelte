@@ -2,7 +2,7 @@
 import { onMount } from 'svelte'
 import { stopPropagation } from 'svelte/legacy'
 import { api } from '../lib/api'
-import { useDownloadProgress } from '../lib/events'
+import { useDownloadPhase, useDownloadProgress } from '../lib/events'
 import { safeInvoke } from '../lib/safeInvoke'
 import { addToast, operation, refreshSignal, runOperation } from '../lib/stores'
 
@@ -29,7 +29,7 @@ let installStatusReady = $state(false)
 // 安装进度相关
 let installModal = $state(false)
 let installingEnv = $state<any>(null)
-let installTasks = $state<any[]>([]) // [{ id, version, name, status: 'pending'|'downloading'|'extracting'|'done'|'error', progress: 0 }]
+let installTasks = $state<any[]>([]) // [{ id, version, name, status: 'pending'|'downloading'|'extracting'|'done'|'error', progress: 0, phase: '', phaseLabel: '' }]
 let installProgress: Record<string, any> = {} // { 'nginx@1.24.0': { downloaded: 0, total: 0 } }
 let installCancelled = false // 用户点击取消时设为 true
 
@@ -44,6 +44,32 @@ useDownloadProgress((data) => {
     }
     return t
   })
+})
+
+// 监听下载阶段事件（downloading/extracting/configuring/done/error）
+useDownloadPhase((data) => {
+  if (!data || !data.service || !data.version) return
+  const shortKey = `${data.service}@${data.version}`
+  const phaseLabels: Record<string, string> = {
+    downloading: '下载中',
+    extracting: '解压中',
+    configuring: '配置中',
+    done: '已完成',
+    error: '失败',
+  }
+  installTasks = installTasks.map((t) => {
+    if (`${t.id}@${t.version}` === shortKey) {
+      if (data.phase === 'done') {
+        return { ...t, status: 'done', progress: 100 }
+      }
+      if (data.phase === 'error') {
+        return { ...t, status: 'error', progress: 0 }
+      }
+      return { ...t, status: 'downloading', phase: data.phase, phaseLabel: phaseLabels[data.phase] || data.phase }
+    }
+    return t
+  })
+  installTasks = [...installTasks]
 })
 
 let sortedSnapshots = $derived(Array.isArray(snapshots) ? [...snapshots].reverse() : [])
@@ -834,7 +860,7 @@ onMount(() => {
             </div>
             <div class="text-right shrink-0 min-w-[60px]">
               {#if task.status === 'downloading'}
-                <span class="text-xs font-mono text-primary">{task.progress}%</span>
+                <span class="text-xs font-mono text-primary">{task.phaseLabel || '下载中'} {task.progress}%</span>
               {:else if task.status === 'done'}
                 <span class="text-xs text-success">已完成</span>
               {:else if task.status === 'error'}

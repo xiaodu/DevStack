@@ -109,6 +109,17 @@ export function useDownloadProgress(handler: (data: any) => void) {
 }
 
 /*
+ * ── Listen to download phase changes ──
+ *
+ *   useDownloadPhase(({ service, version, phase, downloaded, total }) => ...)
+ *   phase: 'downloading' | 'extracting' | 'configuring' | 'done' | 'error'
+ */
+export function useDownloadPhase(handler: (data: any) => void) {
+  const unsub = EventsOn('download:phase', handler)
+  onDestroy(unsub)
+}
+
+/*
  * ── 环境编排进度事件（operation:begin / operation:step / operation:end） ──
  *
  * handler 收到 (eventName, data)：
