@@ -146,6 +146,11 @@ function cancelInstall(pkg: any) {
   // 避免取消期间再次点击触发第二次并发下载（F12）
   cancelling[key] = true
   cancelledInstalls.add(key)
+  // 通知后端真正中止下载任务，否则下载会继续占带宽并落盘
+  api.cancelDownload(`download:${pkg.id}:${pkg.version}`).catch((e) => {
+    console.error('取消下载失败:', e)
+    addToast(`取消下载失败: ${(e as any)?.message || e}`, 'error', 3500)
+  })
   delete installProgress[key]
   delete installElapsed[key]
   installProgress = { ...installProgress }

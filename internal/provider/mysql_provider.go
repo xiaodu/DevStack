@@ -126,6 +126,11 @@ func (p *MySQLProvider) applyConfig(instance *MySQLInstance) error {
 
 	confPath := filepath.Join(confDir, "my.ini")
 
+	// 仅在配置不存在时生成引导默认值；已存在说明用户或配置页已定制，不得覆盖
+	if fileExists(confPath) {
+		return nil
+	}
+
 	content := fmt.Sprintf(`[mysqld]
 port=%d
 datadir=%s
@@ -272,9 +277,22 @@ func (i *MySQLInstance) configPath() string {
 // startServer 启动正常 mysqld 实例并等待端口就绪，同步更新 i.pid。
 func (i *MySQLInstance) startServer() error {
 	// 端口被同 kind 其它版本的残留实例占用（如切换 MySQL 版本后旧实例仍在跑）：
-	// 自动停掉它；被外部程序占用则明确报错。必须在启动前处理，
+	// 先尝试 mysqladmin 优雅关闭（强杀 mysqld 有 InnoDB 数据损坏风险），失败再强制清除；
+	// 被外部程序占用则明确报错。必须在启动前处理，
 	// 否则 mysqld 绑定失败退出，而旧代码会误把残留进程认领为本实例。
-	if err := ensurePortFree(i.port, kindDirOf(i.mysqlDir), 10*time.Second); err != nil {
+	graceful := func(port int) error {
+		mysqladminExe := filepath.Join(i.mysqlDir, "bin", "mysqladmin.exe")
+		if !fileExists(mysqladminExe) {
+			return fmt.Errorf("mysqladmin 不存在: %s", mysqladminExe)
+		}
+		return runStopCommand(mysqladminExe, []string{
+			"--host=127.0.0.1",
+			fmt.Sprintf("--port=%d", port),
+			"-u", "root",
+			"shutdown",
+		}, i.mysqlDir)
+	}
+	if err := ensurePortFree(i.port, kindDirOf(i.mysqlDir), 10*time.Second, graceful); err != nil {
 		return err
 	}
 

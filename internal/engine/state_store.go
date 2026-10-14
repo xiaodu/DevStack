@@ -52,7 +52,21 @@ func (ss *StateStore) Save(env EnvironmentState) error {
 func (ss *StateStore) SaveActive(activeID string) error {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
-	return ss.saveJSON(map[string]string{"activeEnvironmentId": activeID})
+	// 读-改-写：只更新 activeEnvironmentId 一个字段。
+	// 不能像旧实现那样用单字段 map 整体覆盖文件，否则会把 Save()/回滚快照
+	// 写入的 services/projects/runtimes 全部抹掉。
+	var env EnvironmentState
+	if _, err := os.Stat(ss.filePath); err == nil {
+		if data, err := os.ReadFile(ss.filePath); err == nil {
+			if err := json.Unmarshal(data, &env); err != nil {
+				return fmt.Errorf("解析环境状态文件失败: %w", err)
+			}
+		} else {
+			return fmt.Errorf("读取环境状态文件失败: %w", err)
+		}
+	}
+	env.ActiveEnvironmentID = activeID
+	return ss.saveJSON(env)
 }
 
 func (ss *StateStore) saveJSON(v interface{}) error {

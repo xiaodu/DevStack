@@ -7,12 +7,12 @@ func Builtin() *Manifest {
 				ID: "nginx", Name: "Nginx", Type: PkgNginx, Category: CatWebServer,
 				DefaultVersion: "1.26.2", DefaultPort: 80,
 				Versions: []VersionInfo{
-					{Version: "1.20.2", URL: "https://nginx.org/download/nginx-1.20.2.zip", Mirror: "https://mirrors.tuna.tsinghua.edu.cn/nginx/nginx-1.20.2.zip", FileName: "nginx-1.20.2.zip"},
-					{Version: "1.22.1", URL: "https://nginx.org/download/nginx-1.22.1.zip", Mirror: "https://mirrors.tuna.tsinghua.edu.cn/nginx/nginx-1.22.1.zip", FileName: "nginx-1.22.1.zip"},
-					{Version: "1.24.0", URL: "https://nginx.org/download/nginx-1.24.0.zip", Mirror: "https://mirrors.tuna.tsinghua.edu.cn/nginx/nginx-1.24.0.zip", FileName: "nginx-1.24.0.zip"},
-					{Version: "1.26.0", URL: "https://nginx.org/download/nginx-1.26.0.zip", Mirror: "https://mirrors.tuna.tsinghua.edu.cn/nginx/nginx-1.26.0.zip", FileName: "nginx-1.26.0.zip"},
-					{Version: "1.26.1", URL: "https://nginx.org/download/nginx-1.26.1.zip", Mirror: "https://mirrors.tuna.tsinghua.edu.cn/nginx/nginx-1.26.1.zip", FileName: "nginx-1.26.1.zip"},
-					{Version: "1.26.2", URL: "https://nginx.org/download/nginx-1.26.2.zip", Mirror: "https://mirrors.tuna.tsinghua.edu.cn/nginx/nginx-1.26.2.zip", FileName: "nginx-1.26.2.zip"},
+					{Version: "1.20.2", URL: "https://nginx.org/download/nginx-1.20.2.zip", Mirror: "https://mirrors.tuna.tsinghua.edu.cn/nginx/nginx-1.20.2.zip", FileName: "nginx-1.20.2.zip", Checksum: "ef7f78ce631ec9b7af8c44e8185215ff6f1e97fc9431330db38f0950eb00ce5b"},
+					{Version: "1.22.1", URL: "https://nginx.org/download/nginx-1.22.1.zip", Mirror: "https://mirrors.tuna.tsinghua.edu.cn/nginx/nginx-1.22.1.zip", FileName: "nginx-1.22.1.zip", Checksum: "299659e687503228b061b0231715d5b13b63ed88599b46af52290d2e414370ae"},
+					{Version: "1.24.0", URL: "https://nginx.org/download/nginx-1.24.0.zip", Mirror: "https://mirrors.tuna.tsinghua.edu.cn/nginx/nginx-1.24.0.zip", FileName: "nginx-1.24.0.zip", Checksum: "69a36bfd2a61d7a736fafd392708bd0fb6cf15d741f8028fe6d8bb5ebd670eb9"},
+					{Version: "1.26.0", URL: "https://nginx.org/download/nginx-1.26.0.zip", Mirror: "https://mirrors.tuna.tsinghua.edu.cn/nginx/nginx-1.26.0.zip", FileName: "nginx-1.26.0.zip", Checksum: "fcd88b3563d0dc137c958ebdbdd05f993ca2359d192ff00d30f2d95dd7999a22"},
+					{Version: "1.26.1", URL: "https://nginx.org/download/nginx-1.26.1.zip", Mirror: "https://mirrors.tuna.tsinghua.edu.cn/nginx/nginx-1.26.1.zip", FileName: "nginx-1.26.1.zip", Checksum: "ef5c17da86578ad5f26cb93271603a1ea8a88d6e9120092a52cb286449f49493"},
+					{Version: "1.26.2", URL: "https://nginx.org/download/nginx-1.26.2.zip", Mirror: "https://mirrors.tuna.tsinghua.edu.cn/nginx/nginx-1.26.2.zip", FileName: "nginx-1.26.2.zip", Checksum: "942638cc31c836fe429fde22e4c46e497f89d3c2bbce46cd2c8800854fd71409"},
 				},
 			},
 			{

@@ -127,10 +127,17 @@ func (m *Manager) writeResponse(resp *http.Response, destPath string, callback P
 	}
 
 	if callback != nil {
-		callback(total, total)
+		callback(downloaded, total)
 	}
 
 	out.Close()
+
+	// 校验实际大小与 Content-Length 一致，捕获传输被静默截断的下载
+	if total > 0 && downloaded != total {
+		os.Remove(destPath + ".tmp")
+		return fmt.Errorf("下载不完整: 实际 %d 字节, 期望 %d 字节", downloaded, total)
+	}
+
 	return os.Rename(destPath+".tmp", destPath)
 }
 
@@ -250,6 +257,33 @@ func detectSingleRootDir(entries []*zip.File) string {
 	return ""
 }
 
+// verifyZipIntegrity 做 zip 完整性测试：逐条目全量读取，archive/zip 读取时会校验 CRC32。
+// 用于没有登记 SHA256 的包，捕获损坏/被篡改的下载。非 zip 文件跳过（如 composer.phar）。
+func verifyZipIntegrity(filePath string) error {
+	if !strings.EqualFold(filepath.Ext(filePath), ".zip") {
+		return nil
+	}
+	reader, err := zip.OpenReader(filePath)
+	if err != nil {
+		return fmt.Errorf("压缩包损坏或格式错误: %w", err)
+	}
+	defer reader.Close()
+
+	buf := make([]byte, 64*1024)
+	for _, f := range reader.File {
+		rc, err := f.Open()
+		if err != nil {
+			return fmt.Errorf("校验压缩条目失败 %s: %w", f.Name, err)
+		}
+		_, err = io.CopyBuffer(io.Discard, rc, buf)
+		rc.Close()
+		if err != nil {
+			return fmt.Errorf("压缩包条目校验失败 %s: %w", f.Name, err)
+		}
+	}
+	return nil
+}
+
 // verifySHA256 计算文件的 SHA256 并与期望值比较。不匹配则返回错误。
 func verifySHA256(filePath, expected string) error {
 	f, err := os.Open(filePath)
@@ -307,10 +341,11 @@ func (m *Manager) TryDownloadAndExtract(key string, urls []string, destDir strin
 			return m.tryDownload(dlCtx, urls, zipPath, callback)
 		}, compensator.DeleteFile(zipPath)).
 		Step("verify-checksum", func(_ context.Context) error {
-			if len(expectedChecksum) == 0 || expectedChecksum[0] == "" {
-				return nil
+			if len(expectedChecksum) > 0 && expectedChecksum[0] != "" {
+				return verifySHA256(zipPath, expectedChecksum[0])
 			}
-			return verifySHA256(zipPath, expectedChecksum[0])
+			// 无校验和时至少做 zip 完整性测试（逐条目读取校验 CRC32），捕获损坏/篡改的包
+			return verifyZipIntegrity(zipPath)
 		}, compensator.DeleteFile(zipPath)).
 		Step("extract-package", func(ctx context.Context) error {
 			return m.ExtractZip(zipPath, destDir)

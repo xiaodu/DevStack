@@ -26,8 +26,12 @@ func (h *MySQLHandler) Configure(s *ServiceInstance, cfg *config.Config, resMgr 
 		port = cfg.Get().MySQLConfig.Port
 	}
 
-	myIni := filepath.Join(mysqlDir, "my.ini")
+	// 与 provider 保持同一配置文件（conf/my.ini 是 mysqld 实际读取的路径），
+	// 否则这里生成的配置永远不生效
+	confDir := filepath.Join(mysqlDir, "conf")
+	myIni := filepath.Join(confDir, "my.ini")
 	if !fileExists(myIni) {
+		os.MkdirAll(confDir, 0755)
 		ini := buildMySQLIni(cfg.Get().MySQLConfig, mysqlDir, dataDir, port)
 		if err := os.WriteFile(myIni, []byte(ini), 0644); err != nil {
 			return err
@@ -106,6 +110,11 @@ func (h *MySQLHandler) SaveConfig(s *ServiceInstance, cfg *config.Config, values
 		fmt.Sscanf(v, "%d", &n)
 		mc.Port = n
 		changed = true
+		// 同步服务实例端口：启动时 CLI --port= 传的是 s.Info.Port，
+		// 不同步的话用户改的端口永远不会生效
+		if s != nil && n > 0 {
+			s.Info.Port = n
+		}
 	}
 	if v, ok := values["characterSet"]; ok {
 		mc.CharacterSet = v
@@ -167,7 +176,11 @@ func (h *MySQLHandler) SaveConfig(s *ServiceInstance, cfg *config.Config, values
 		}
 	}
 
-	myIni := filepath.Join(mysqlDir, "my.ini")
+	// 写入 mysqld 实际读取的配置文件（与 provider 的 configPath 一致），
+	// 写到别处等于没写
+	confDir := filepath.Join(mysqlDir, "conf")
+	os.MkdirAll(confDir, 0755)
+	myIni := filepath.Join(confDir, "my.ini")
 	ini := buildMySQLIni(mc, mysqlDir, dataDir, mc.Port)
 	if err := os.WriteFile(myIni, []byte(ini), 0644); err != nil {
 		return err

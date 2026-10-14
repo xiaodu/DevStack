@@ -80,21 +80,27 @@ func (e *Engine) dispatch(event *Event) {
 		return
 	}
 
+	// 记账语义：一个事件对订阅者"完全丢失"只记一次丢弃（got + dropped 与发布总数守恒）
+	delivered := false
 	for _, handler := range handlers {
 		select {
 		case e.dispatchSem <- struct{}{}:
+			delivered = true
 			go func(h EventHandler) {
 				defer func() { <-e.dispatchSem }()
 				defer func() {
 					if r := recover(); r != nil {
-						// 记录 panic 但不崩溃
+						// handler panic 不允许击垮事件循环
 					}
 				}()
 				h(event)
 			}(handler)
 		default:
-			// 超过并发限制，丢弃本次分发
+			// 超过并发限制，本 handler 分发被丢弃
 		}
+	}
+	if !delivered {
+		e.recordDropped(event)
 	}
 }
 
@@ -105,13 +111,32 @@ func (e *Engine) executeRules(event *Event) {
 			defer func() { <-e.ruleSem }()
 			defer func() {
 				if r := recover(); r != nil {
-					// 记录 panic 但不崩溃
+					// 规则 panic 不允许击垮事件循环
 				}
 			}()
 			_ = e.ruleSet.ExecuteMatching(e.ctx, event)
 		}()
 	default:
-		// 规则执行器满，跳过本次
+		// 规则执行器满，跳过本次规则匹配。不记入事件丢弃账：
+		// 事件本身已投递给订阅者，这里只是规则链路降级（避免与事件账重复计数）
+	}
+}
+
+// recordDropped 记录一次事件丢弃：计数 + 触发 onDropped 回调。
+func (e *Engine) recordDropped(event *Event) {
+	e.dropped.Add(1)
+	e.mu.RLock()
+	cb := e.onDropped
+	e.mu.RUnlock()
+	if cb != nil {
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					// 回调 panic 不允许击垮事件循环
+				}
+			}()
+			cb(event)
+		}()
 	}
 }
 
@@ -123,20 +148,7 @@ func (e *Engine) Publish(event *Event) {
 	select {
 	case e.eventBuffer <- event:
 	default:
-		e.dropped.Add(1)
-		e.mu.RLock()
-		cb := e.onDropped
-		e.mu.RUnlock()
-		if cb != nil {
-			go func() {
-				defer func() {
-					if r := recover(); r != nil {
-						// 记录 panic 但不崩溃
-					}
-				}()
-				cb(event)
-			}()
-		}
+		e.recordDropped(event)
 	}
 }
 

@@ -35,12 +35,15 @@ func dlogf(format string, args ...interface{}) {
 //
 //   - 端口未被占用 → 直接返回；
 //   - 占用者位于 kindDir（如 <install>\programs\nginx）内 → 属于本工具管理的其它版本残留
-//     实例（典型场景：环境切换版本后旧版本孤儿仍占着端口），按版本目录整组清除
+//     实例（典型场景：环境切换版本后旧版本孤儿仍占着端口）：
+//     若提供了 graceful 回调（如 mysqld 的 mysqladmin shutdown），先尝试优雅关闭，
+//     优雅关闭超时后再按版本目录整组清除
 //     （nginx 的 master 会重生 worker，单杀占端口的 worker 无效），与 Laragon 切换版本时
 //     "自动接管旧实例"的行为一致；
 //   - 占用者是外部程序 → 返回含 PID 与可执行路径的错误，绝不误杀。
-func ensurePortFree(port int, kindDir string, timeout time.Duration) error {
+func ensurePortFree(port int, kindDir string, timeout time.Duration, graceful ...func(port int) error) error {
 	deadline := time.Now().Add(timeout)
+	gracefulTried := false
 	for {
 		pid := process.FindPIDByPort(port)
 		if pid <= 0 {
@@ -52,6 +55,19 @@ func ensurePortFree(port int, kindDir string, timeout time.Duration) error {
 			!strings.Contains(strings.ToLower(exe), strings.ToLower(kindDir)) {
 			return fmt.Errorf("端口 %d 被外部程序占用: %s (PID %d)，请手动处理后再启动", port, exe, pid)
 		}
+
+		// 先走优雅关闭（仅对残留的自家实例；对 mysqld 直接强杀有 InnoDB 数据损坏风险）
+		if !gracefulTried && len(graceful) > 0 && graceful[0] != nil {
+			gracefulTried = true
+			dlogf("尝试优雅关闭端口 %d 的残留实例", port)
+			if err := graceful[0](port); err != nil {
+				dlogf("优雅关闭失败: %v，回退强制清除", err)
+			} else if alive := waitProcessesExited(map[int]struct{}{pid: {}}, 8*time.Second); len(alive) == 0 {
+				dlogf("残留实例已优雅退出")
+				continue
+			}
+		}
+
 		t0 := time.Now()
 		if err := killOwnedInstance(pid); err != nil {
 			return err

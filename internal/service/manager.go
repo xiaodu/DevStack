@@ -640,10 +640,7 @@ func (m *Manager) Stop(id string) error {
 	if m.orch != nil {
 		ctx := context.Background()
 		// 与 Start 对应：必须用完整 ID 停止，否则可能停掉同 kind 的其它版本
-		if err := m.orch.Stop(ctx, id); err != nil {
-			// 编排引擎停止失败，记录错误但继续更新状态
-			// 编排引擎内部已经尝试了强制停止
-		}
+		stopErr := m.orch.Stop(ctx, id)
 
 		// 从 Job Object 中释放进程
 		m.mu.RLock()
@@ -655,6 +652,26 @@ func (m *Manager) Stop(id string) error {
 		if pid > 0 {
 			m.orch.ReleasePID(kind, pid)
 		}
+
+		// 复核真实状态：端口仍被本实例进程监听说明没停掉，绝不向上层谎报"已停止"，
+		// 否则 UI 显示已停止而进程还在跑，下次 Start 还会被幂等跳过
+		if occ := process.FindPIDByPort(port); occ > 0 && exePathMatchesPID(occ, installDir, kind, version) {
+			msg := fmt.Sprintf("停止失败: 进程 PID %d 仍在监听端口 %d", occ, port)
+			if stopErr != nil {
+				msg = "停止失败: " + stopErr.Error()
+			}
+			m.mu.Lock()
+			if si, ok := m.services[id]; ok {
+				si.Info.Status = core.StatusError
+				si.Info.Error = msg
+			}
+			m.mu.Unlock()
+			m.publishServiceEvent(reactive.EventServiceError, id, map[string]interface{}{
+				"error": msg,
+			})
+			return fmt.Errorf("%s", msg)
+		}
+		// stopErr != nil 但进程确实退出了：按已停止处理（orch 超时误报等场景），不阻塞用户
 
 		// 更新状态
 		m.mu.Lock()
@@ -925,11 +942,18 @@ func (m *Manager) MarkInstalled(id, version string) {
 		s.Info.Installed = true
 		return
 	}
+	// 新装服务必须带上默认端口：registerDefaults 的磁盘扫描只在启动时执行一次，
+	// 通过「下载安装」新增的服务走不到那里。Port=0 会导致启动判活、
+	// watchProcess、端口冲突检测全线失效
+	port := 0
+	if pkg := registry.Builtin().Get(kind); pkg != nil {
+		port = pkg.DefaultPort
+	}
 	m.services[entryID] = &ServiceInstance{
 		Info: core.ServiceInfo{
 			ID: entryID, Kind: kind, Name: kindNames[kind],
 			Type:    core.ServiceType(kind),
-			Version: version, Installed: true,
+			Version: version, Installed: true, Port: port,
 			Status: core.StatusStopped,
 		},
 	}
@@ -957,12 +981,23 @@ func (m *Manager) Configure(id string) error {
 	m.mu.Lock()
 	s, ok := m.services[id]
 	if !ok {
+		// 调用方只传 kind（如前端 applyServiceConfig('nginx')）时不能按 map 随机序挑版本，
+		// 否则多版本共存时配置到不可预期的版本上。确定性选择：运行中 > 默认版本 > 最高版本。
 		kind := kindFromID(id)
 		for _, cand := range m.services {
-			if cand.Info.Kind == kind {
+			if cand.Info.Kind != kind {
+				continue
+			}
+			if s == nil || cand.Info.Status == core.StatusRunning {
 				s = cand
 				ok = true
-				break
+				if s.Info.Status == core.StatusRunning {
+					break
+				}
+				continue
+			}
+			if s.Info.Status != core.StatusRunning && cand.Info.Version > s.Info.Version {
+				s = cand
 			}
 		}
 	}

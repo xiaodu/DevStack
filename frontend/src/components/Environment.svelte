@@ -300,6 +300,14 @@ async function installEnvComponents(env: any) {
 function cancelInstall() {
   if (installCancelled) return
   installCancelled = true
+  // 通知后端真正中止所有仍在下载中的任务，否则下载继续占带宽并落盘
+  for (const task of installTasks) {
+    if (task.status === 'pending' || task.status === 'downloading') {
+      api.cancelDownload(`download:${task.id}:${task.version}`).catch((e) => {
+        console.error('取消下载失败:', e)
+      })
+    }
+  }
   // 立即反馈：未完成任务标记为已取消并关闭弹窗，不必等待正在进行的下载结束
   installTasks = installTasks.map((t) => (t.status === 'done' ? t : { ...t, status: 'cancelled', progress: 0 }))
   installModal = false

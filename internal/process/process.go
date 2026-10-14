@@ -12,6 +12,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/windows"
 )
 
 const maxOutputSize = 1024 * 1024 // 1MB per process
@@ -273,7 +275,9 @@ var (
 const executablePathCacheTTL = 5 * time.Second
 
 // GetExecutablePath 返回指定 PID 进程的可执行文件完整路径。
-// 查询失败（进程已退出 / wmic 不可用）时返回空字符串。
+// 走纯 Win32 API（OpenProcess + QueryFullProcessImageName），不依赖 wmic——
+// wmic 在 Windows 11 24H2+ 已被移除，届时此函数会全线失效。
+// 查询失败（进程已退出 / 权限不足）时返回空字符串。
 func GetExecutablePath(pid int) string {
 	if pid <= 0 {
 		return ""
@@ -292,22 +296,25 @@ func GetExecutablePath(pid int) string {
 		return p
 	}
 
-	cmd := exec.Command("wmic", "process", "where", fmt.Sprintf("ProcessId=%d", pid), "get", "ExecutablePath", "/format:value")
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	out, err := cmd.Output()
+	path := queryFullProcessImageName(pid)
+	executablePathCache[pid] = path
+	return path
+}
+
+// queryFullProcessImageName 用 QueryFullProcessImageNameW 查询单个进程的 exe 完整路径。
+func queryFullProcessImageName(pid int) string {
+	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
 	if err != nil {
 		return ""
 	}
-	path := ""
-	for _, line := range strings.Split(string(out), "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "ExecutablePath=") {
-			path = strings.TrimPrefix(line, "ExecutablePath=")
-			break
-		}
+	defer windows.CloseHandle(h)
+
+	buf := make([]uint16, windows.MAX_PATH)
+	size := uint32(len(buf))
+	if err := windows.QueryFullProcessImageName(h, 0, &buf[0], &size); err != nil {
+		return ""
 	}
-	executablePathCache[pid] = path
-	return path
+	return windows.UTF16ToString(buf[:size])
 }
 
 // portPIDCache 缓存 netstat 扫描结果，避免短时间内重复执行 netstat -ano
@@ -457,25 +464,30 @@ func (m *Manager) GetCommand(pid int) (*exec.Cmd, bool) {
 	return cmd, ok
 }
 
+// findChildProcesses 返回 parentPID 的全部后代进程 PID（含多级子孙）。
+// 使用 Toolhelp32 进程快照按 PPID 树遍历，不再调用 wmic（Win11 24H2+ 已移除）。
 func findChildProcesses(parentPID int) []int {
-	var result []int
-	cmd := exec.Command("wmic", "process", "where", fmt.Sprintf("ParentProcessId=%d", parentPID), "get", "ProcessId", "/format:value")
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	out, err := cmd.Output()
+	procs, err := ListProcesses()
 	if err != nil {
-		return result
+		return nil
 	}
-	for _, line := range strings.Split(string(out), "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "ProcessId=") {
-			if pidStr := strings.TrimPrefix(line, "ProcessId="); pidStr != "" {
-				if pid, err := strconv.Atoi(pidStr); err == nil && pid > 0 {
-					result = append(result, pid)
-					grandchildren := findChildProcesses(pid)
-					result = append(result, grandchildren...)
-				}
+	children := make(map[int][]int, len(procs))
+	for _, p := range procs {
+		children[p.PPID] = append(children[p.PPID], p.PID)
+	}
+	var result []int
+	var walk func(pid int)
+	visited := map[int]struct{}{parentPID: {}}
+	walk = func(pid int) {
+		for _, child := range children[pid] {
+			if _, dup := visited[child]; dup {
+				continue // 防御 PPID 环（PID 复用等场景）
 			}
+			visited[child] = struct{}{}
+			result = append(result, child)
+			walk(child)
 		}
 	}
+	walk(parentPID)
 	return result
 }

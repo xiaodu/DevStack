@@ -398,6 +398,17 @@ func (a *App) Shutdown() {
 	if a.opStore != nil {
 		a.opStore.LogInfo("[SHUTDOWN] 应用正在退出")
 	}
+	// 优雅停服：按依赖逆序停止（provider 内部先 mysqladmin/nginx -s 等优雅关闭，超时才强杀兜底）。
+	// 之前不做任何清理，退出全靠 OS 关 Job Object 句柄强杀 mysqld 等数据服务，有数据损坏风险。
+	if a.svcMgr != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		if err := a.svcMgr.Shutdown(ctx); err != nil {
+			if a.opStore != nil {
+				a.opStore.LogError("[SHUTDOWN] 优雅停止服务失败(已尽力): %v", err)
+			}
+		}
+	}
 }
 
 // ── 环境编排进度事件 → 前端（operation:begin / operation:step / operation:end） ──
@@ -677,6 +688,17 @@ func (a *App) DeleteEnvironment(id string) error {
 	}
 	if a.environmentProjectUsage(id) > 0 {
 		return core.ErrEnvProfileInUse
+	}
+	// 删除的是当前激活环境时必须先停用：否则激活标记指向已删除环境，
+	// 之后 DeactivateEnvironment 因找不到环境而无法停止任何服务，运行中的服务悬空
+	activeID, err := a.getActiveEnvironmentID()
+	if err != nil {
+		return fmt.Errorf("读取当前激活环境失败: %w", err)
+	}
+	if activeID == id {
+		if err := a.DeactivateEnvironment(); err != nil {
+			return fmt.Errorf("该环境正在使用中，停用失败无法删除: %w", err)
+		}
 	}
 	return a.envMgr.Delete(id)
 }
@@ -1249,7 +1271,8 @@ func (a *App) DownloadService(serviceType, version, url string) error {
 
 	var urls []string
 	var checksum string
-	if url != "" {
+	customURL := url != ""
+	if customURL {
 		urls = append(urls, url)
 	}
 	releases, err := a.dlMgr.GetAvailableVersions(serviceType)
@@ -1258,13 +1281,17 @@ func (a *App) DownloadService(serviceType, version, url string) error {
 	}
 	for _, r := range releases {
 		if r.Version == version {
-			if url == "" && r.URL != "" {
+			if !customURL && r.URL != "" {
 				urls = append(urls, r.URL)
 			}
 			if r.MirrorURL != "" {
 				urls = append(urls, r.MirrorURL)
 			}
-			checksum = r.Checksum
+			// SHA256 只对官方源的产物有意义；调用方提供自定义 URL（测试/离线包）时
+			// manifest 校验和与之无关，跳过以避免误报（zip 完整性测试仍然生效）
+			if !customURL {
+				checksum = r.Checksum
+			}
 			break
 		}
 	}

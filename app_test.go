@@ -4,12 +4,17 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/xiaodu/DevStack/internal/config"
 	"github.com/xiaodu/DevStack/internal/core"
@@ -119,32 +124,104 @@ func (p *fakeProvider) NewInstance(ctx context.Context, cfg map[string]interface
 	if v, ok := cfg["version"].(string); ok {
 		version = v
 	}
-	return &fakeEntity{id: p.Name() + "@" + version, kind: p.Name(), version: version}, nil
+	port := 0
+	if pt, ok := cfg["port"].(int); ok {
+		port = pt
+	}
+	return &fakeEntity{id: p.Name() + "@" + version, kind: p.Name(), version: version, port: port}, nil
 }
 
 func (p *fakeProvider) IsInstalled(version string) bool { return true }
 
+// fakeEntity 用「拷贝到假安装目录内的测试二进制」作为真实服务进程：
+// 子进程监听指定端口后阻塞，使 GetServices 的真实状态同步
+// （FindPIDByPort + exePathMatchesPID）能诚实验证"运行中"，
+// 而不是仅靠 provider 自报状态。
 type fakeEntity struct {
 	id      string
 	kind    string
 	version string
+	port    int
 	status  core.ServiceStatus
+	cmd     *exec.Cmd
 }
 
-func (e *fakeEntity) ID() string                { return e.id }
-func (e *fakeEntity) Type() string              { return e.kind }
-func (e *fakeEntity) Status() (string, error)   { return string(e.status), nil }
-func (e *fakeEntity) LogPaths() []string        { return nil }
+func (e *fakeEntity) ID() string              { return e.id }
+func (e *fakeEntity) Type() string            { return e.kind }
+func (e *fakeEntity) Status() (string, error) { return string(e.status), nil }
+func (e *fakeEntity) LogPaths() []string      { return nil }
 func (e *fakeEntity) ConfigSchema() provider.ConfigSchema {
 	return provider.ConfigSchema{}
 }
 
+// TestFakeServiceHelper 是假服务进程模式：以 DEVSTACK_E2E_HELPER_PORT 环境变量
+// 激活，在指定端口监听 TCP 并阻塞，直到进程被杀。被父测试进程 exec 启动。
+func TestFakeServiceHelper(t *testing.T) {
+	port := os.Getenv("DEVSTACK_E2E_HELPER_PORT")
+	if port == "" {
+		t.Skip("helper 模式需 DEVSTACK_E2E_HELPER_PORT")
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:"+port)
+	if err != nil {
+		t.Skipf("helper 监听 %s 失败: %v", port, err)
+	}
+	defer ln.Close()
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		conn.Close()
+	}
+}
+
 func (e *fakeEntity) Start(ctx context.Context) error {
-	e.status = core.StatusRunning
-	return nil
+	// 把测试二进制自身拷贝进假安装目录，作为"属于本服务安装目录"的可执行进程
+	self, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("获取测试二进制路径失败: %w", err)
+	}
+	// 安装目录由测试目录约定：fakeEntity 不知道 installDir，用环境变量传入
+	installDir := os.Getenv("DEVSTACK_E2E_DIR")
+	helperDir := filepath.Join(installDir, "programs", e.kind, e.version)
+	if err := os.MkdirAll(helperDir, 0755); err != nil {
+		return err
+	}
+	helperExe := filepath.Join(helperDir, "e2e-service.exe")
+	if data, err := os.ReadFile(self); err == nil {
+		if err := os.WriteFile(helperExe, data, 0755); err != nil {
+			return fmt.Errorf("拷贝 helper 失败: %w", err)
+		}
+	} else {
+		return fmt.Errorf("读取测试二进制失败: %w", err)
+	}
+
+	cmd := exec.Command(helperExe, "-test.run=TestFakeServiceHelper", "-test.timeout=10m")
+	cmd.Env = append(os.Environ(), "DEVSTACK_E2E_HELPER_PORT="+strconv.Itoa(e.port))
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("启动假服务进程失败: %w", err)
+	}
+	e.cmd = cmd
+
+	// 等端口真正监听，启动才算成功（与真实服务的就绪语义一致）
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if pid := process.FindPIDByPort(e.port); pid == cmd.Process.Pid {
+			e.status = core.StatusRunning
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	cmd.Process.Kill()
+	return fmt.Errorf("假服务进程未能在端口 %d 就绪", e.port)
 }
 
 func (e *fakeEntity) Stop(ctx context.Context) error {
+	if e.cmd != nil && e.cmd.Process != nil {
+		_ = e.cmd.Process.Kill()
+		_, _ = e.cmd.Process.Wait()
+	}
+	e.cmd = nil
 	e.status = core.StatusStopped
 	return nil
 }
@@ -260,8 +337,8 @@ func TestUserFlow_AddEnvActivateCreateSiteStartStopDeactivate(t *testing.T) {
 	if !fileContains(t, filepath.Join(dir, "programs", "nginx", "1.24.0", "conf", "nginx.conf"), "worker_processes") {
 		t.Fatal("nginx 安装后未生成配置文件 programs/nginx/1.24.0/conf/nginx.conf")
 	}
-	if !fileContains(t, filepath.Join(dir, "programs", "mysql", "8.0.39", "my.ini"), "mysqld") {
-		t.Fatal("mysql 安装后未生成配置文件 programs/mysql/8.0.39/my.ini")
+	if !fileContains(t, filepath.Join(dir, "programs", "mysql", "8.0.39", "conf", "my.ini"), "mysqld") {
+		t.Fatal("mysql 安装后未生成配置文件 programs/mysql/8.0.39/conf/my.ini")
 	}
 
 	// 3. 激活环境：批量启动全部组件 + 记录当前环境
