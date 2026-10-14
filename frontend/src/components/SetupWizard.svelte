@@ -87,13 +87,16 @@ let checkingPorts = $state(false)
 onMount(async () => {
   const settings = await api.getSettings()
   if (settings.installDir) installDir = settings.installDir
-  for (const pkg of packages) {
-    const releases = await api.getAvailableVersions(pkg.id)
-    if (releases?.length > 0) {
-      pkg.versions = releases.map((r) => r.version)
-      pkg.selected = releases[releases.length - 1].version
-    }
-  }
+  // 并行拉取全部包的版本列表（此前逐包串行 await，6 次瀑布拖慢向导首屏）
+  await Promise.all(
+    packages.map(async (pkg) => {
+      const releases = await api.getAvailableVersions(pkg.id)
+      if (releases?.length > 0) {
+        pkg.versions = releases.map((r) => r.version)
+        pkg.selected = releases[releases.length - 1].version
+      }
+    }),
+  )
   // 默认选中推荐预设
   selectedPreset = 'builtin-modern-php8'
   applyPreset(selectedPreset)

@@ -11,6 +11,7 @@ let installing = $state<Record<string, any>>({})
 let cancelling = $state<Record<string, boolean>>({}) // 取消进行中：保持 installing=true 直到原 promise 结束（F12）
 let uninstalling = $state<Record<string, any>>({})
 let loading = $state(true)
+let loadError = $state('') // 加载失败与"暂无软件包"区分开，不能让用户误以为没包
 let installProgress: Record<string, any> = {} // { 'nginx-1.24.0': { downloaded: 0, total: 0 } }
 let installElapsed = $state<Record<string, any>>({}) // { 'nginx-1.24.0': seconds }
 let elapsedTimer: ReturnType<typeof setInterval> | null = null
@@ -55,22 +56,34 @@ async function load() {
   packages = []
   try {
     const kinds = Object.keys(serviceNames)
-    for (const kind of kinds) {
-      const releases = (await api.getAvailableVersions(kind)) || []
+    // 并行拉取全部版本列表（此前逐 kind 串行 await，11 次瀑布导致整页空白数秒）
+    const versionsByKind = await Promise.all(
+      kinds.map(async (kind) => ({
+        kind,
+        releases: (await api.getAvailableVersions(kind)) || [],
+      })),
+    )
+    // 一次拉取各 kind 的已安装版本列表（此前逐版本 checkVersionInstalled 串行几十次 IPC）
+    const installedByKind = await Promise.all(
+      kinds.map(async (kind) => ({ kind, installed: await api.getInstalledVersions(kind) })),
+    )
+    const installedMap = new Map(installedByKind.map((v) => [v.kind, v.installed || []]))
+    for (const { kind, releases } of versionsByKind) {
+      const installedSet = new Set(installedMap.get(kind) || [])
       for (const rel of releases) {
-        const installed = await api.checkVersionInstalled(kind, rel.version)
         packages.push({
           id: kind,
           name: serviceNames[kind],
           version: rel.version,
           category: categoryFor(kind),
-          installed,
+          installed: installedSet.has(rel.version),
         })
       }
     }
     packages = [...packages]
   } catch (e) {
     console.error(e)
+    loadError = (e as any)?.message || String(e)
   } finally {
     loading = false
   }
@@ -200,6 +213,8 @@ onMount(load)
 
     {#if loading}
       <div class="text-center py-10 text-base-content/60">加载软件包中...</div>
+    {:else if loadError}
+      <div class="text-center py-10 text-error">软件包列表加载失败：{loadError}</div>
     {:else if filtered.length === 0}
       <div class="text-center py-10 text-base-content/60">暂无软件包</div>
     {:else}
