@@ -68,6 +68,7 @@ func (m *Manager) startNode(inst *Instance) error {
 	inst.Info.Status = core.StatusRunning
 	inst.Info.Running = true
 	inst.Info.PID = pid
+	m.assignJob(pid, "node")
 	return nil
 }
 

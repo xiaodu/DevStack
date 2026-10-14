@@ -329,6 +329,22 @@ var (
 // portPIDCacheTTL 是端口 PID 缓存的有效期
 const portPIDCacheTTL = 2 * time.Second
 
+// stalePortPIDCache netstat 扫描失败时的降级策略：返回上一次成功扫描的缓存（无论多旧）。
+// 之前失败直接返回空 map，调用方把"扫描失败"当"没有进程监听"产生假阴性——
+// 判活误报已停止、端口冲突误判空闲。陈旧数据远好于错误的空数据；完全没有历史数据时才返回空。
+// 必须在持有 portPIDCacheMu 时调用。
+func stalePortPIDCache(reason string) map[int]int {
+	if portPIDCache != nil {
+		result := make(map[int]int, len(portPIDCache))
+		for k, v := range portPIDCache {
+			result[k] = v
+		}
+		return result
+	}
+	_ = reason // 无历史数据可用，调用方将得到空 map（记录 reason 便于调试）
+	return nil
+}
+
 func FindAllPIDsByPort() map[int]int {
 	portPIDCacheMu.Lock()
 	defer portPIDCacheMu.Unlock()
@@ -360,11 +376,11 @@ func FindAllPIDsByPort() map[int]int {
 		if cmd.Process != nil {
 			cmd.Process.Kill()
 		}
-		return nil
+		return stalePortPIDCache("netstat 超时")
 	}
 
 	if err != nil {
-		return nil
+		return stalePortPIDCache(err.Error())
 	}
 	result := make(map[int]int)
 	for _, line := range strings.Split(string(out), "\n") {

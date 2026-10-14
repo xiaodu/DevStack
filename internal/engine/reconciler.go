@@ -119,31 +119,59 @@ func (r *ReconcilerImpl) end(action string, ok bool, message string) {
 	r.reporter.OnOperationEnd(action, ok, message)
 }
 
-// Activate 从旧环境切换到新环境：先停旧的全部，再启新的全部。
-// 分两阶段展示：停止阶段和启动阶段各自独立遮罩，避免混淆。
+// Activate 从旧环境切换到新环境。
+//
+// 交集优化：新旧环境同 kind@version 的单元直接保留运行，不做无谓的停-启
+// （这是环境切换耗时和体感卡顿的主要来源）；启动新环境失败时，
+// 回滚本次新启单元并尽力恢复旧环境独有的单元，避免留下"全部停机"的中间态。
 func (r *ReconcilerImpl) Activate(oldEnv, newEnv environment.Environment) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// ── 阶段 1：停止旧环境 ──
+	// 新环境单元集合（kind@version）
+	newKeys := make(map[string]bool, len(newEnv.Units))
+	for _, u := range newEnv.Units {
+		newKeys[u.Kind+"@"+u.Version] = true
+	}
+
+	// ── 阶段 1：停止旧环境（跳过与新环境交集的单元，它们继续运行）──
+	var stoppedOld []environment.UnitSpec // 阶段 1 实际停掉的旧环境单元，失败时用于恢复
 	if len(oldEnv.Units) > 0 {
-		r.beginPlan("activate-stop", "停止旧环境", oldEnv.Units, nil)
-		if stopErr := r.stopUnits(oldEnv.Units); stopErr != nil {
-			r.end("activate-stop", false, stopErr.Error())
-			return stopErr
+		stopList := make([]environment.UnitSpec, 0, len(oldEnv.Units))
+		for _, u := range oldEnv.Units {
+			if newKeys[u.Kind+"@"+u.Version] {
+				continue // 交集单元保留运行
+			}
+			stopList = append(stopList, u)
 		}
-		r.end("activate-stop", true, "")
+		if len(stopList) > 0 {
+			r.beginPlan("activate-stop", "停止旧环境", stopList, nil)
+			if stopErr := r.stopUnits(stopList); stopErr != nil {
+				r.end("activate-stop", false, stopErr.Error())
+				return stopErr
+			}
+			r.end("activate-stop", true, "")
+			stoppedOld = stopList
+		}
 	}
 
 	// ── 阶段 2：启动新环境 ──
+	// 交集单元已在运行，svcMgr/rtMgr 的 Start 幂等（运行中直接返回 nil），无需特判
 	title := "启动环境"
 	if newEnv.Name != "" {
 		title = fmt.Sprintf("启动「%s」", newEnv.Name)
 	}
 	r.beginPlan("activate-start", title, nil, newEnv.Units)
-	if err := r.startUnits(newEnv.Units); err != nil {
-		r.end("activate-start", false, err.Error())
-		return err
+	startErr := r.startUnits(newEnv.Units)
+	if startErr != nil {
+		r.end("activate-start", false, startErr.Error())
+		// 启动失败：恢复阶段 1 停掉的旧环境单元，让用户至少回到切换前的可用状态
+		if len(stoppedOld) > 0 {
+			if restoreErr := r.startUnits(stoppedOld); restoreErr != nil {
+				return fmt.Errorf("%v; 恢复旧环境「%s」也失败: %w", startErr, oldEnv.Name, restoreErr)
+			}
+		}
+		return startErr
 	}
 	if err := r.stateStore.SaveActive(newEnv.ID); err != nil {
 		r.end("activate-start", false, err.Error())

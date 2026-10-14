@@ -50,6 +50,7 @@ type Service struct {
 	WorkDir  string            // 工作目录
 	AutoRun  bool              // 是否自动启动
 	GraceSec int               // 优雅关闭等待秒数
+	Port     int               // 服务监听端口（provider 注册时提供；0 表示未知）
 
 	// 运行时状态
 	PID   int          // 进程 PID
@@ -59,6 +60,12 @@ type Service struct {
 
 	// 依赖关系
 	DependsOn []string // 依赖的服务名列表
+}
+
+// clone 返回服务当前状态的安全副本，避免调用方在锁外持有并修改内部对象。
+func (svc *Service) clone() Service {
+	c := *svc
+	return c
 }
 
 // Engine 服务编排引擎
@@ -409,8 +416,23 @@ func contains(s, substr string) bool {
 }
 
 // StartAll 启动所有自动启动的服务
+// SetServicePort 设置服务监听端口（provider 注册后由 service.Manager 提供）。
+// waitForReady/checkPortConflict 依赖它做真实探活；经 RegisterService(name,"",nil,...)
+// 注册的内置服务 Command/Args 为空，从命令行提取不到端口。
+func (e *Engine) SetServicePort(name string, port int) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if s, ok := e.services[name]; ok {
+		s.Port = port
+	}
+}
+
+// StartAll 启动所有 AutoRun 服务
 func (e *Engine) StartAll(ctx context.Context) error {
-	order := e.getStartupOrder()
+	order, cycle := e.getStartupOrder()
+	if len(cycle) > 0 {
+		return fmt.Errorf("服务依赖存在循环: %v，无法确定启动顺序", cycle)
+	}
 
 	for _, name := range order {
 		svc := e.getService(name)
@@ -491,12 +513,28 @@ func (e *Engine) Start(ctx context.Context, name string) error {
 		}
 	}
 
-	// 5. 等待服务就绪
-	if err := e.waitForReady(svc, 10*time.Second); err != nil {
-		// 启动超时或失败，停止进程
-		e.group.Stop(pid)
-		e.setError(name, err)
-		return err
+	// 5. 就绪验证
+	//    - provider 模式（startFunc）：就绪是 provider 的契约——entity.Start 返回成功
+	//      即已监听端口（nginx/php/redis/mysql 内部均轮询至端口就绪才返回）。
+	//      编排引擎只复核进程存活，防止 provider 谎报（秒退进程）。
+	//    - Procfile 模式：进程由编排引擎自己拉起，自己负责端口探活。
+	if e.startFunc != nil {
+		if pid > 0 {
+			time.Sleep(300 * time.Millisecond)
+			if !isPIDRunning(pid) {
+				err := fmt.Errorf("%s 启动失败: 进程在启动确认前退出（PID=%d）", name, pid)
+				e.group.Stop(pid)
+				e.setError(name, err)
+				return err
+			}
+		}
+	} else {
+		if err := e.waitForReady(svc, pid, 10*time.Second); err != nil {
+			// 启动超时或失败，停止进程
+			e.group.Stop(pid)
+			e.setError(name, err)
+			return err
+		}
 	}
 
 	// 6. 更新状态
@@ -557,32 +595,43 @@ func (e *Engine) Stop(ctx context.Context, name string) error {
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
+	// markStopped 复核进程真的退出后才允许标记 Stopped；
+	// 进程仍在运行却置 Stopped 是"记账性僵尸"——后续 Start 会被幂等跳过，用户被欺骗
+	markStopped := func() bool {
+		if isPIDRunning(svc.PID) {
+			return false
+		}
+		e.mu.Lock()
+		svc.State = StateStopped
+		svc.PID = 0
+		e.mu.Unlock()
+		e.notifyStateChange(name, StateStopping, StateStopped, nil)
+		e.log(fmt.Sprintf("%s 已停止", name))
+		return true
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
-			e.mu.Lock()
-			svc.State = StateStopped
-			svc.PID = 0
-			e.mu.Unlock()
+			if !markStopped() {
+				err := fmt.Errorf("停止 %s 被取消: 进程 %d 仍在运行", name, svc.PID)
+				e.setError(name, err)
+				return err
+			}
 			return ctx.Err()
 		case <-deadline:
 			// 超时，强制停止
 			e.group.ForceStop(svc.PID)
-			e.mu.Lock()
-			svc.State = StateStopped
-			svc.PID = 0
-			e.mu.Unlock()
-			e.notifyStateChange(name, StateStopping, StateStopped, nil)
-			e.log(fmt.Sprintf("%s 已停止", name))
+			// 强杀后给进程 1 秒退出时间再复核
+			time.Sleep(1 * time.Second)
+			if !markStopped() {
+				err := fmt.Errorf("停止 %s 失败: 强制终止后进程 %d 仍在运行", name, svc.PID)
+				e.setError(name, err)
+				return err
+			}
 			return nil
 		case <-ticker.C:
-			if !isPIDRunning(svc.PID) {
-				e.mu.Lock()
-				svc.State = StateStopped
-				svc.PID = 0
-				e.mu.Unlock()
-				e.notifyStateChange(name, StateStopping, StateStopped, nil)
-				e.log(fmt.Sprintf("%s 已停止", name))
+			if markStopped() {
 				return nil
 			}
 		}
@@ -617,38 +666,39 @@ func (e *Engine) Restart(ctx context.Context, name string) error {
 	return e.Start(ctx, name)
 }
 
-// Status 获取服务状态
-func (e *Engine) Status(name string) (*Service, error) {
+// Status 获取服务状态（返回副本，调用方修改不影响引擎内部状态）
+func (e *Engine) Status(name string) (Service, error) {
 	svc := e.getService(name)
 	if svc == nil {
-		return nil, fmt.Errorf("服务 %s 不存在", name)
+		return Service{}, fmt.Errorf("服务 %s 不存在", name)
 	}
 
-	e.mu.RLock()
-	defer e.mu.RUnlock()
+	e.mu.Lock()
+	defer e.mu.Unlock()
 
-	// 检查进程是否真的在运行
+	// 运行中但进程已消失（被外部杀死等）：修正为已停止。
+	// 状态修正必须走写锁——旧实现在 RLock 下写是数据竞争。
 	if svc.State == StateRunning && !isPIDRunning(svc.PID) {
 		svc.State = StateStopped
 		svc.PID = 0
 	}
 
-	return svc, nil
+	return svc.clone(), nil
 }
 
-// List 获取所有服务状态
-func (e *Engine) List() []*Service {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
+// List 获取所有服务状态（返回副本）
+func (e *Engine) List() []Service {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 
-	result := make([]*Service, 0, len(e.services))
+	result := make([]Service, 0, len(e.services))
 	for _, svc := range e.services {
-		// 检查进程是否真的在运行
+		// 检查进程是否真的在运行（写锁下修正）
 		if svc.State == StateRunning && !isPIDRunning(svc.PID) {
 			svc.State = StateStopped
 			svc.PID = 0
 		}
-		result = append(result, svc)
+		result = append(result, svc.clone())
 	}
 
 	return result
@@ -712,7 +762,10 @@ func (e *Engine) log(msg string) {
 // 规则：
 // 1. 被依赖的服务先启动
 // 2. 同级服务按名称排序
-func (e *Engine) getStartupOrder() []string {
+//
+// 返回 (有序列表, 环上服务)。环上的服务无法确定启动顺序，调用方必须显式处理（报错），
+// 不能像旧实现那样静默丢弃——那样环上服务不启动也不报错，用户无从得知。
+func (e *Engine) getStartupOrder() ([]string, []string) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
@@ -762,19 +815,35 @@ func (e *Engine) getStartupOrder() []string {
 		}
 	}
 
-	return order
+	// 拓扑排序后仍未出队的即环上（或依赖环）服务
+	var cycle []string
+	for name := range e.services {
+		found := false
+		for _, o := range order {
+			if o == name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			cycle = append(cycle, name)
+		}
+	}
+	sortStrings(cycle)
+
+	return order, cycle
 }
 
-// getShutdownOrder 获取停止顺序（反向拓扑排序）
+// getShutdownOrder 获取停止顺序（反向拓扑排序）。环上服务按名称序附在末尾，保证不被遗漏。
 func (e *Engine) getShutdownOrder() []string {
-	order := e.getStartupOrder()
+	order, cycle := e.getStartupOrder()
 
 	// 反转顺序
 	for i, j := 0, len(order)-1; i < j; i, j = i+1, j-1 {
 		order[i], order[j] = order[j], order[i]
 	}
 
-	return order
+	return append(order, cycle...)
 }
 
 // getDependents 获取依赖指定服务的服务列表
@@ -818,8 +887,12 @@ func (e *Engine) checkDependencies(name string) error {
 
 // checkPortConflict 检查端口冲突
 func (e *Engine) checkPortConflict(svc *Service) error {
-	// 从命令行参数中提取端口
+	// 内置服务经 RegisterService(name,"",...) 注册，Command/Args 为空，
+	// 必须优先使用 provider 提供的 Port 字段
 	ports := extractPorts(svc.Command, svc.Args)
+	if svc.Port > 0 {
+		ports = append(ports, svc.Port)
+	}
 
 	for _, port := range ports {
 		if isPortInUse(port) {
@@ -836,15 +909,31 @@ func (e *Engine) checkPortConflict(svc *Service) error {
 
 // waitForReady 等待服务就绪
 //
-// 通过检查端口是否可连接来判断服务是否就绪。
-// 对于没有端口的服务，等待一小段时间后认为就绪。
-func (e *Engine) waitForReady(svc *Service, timeout time.Duration) error {
+// 通过真实 TCP 拨测监听端口判断就绪，未监听即未就绪——
+// MySQL 慢启动或进程秒退都不会被误判成功。
+// 对确实没有端口的服务，等待进程存活确认后视为就绪。
+func (e *Engine) waitForReady(svc *Service, pid int, timeout time.Duration) error {
 	ports := extractPorts(svc.Command, svc.Args)
+	if svc.Port > 0 {
+		ports = append(ports, svc.Port)
+	}
 
 	if len(ports) == 0 {
-		// 没有端口，等待一小段时间
-		time.Sleep(500 * time.Millisecond)
-		return nil
+		// 无端口服务：确认进程存活即可，不再固定 sleep 500ms 谎报就绪
+		deadline := time.After(timeout)
+		ticker := time.NewTicker(200 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-deadline:
+				return fmt.Errorf("等待 %s 就绪超时", svc.Name)
+			case <-ticker.C:
+				if pid <= 0 || isPIDRunning(pid) {
+					return nil
+				}
+				return fmt.Errorf("%s 进程已退出（PID=%d）", svc.Name, pid)
+			}
+		}
 	}
 
 	deadline := time.After(timeout)
@@ -854,8 +943,16 @@ func (e *Engine) waitForReady(svc *Service, timeout time.Duration) error {
 	for {
 		select {
 		case <-deadline:
+			// 超时前最后确认：进程是否还活着（秒退的进程永远等不到端口）
+			if pid > 0 && !isPIDRunning(pid) {
+				return fmt.Errorf("%s 启动失败: 进程在就绪前退出（PID=%d）", svc.Name, pid)
+			}
 			return fmt.Errorf("等待 %s 就绪超时", svc.Name)
 		case <-ticker.C:
+			// 进程秒退：直接失败，不必干等超时
+			if pid > 0 && !isPIDRunning(pid) {
+				return fmt.Errorf("%s 启动失败: 进程在就绪前退出（PID=%d）", svc.Name, pid)
+			}
 			allReady := true
 			for _, port := range ports {
 				if !isPortReady(port) {

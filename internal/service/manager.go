@@ -33,6 +33,9 @@ type Manager struct {
 	dependents map[string][]string
 	reactive   *reactive.Engine
 	orch       *orchestrator.Engine // 服务编排引擎（Windows Job Object）
+
+	syncStop chan struct{} // 周期状态同步的停止信号（nil 表示未启动）
+	syncOnce sync.Once
 }
 
 type ServiceInstance struct {
@@ -475,6 +478,11 @@ func (m *Manager) Start(id string) error {
 		if !m.orch.HasService(id) {
 			m.orch.RegisterService(id, "", nil, nil, "", 5)
 		}
+		// 同步端口：编排引擎的就绪探活/端口冲突检测依赖它。
+		// 不传的话 Command/Args 为空提取不到端口，500ms sleep 即谎报就绪。
+		if port > 0 {
+			m.orch.SetServicePort(id, port)
+		}
 
 		// 使用编排引擎启动服务（依赖检查、端口冲突检测、健康等待）
 		ctx := context.Background()
@@ -650,7 +658,7 @@ func (m *Manager) Stop(id string) error {
 		}
 		m.mu.RUnlock()
 		if pid > 0 {
-			m.orch.ReleasePID(kind, pid)
+			m.orch.ReleasePID(id, pid)
 		}
 
 		// 复核真实状态：端口仍被本实例进程监听说明没停掉，绝不向上层谎报"已停止"，
@@ -726,7 +734,7 @@ func (m *Manager) Stop(id string) error {
 		}
 		m.mu.RUnlock()
 		if pid > 0 {
-			m.orch.ReleasePID(kind, pid)
+			m.orch.ReleasePID(id, pid)
 		}
 	}
 
@@ -764,6 +772,103 @@ func (m *Manager) publishServiceEvent(eventType reactive.EventType, serviceID st
 		data[k] = v
 	}
 	m.reactive.Publish(reactive.NewEvent(eventType, serviceID, data))
+}
+
+// StartBackgroundSync 启动周期状态同步（幂等）：每 5 秒按端口+进程归属复核全部服务状态，
+// 与 s.Info 不一致时回写并向前端发布事件。
+// 之前状态只在用户操作或前端拉取 List 时被动计算，且 List 的修正结果不回写——
+// 进程被外部杀死后（如用户 taskkill），存储状态永远停留在"运行中"。
+// 周期同步同时是 reactive 事件丢失时的兜底真相源。
+func (m *Manager) StartBackgroundSync() {
+	m.syncOnce.Do(func() {
+		m.syncStop = make(chan struct{})
+		go m.backgroundSyncLoop()
+	})
+}
+
+func (m *Manager) backgroundSyncLoop() {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-m.syncStop:
+			return
+		case <-ticker.C:
+			m.reconcileStates()
+		}
+	}
+}
+
+// reconcileStates 单次复核：真实状态与存储状态不一致时回写 + 发事件。
+func (m *Manager) reconcileStates() {
+	// 快照服务列表（避免长时间持锁）
+	m.mu.RLock()
+	ids := make([]string, 0, len(m.services))
+	for id := range m.services {
+		ids = append(ids, id)
+	}
+	m.mu.RUnlock()
+	if len(ids) == 0 {
+		return
+	}
+
+	portPIDMap := process.FindAllPIDsByPort()
+
+	type change struct {
+		id     string
+		info   core.ServiceInfo
+		events []struct {
+			evt   reactive.EventType
+			extra map[string]interface{}
+		}
+	}
+	var changes []change
+
+	m.mu.Lock()
+	for _, id := range ids {
+		s := m.services[id]
+		if s == nil {
+			continue
+		}
+		// 过渡态（启动中/停止中）由对应操作收敛，不抢写
+		if s.Info.Status == core.StatusStarting || s.Info.Status == core.StatusStopping {
+			continue
+		}
+		info := m.syncServiceState(s, portPIDMap)
+		if info.Status == s.Info.Status && info.PID == s.Info.PID {
+			continue
+		}
+		old := s.Info.Status
+		s.Info.Status = info.Status
+		s.Info.PID = info.PID
+		if info.Status == core.StatusStopped && old == core.StatusRunning {
+			// 进程消失：清掉句柄，允许下次 Start 正常走流程
+			s.process = nil
+			c := change{id: id, info: info}
+			c.events = append(c.events, struct {
+				evt   reactive.EventType
+				extra map[string]interface{}
+			}{reactive.EventServiceStopped, map[string]interface{}{"reason": "process-exited"}})
+			changes = append(changes, c)
+		} else if info.Status == core.StatusRunning && old == core.StatusStopped {
+			// 端口上发现本实例进程（外部手动启动等）：认领
+			s.process = &process.ProcessHandle{PID: info.PID, Started: time.Now()}
+			c := change{id: id, info: info}
+			c.events = append(c.events, struct {
+				evt   reactive.EventType
+				extra map[string]interface{}
+			}{reactive.EventServiceStarted, map[string]interface{}{"reason": "adopted"}})
+			changes = append(changes, c)
+		}
+	}
+	m.mu.Unlock()
+
+	// 锁外发事件，避免 handler 回调死锁
+	for _, c := range changes {
+		for _, ev := range c.events {
+			m.publishServiceEvent(ev.evt, c.id, ev.extra)
+		}
+	}
 }
 
 const maxRestartCount = 3
@@ -885,11 +990,39 @@ func (m *Manager) Uninstall(id string) error {
 	}
 	kind := kindFromID(id)
 	version := s.Info.Version
-	s.Info.PID = 0
-	s.process = nil
-	s.Info.Installed = false
-	s.Info.Status = core.StatusStopped
+	port := s.Info.Port
+	installDir := m.cfg.Get().InstallDir
+	// 从登记表移除并清理依赖记账：已卸载的服务不应继续出现在列表/依赖检查里
+	delete(m.services, id)
+	delete(m.dependents, id)
+	for k, deps := range m.dependents {
+		kept := deps[:0]
+		for _, d := range deps {
+			if d != id {
+				kept = append(kept, d)
+			}
+		}
+		m.dependents[k] = kept
+	}
 	m.mu.Unlock()
+
+	// 接管清理残留进程：上一会话遗留的进程 s.process 为 nil 但仍在运行，
+	// 只停登记过的 PID 会让删目录报"删除失败"且用户看不懂原因。
+	// 按端口 + 安装目录归属识别本实例进程（不误杀外部程序）
+	if port > 0 {
+		if occ := process.FindPIDByPort(port); occ > 0 && exePathMatchesPID(occ, installDir, kind, version) {
+			found := false
+			for _, p := range pids {
+				if p == occ {
+					found = true
+					break
+				}
+			}
+			if !found {
+				pids = append(pids, occ)
+			}
+		}
+	}
 
 	// 只停止本实例自有进程（不按镜像名全局清理），等待其退出后再删除安装目录
 	for _, pid := range pids {
@@ -899,10 +1032,16 @@ func (m *Manager) Uninstall(id string) error {
 	}
 	waitPIDsExited(pids, 3*time.Second)
 
-	installDir := m.cfg.Get().InstallDir
 	binPath := filepath.Join(installDir, "programs", kind, version)
 	if dirExists(binPath) {
 		if err := removeAll(binPath); err != nil {
+			// 卸载失败时恢复登记条目，避免 UI 丢失该服务（可重试）
+			m.mu.Lock()
+			if _, exists := m.services[id]; !exists {
+				m.services[id] = s
+				s.Info.Installed = true
+			}
+			m.mu.Unlock()
 			return fmt.Errorf("删除安装目录失败: %w", err)
 		}
 	}

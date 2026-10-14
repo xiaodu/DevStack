@@ -303,6 +303,11 @@ func (a *App) startup(ctx context.Context) {
 		a.opStore.LogDebug("[STARTUP] 当前安装目录: %s", a.cfg.Get().InstallDir)
 	}
 
+	// ── 周期状态同步：外部杀进程 5s 内自动纠正 UI 状态，兼作事件丢失兜底 ──
+	if a.svcMgr != nil {
+		a.svcMgr.StartBackgroundSync()
+	}
+
 	// ── 开机自启状态与注册表对齐 ──
 	if a.opStore != nil {
 		settings := a.cfg.Get()
@@ -408,6 +413,10 @@ func (a *App) Shutdown() {
 				a.opStore.LogError("[SHUTDOWN] 优雅停止服务失败(已尽力): %v", err)
 			}
 		}
+	}
+	// 运行时（php-cgi/node）同样优雅停止，不再靠 OS 强杀
+	if a.rtMgr != nil {
+		a.rtMgr.Shutdown()
 	}
 }
 

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -104,7 +106,35 @@ func (sm *SnapshotManager) ListSnapshots(ctx context.Context) ([]string, error) 
 		}
 	}
 
+	// 按创建先后排序：时间戳前缀 + 尾部计数器数值。
+	// 不能按文件名字典序——同秒内 -10 会排在 -2 前面，导致恢复/清理选错快照
+	sort.Slice(snapshots, func(i, j int) bool {
+		ti, ci := parseSnapshotKey(snapshots[i])
+		tj, cj := parseSnapshotKey(snapshots[j])
+		if ti != tj {
+			return ti < tj
+		}
+		return ci < cj
+	})
+
 	return snapshots, nil
+}
+
+// parseSnapshotKey 解析 "snapshot-20060102-150405-<n>" 的排序键。
+// 无法解析的（历史遗留/外部文件）排最前，行为与旧字典序基本一致。
+func parseSnapshotKey(id string) (string, int) {
+	parts := strings.Split(id, "-")
+	if len(parts) < 3 || parts[0] != "snapshot" {
+		return id, -1
+	}
+	ts := parts[1] + "-" + parts[2]
+	n := 0
+	if len(parts) >= 4 {
+		if v, err := strconv.Atoi(parts[len(parts)-1]); err == nil {
+			n = v
+		}
+	}
+	return ts, n
 }
 
 func (sm *SnapshotManager) DeleteSnapshot(ctx context.Context, snapshotID string) error {

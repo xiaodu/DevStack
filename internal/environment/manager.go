@@ -141,6 +141,11 @@ func (m *Manager) load() {
 	}
 	var pf persistedFile
 	if err := json.Unmarshal(data, &pf); err != nil {
+		// 配置损坏时不能静默吞掉——那会让用户的环境列表凭空消失且无从恢复。
+		// 保留损坏文件副本供人工修复，再继续用空列表启动。
+		backup := m.filePath + ".corrupt-" + time.Now().Format("20060102-150405")
+		_ = os.WriteFile(backup, data, 0644)
+		fmt.Fprintf(os.Stderr, "[environment] environments.json 解析失败: %v，已备份到 %s\n", err, backup)
 		return
 	}
 	m.deletedBuiltins = pf.DeletedBuiltinIDs

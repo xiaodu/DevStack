@@ -21,6 +21,9 @@ type Manager struct {
 	resMgr    *resource.Manager
 	instances map[string]*Instance
 	idByType  map[core.RuntimeType][]string
+	// job 将运行时进程纳入 Job Object：应用崩溃（非正常退出）时由 OS 兜底回收，
+	// 不再产生孤儿 php-cgi/node 进程。正常退出走 Shutdown 的优雅停止。
+	job *process.Group
 }
 
 func NewManager(cfg *config.Config, procMgr *process.Manager, resMgr *resource.Manager) *Manager {
@@ -31,8 +34,44 @@ func NewManager(cfg *config.Config, procMgr *process.Manager, resMgr *resource.M
 		instances: make(map[string]*Instance),
 		idByType:  make(map[core.RuntimeType][]string),
 	}
+	// Job Object 创建失败不阻断初始化，只是少了崩溃兜底
+	if group, err := process.NewGroup("devstack-runtime"); err == nil {
+		m.job = group
+	}
 	m.scan()
 	return m
+}
+
+// assignJob 将刚拉起的运行时进程纳入 Job Object（应用崩溃时 OS 兜底回收）。
+func (m *Manager) assignJob(pid int, name string) {
+	if m.job == nil || pid <= 0 {
+		return
+	}
+	if err := m.job.AssignPID(pid, name, 5); err != nil {
+		// 纳管失败不影响启动，仅失去崩溃兜底
+		_ = err
+	}
+}
+
+// Shutdown 停止全部运行中的运行时实例并关闭 Job Object。
+func (m *Manager) Shutdown() {
+	m.mu.RLock()
+	ids := make([]string, 0, len(m.instances))
+	for id, inst := range m.instances {
+		if inst.Info.Status == core.StatusRunning || inst.Info.Status == core.StatusStarting {
+			ids = append(ids, id)
+		}
+	}
+	m.mu.RUnlock()
+	for _, id := range ids {
+		if err := m.Stop(id); err != nil {
+			// 尽力而为：单个失败不阻断其余清理
+			continue
+		}
+	}
+	if m.job != nil {
+		_ = m.job.Close()
+	}
 }
 
 func (m *Manager) List() []core.RuntimeInfo {
@@ -349,6 +388,11 @@ func (m *Manager) startPHP(inst *Instance) error {
 	inst.Info.Status = core.StatusRunning
 	inst.Info.Running = true
 	inst.Info.PID = pids[0]
+
+	// 全部 worker 纳入 Job Object（崩溃兜底）
+	for _, pid := range pids {
+		m.assignJob(pid, "php")
+	}
 
 	return nil
 }
