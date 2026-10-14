@@ -149,10 +149,22 @@ onMount(() => {
       .then(resolve, reject)
       .finally(() => clearTimeout(timer))
   })
-.then((settings) => {
+    .then((settings) => {
       applyTheme(settings.theme)
-      api.debugLog('getSettings 成功, installDir=[' + settings.installDir + '] len=' + (settings.installDir?.length || 0) + ' showWizard=' + !settings.installDir)
-      console.log('[DevStack] getSettings installDir:', JSON.stringify(settings.installDir), 'len:', settings.installDir?.length)
+      api.debugLog(
+        'getSettings 成功, installDir=[' +
+          settings.installDir +
+          '] len=' +
+          (settings.installDir?.length || 0) +
+          ' showWizard=' +
+          !settings.installDir,
+      )
+      console.log(
+        '[DevStack] getSettings installDir:',
+        JSON.stringify(settings.installDir),
+        'len:',
+        settings.installDir?.length,
+      )
       if (!settings.installDir) showWizard = true
     })
     .catch((e) => {

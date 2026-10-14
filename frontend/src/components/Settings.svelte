@@ -7,7 +7,12 @@ let systemInfo = $state({})
 let loading = $state(true)
 let configPath = $state('')
 let saveTimer: ReturnType<typeof setTimeout> | null = null
-const infoLabels: Record<string, string> = { platform: '操作系统', arch: '架构', appVersion: '版本', installDir: '安装目录' }
+const infoLabels: Record<string, string> = {
+  platform: '操作系统',
+  arch: '架构',
+  appVersion: '版本',
+  installDir: '安装目录',
+}
 
 async function load() {
   try {
