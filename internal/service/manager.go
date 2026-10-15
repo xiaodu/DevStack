@@ -661,9 +661,22 @@ func (m *Manager) Stop(id string) error {
 			m.orch.ReleasePID(id, pid)
 		}
 
-		// 复核真实状态：端口仍被本实例进程监听说明没停掉，绝不向上层谎报"已停止"，
-		// 否则 UI 显示已停止而进程还在跑，下次 Start 还会被幂等跳过
-		if occ := process.FindPIDByPort(port); occ > 0 && exePathMatchesPID(occ, installDir, kind, version) {
+		// 复核真实状态：端口仍被本实例进程监听说明没停掉。
+		// 先做一次最终强制终止（provider 可能漏杀 worker/孤儿进程树），再复核；
+		// 仍不干净才如实报错，绝不谎报"已停止"（否则 UI 显示已停而进程还在，下次 Start 被幂等跳过）。
+		occupied := func() int {
+			if o := process.FindPIDByPort(port); o > 0 && exePathMatchesPID(o, installDir, kind, version) {
+				return o
+			}
+			return 0
+		}
+		if occ := occupied(); occ > 0 {
+			_ = m.procMgr.Stop(occ) // taskkill /F /T，覆盖 provider 漏杀的进程
+			for i := 0; i < 10 && occupied() > 0; i++ {
+				time.Sleep(200 * time.Millisecond)
+			}
+		}
+		if occ := occupied(); occ > 0 {
 			msg := fmt.Sprintf("停止失败: 进程 PID %d 仍在监听端口 %d", occ, port)
 			if stopErr != nil {
 				msg = "停止失败: " + stopErr.Error()
