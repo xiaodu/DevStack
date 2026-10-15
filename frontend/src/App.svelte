@@ -15,7 +15,7 @@ import GlobalLoading from './lib/GlobalLoading.svelte'
 import GlobalOperation from './lib/GlobalOperation.svelte'
 import GlobalToast from './lib/GlobalToast.svelte'
 import { safeInvoke } from './lib/safeInvoke'
-import { addToast, nanoOperation, operation, pushToast, refreshSignal, runOperation, syncInfo } from './lib/stores'
+import { addToast, nanoBusy, nanoOperation, operation, pushToast, refreshSignal, runOperation, syncInfo } from './lib/stores'
 
 let currentView = $state('dashboard')
 let showWizard = $state(false)
@@ -238,6 +238,8 @@ async function stopAll() {
   })
 }
 
+let restartingNginx = $derived(($nanoBusy['restart:nginx'] || 0) > 0)
+
 async function restartNginx() {
   // 获取当前环境中的 nginx 服务完整 ID（如 nginx@1.24.0）
   const env = await api.getEnvironment().catch(() => ({ services: {} }))
@@ -279,8 +281,12 @@ let pageTitle = $derived(
           <button class="btn btn-circle btn-sm bg-success text-white border-none hover:brightness-110" title="激活当前项目所需环境" onclick={startAll} disabled={$operation.active}>
             <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16"><path d="M8 5v14l11-7z"/></svg>
           </button>
-          <button class="btn btn-circle btn-sm bg-warning text-white border-none hover:brightness-110" title={nginxRunning ? '重启 Nginx' : 'Nginx 未运行'} onclick={restartNginx} disabled={$operation.active || !nginxRunning}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+          <button class="btn btn-circle btn-sm bg-warning text-white border-none hover:brightness-110" title={nginxRunning ? '重启 Nginx' : 'Nginx 未运行'} onclick={restartNginx} disabled={$operation.active || restartingNginx || !nginxRunning}>
+            {#if restartingNginx}
+              <span class="loading loading-spinner loading-xs"></span>
+            {:else}
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+            {/if}
           </button>
           <button class="btn btn-circle btn-sm bg-error text-white border-none hover:brightness-110" title="停止全部服务" onclick={stopAll} disabled={$operation.active}>
             <svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>

@@ -33,6 +33,23 @@ export function endLoading() {
   nanoLoading.set(next > 0 ? next : 0)
 }
 
+// ── 按钮级 loading ──
+// 每个 safeInvoke 调用按 key 记账到 nanoBusy（key→在途计数），组件读取 $nanoBusy[key]>0
+// 给对应按钮显示 spinner + 禁用，替代"任何操作都弹全屏遮罩阻断整个 UI"。
+export const nanoBusy = atom<Record<string, number>>({})
+export function beginBusy(key: string) {
+  const cur = nanoBusy.get()
+  nanoBusy.set({ ...cur, [key]: (cur[key] || 0) + 1 })
+}
+export function endBusy(key: string) {
+  const cur = nanoBusy.get()
+  const n = (cur[key] || 0) - 1
+  const next = { ...cur }
+  if (n > 0) next[key] = n
+  else delete next[key]
+  nanoBusy.set(next)
+}
+
 // 后台同步状态（用于状态栏展示，区别于全屏 loading）
 export interface SyncInfo {
   syncing: boolean

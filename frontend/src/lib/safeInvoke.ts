@@ -1,4 +1,4 @@
-import { beginLoading, endLoading, nanoLoading, nanoStatusMsg, pushToast } from './stores'
+import { beginBusy, beginLoading, endBusy, endLoading, nanoLoading, nanoStatusMsg, pushToast } from './stores'
 
 /*
  * ── Debounce map ──
@@ -58,6 +58,11 @@ export interface SafeInvokeOptions {
    * 需要调用方感知失败并做流程控制时（如 runOperation）置 true。
    */
   rethrow?: boolean
+  /**
+   * 是否弹全屏阻断遮罩（默认 false）。
+   * 默认只记 nanoBusy[key]，由按钮自行显示 spinner；仅少数需要锁住整个 UI 的操作置 true。
+   */
+  blocking?: boolean
 }
 
 export async function safeInvoke(
@@ -81,6 +86,7 @@ export async function safeInvoke(
     onSuccess,
     onError,
     rethrow = false,
+    blocking = false,
   } = opts
 
   // ── Debounce: abort if another call with same key is in-flight ──
@@ -90,17 +96,24 @@ export async function safeInvoke(
     return
   }
 
-  // ── Enter loading ──
-  beginLoading()
-  if (statusMsg) nanoStatusMsg.set(statusMsg)
+  // ── Enter busy ──
+  // 默认只做按钮级 busy 记账，不弹全屏遮罩；blocking 时才锁住整个 UI。
+  beginBusy(key)
+  if (blocking) {
+    beginLoading()
+    if (statusMsg) nanoStatusMsg.set(statusMsg)
+  }
 
-  // 遮罩计数只减一次：安全超时与 finally 二者取先者触发（并发时不误伤其它在途调用）。
+  // 遮罩/计数只减一次：安全超时与 finally 二者取先者触发（并发时不误伤其它在途调用）。
   let settled = false
   const settle = () => {
     if (settled) return
     settled = true
-    if (nanoLoading.get() > 0) endLoading()
-    if (nanoLoading.get() === 0) nanoStatusMsg.set('')
+    endBusy(key)
+    if (blocking) {
+      if (nanoLoading.get() > 0) endLoading()
+      if (nanoLoading.get() === 0) nanoStatusMsg.set('')
+    }
   }
 
   const safetyTimeout = setTimeout(() => {

@@ -3,9 +3,15 @@ import { createEventDispatcher, onMount } from 'svelte'
 import { run } from 'svelte/legacy'
 import { api } from '../lib/api'
 import { safeInvoke } from '../lib/safeInvoke'
+import { nanoBusy } from '../lib/stores'
 
 let { service, installDir = '' } = $props()
 const dispatch = createEventDispatcher()
+
+const toggleKey = `service:toggle:${service.id}`
+const saveKey = `service:savecfg:${service.id}`
+let toggling = $derived(($nanoBusy[toggleKey] || 0) > 0)
+let saving = $derived(($nanoBusy[saveKey] || 0) > 0)
 
 let mc = $state<Record<string, any>>({})
 let configLoading = $state(false)
@@ -130,6 +136,7 @@ async function save() {
     if (port) vals.port = port.value
   }
   await safeInvoke(
+    saveKey,
     async () => {
       await api.saveServiceConfig(service.id, vals)
       if (service.kind === 'mysql') {
@@ -144,6 +151,7 @@ async function save() {
 
 async function toggle() {
   await safeInvoke(
+    toggleKey,
     async () => {
       if (service.running) await api.stopService(service.id)
       else await api.startService(service.id)
@@ -175,7 +183,8 @@ run(() => {
     <span class="text-base-content/70">{service.running ? '运行中' : '已停止'}</span>
     {#if service.running && service.uptime}<span class="text-base-content/60">运行 {service.uptime}</span>{/if}
     {#if service.port}<span class="text-xs px-2 py-0.5 rounded bg-primary/10 text-primary">端口 {service.port}</span>{/if}
-    <button class="btn btn-xs ml-auto {service.running ? 'btn-error' : 'btn-success'}" onclick={toggle}>
+    <button class="btn btn-xs ml-auto {service.running ? 'btn-error' : 'btn-success'}" onclick={toggle} disabled={toggling}>
+      {#if toggling}<span class="loading loading-spinner loading-xs"></span>{/if}
       {service.running ? '停止' : '启动'}
     </button>
   </div>
@@ -339,7 +348,9 @@ run(() => {
 
   {#if service.kind === 'mysql' || service.kind === 'redis'}
     <div class="flex items-center gap-3 mt-6 pt-4 border-t border-base-300">
-      <button class="btn btn-primary" onclick={save}>保存设置</button>
+      <button class="btn btn-primary" onclick={save} disabled={saving}>
+        {#if saving}<span class="loading loading-spinner loading-xs"></span>{/if}保存设置
+      </button>
       <span class="text-xs text-base-content/50">{service.kind === 'mysql' ? '配置修改与密码修改后需重启生效' : 'Redis 配置修改后需重启生效'}</span>
     </div>
   {/if}

@@ -2,12 +2,18 @@
 import { createEventDispatcher, onMount } from 'svelte'
 import { api } from '../lib/api'
 import { safeInvoke } from '../lib/safeInvoke'
+import { nanoBusy } from '../lib/stores'
 
 let { service, installDir = '' }: { service: any; installDir?: string } = $props()
 const dispatch = createEventDispatcher()
 
 let nc = $state<Record<string, any>>({})
 let configLoading = $state(false)
+
+const toggleKey = `service:toggle:${service.id}`
+const saveKey = `service:savecfg:${service.id}`
+let toggling = $derived(($nanoBusy[toggleKey] || 0) > 0)
+let saving = $derived(($nanoBusy[saveKey] || 0) > 0)
 
 const bodySizeOptions = ['1M', '8M', '16M', '32M', '64M', '128M', '256M', '512M', '1024M']
 const recommendedConfig: Record<string, string> = {
@@ -53,6 +59,7 @@ function loadRecommended() {
 
 async function save() {
   await safeInvoke(
+    saveKey,
     async () => {
       await api.saveServiceConfig(service.id, {
         workerConnections: String(intVal('workerConnections')),
@@ -71,6 +78,7 @@ async function save() {
 
 async function toggle() {
   await safeInvoke(
+    toggleKey,
     async () => {
       if (service.running) await api.stopService(service.id)
       else await api.startService(service.id)
@@ -95,7 +103,8 @@ async function toggle() {
     <span class="text-base-content/70">{service.running ? '运行中' : '已停止'}</span>
     {#if service.running && service.uptime}<span class="text-base-content/60">运行 {service.uptime}</span>{/if}
     {#if service.port}<span class="text-xs px-2 py-0.5 rounded bg-primary/10 text-primary">端口 {service.port}</span>{/if}
-    <button class="btn btn-xs ml-auto {service.running ? 'btn-error' : 'btn-success'}" onclick={toggle}>
+    <button class="btn btn-xs ml-auto {service.running ? 'btn-error' : 'btn-success'}" onclick={toggle} disabled={toggling}>
+      {#if toggling}<span class="loading loading-spinner loading-xs"></span>{/if}
       {service.running ? '停止' : '启动'}
     </button>
   </div>
@@ -162,7 +171,9 @@ async function toggle() {
       </div>
 
       <div class="flex items-center gap-3 mt-6 pt-4 border-t border-base-300">
-        <button class="btn btn-primary" onclick={save}>保存并生效</button>
+        <button class="btn btn-primary" onclick={save} disabled={saving}>
+          {#if saving}<span class="loading loading-spinner loading-xs"></span>{/if}保存并生效
+        </button>
         <span class="text-xs text-base-content/50">保存后自动重新生成配置文件并重启 Nginx</span>
       </div>
     {/if}
