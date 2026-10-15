@@ -3,18 +3,30 @@ import { onDestroy, onMount } from 'svelte'
 import { api } from '../lib/api'
 
 let activeTab = $state('app')
-let services = $state([])
-let selectedService = $state(null)
-let logEntries = $state([])
-let logFiles = $state([])
-let selectedLogFile = $state(null)
+let services = $state<any[]>([])
+let selectedService = $state<string | null>(null)
+let logEntries = $state<any[]>([])
+let logFiles = $state<string[]>([])
+let selectedLogFile = $state<string | null>(null)
 let autoScroll = $state(true)
-let logContainer = $state()
+let logContainer = $state<HTMLElement>()
 let loading = $state(true)
-let refreshInterval = $state()
-let loadedService = $state(null) // 当前已加载日志所属服务，用于区分"切换服务"与"刷新"
+let refreshInterval = $state<number>()
+let loadedService = $state<string | null>(null) // 当前已加载日志所属服务，用于区分"切换服务"与"刷新"
 
-const LOG_CAP = 800 // 上限，防止长时间追加把 DOM 撑爆
+const LOG_CAP = 800 // 数据上限，防止长时间追加把内存/数组撑爆
+const RENDER_STEP = 300 // 每次"加载更早"新增渲染行数
+let renderWindow = $state(200) // 当前渲染的最近行数（底部窗口），限制一次性进 DOM 的节点数
+
+// 底部锚定窗口：只渲染最近 renderWindow 行；更早的行按需加载，避免 800 行全量进 DOM。
+let visibleEntries = $derived(
+  renderWindow >= logEntries.length ? logEntries : logEntries.slice(logEntries.length - renderWindow),
+)
+let hasEarlier = $derived(logEntries.length > visibleEntries.length)
+
+function loadEarlier() {
+  renderWindow = Math.min(renderWindow + RENDER_STEP, logEntries.length)
+}
 
 function toEntries(lines: string[]) {
   return lines.slice(-LOG_CAP).map((line, i) => ({ key: `${i}:${line}`, time: extractLogLevel(line), content: line }))
@@ -29,7 +41,7 @@ function applyEntries(next: any[]) {
   logEntries = next
 }
 
-function extractLogLevel(line) {
+function extractLogLevel(line: string) {
   const m = line.match(/level=(\w+)/)
   return m ? m[1] : ''
 }
@@ -54,7 +66,10 @@ async function loadServiceLogs() {
   }
   // 仅切换服务时先清空；同服务刷新保持旧内容，避免"清空→重填"闪烁（P2）。
   const switching = loadedService !== selectedService
-  if (switching) logEntries = []
+  if (switching) {
+    logEntries = []
+    renderWindow = 200
+  }
   try {
     const logs = await api.getLogs(selectedService)
     const next = (logs || []).slice(-LOG_CAP).map((e: any, i: number) => ({
@@ -75,6 +90,7 @@ async function loadServiceLogs() {
 
 async function loadAppLogs() {
   loading = true
+  renderWindow = 200
   try {
     logFiles = await api.getLogFiles()
     if (!selectedLogFile && logFiles.length > 0) selectedLogFile = logFiles[logFiles.length - 1]
@@ -106,7 +122,7 @@ async function clearLogs() {
   }
 }
 
-function switchTab(tab) {
+function switchTab(tab: string) {
   activeTab = tab
   loading = true
   if (tab === 'app') loadAppLogs()
@@ -167,7 +183,12 @@ onDestroy(() => clearInterval(refreshInterval))
     {:else if logEntries.length === 0}
       <div class="text-center py-10 text-slate-500">暂无日志</div>
     {:else}
-      {#each logEntries as entry}
+      {#if hasEarlier}
+        <button class="btn btn-xs btn-outline btn-info w-full mb-2 text-slate-400 border-slate-600 hover:bg-slate-700" onclick={loadEarlier}>
+          ↑ 加载更早（还有 {logEntries.length - visibleEntries.length} 行未显示）
+        </button>
+      {/if}
+      {#each visibleEntries as entry}
         <div class="flex gap-2.5">
           {#if entry.time}
             <span class="text-slate-500 shrink-0">[{entry.time}]</span>
