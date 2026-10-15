@@ -53,6 +53,9 @@ type App struct {
 
 	downloadMu sync.Mutex               // 保护 downloads 单飞去重表
 	downloads  map[string]struct{}      // 正在下载中的 service@version
+
+	overflowMu    sync.Mutex // 保护事件丢弃去抖定时器
+	overflowTimer *time.Timer
 }
 
 var serviceNames = map[string]string{
@@ -372,8 +375,29 @@ func (a *App) startup(ctx context.Context) {
 				})
 			})
 		}
+		// 事件丢弃兜底：桥接是 fire-and-forget，缓冲满/并发超限时会丢事件，
+		// 服务态有 5s 周期调和兜底，非服务态靠这个去抖 overflow 信号让前端重拉。
+		a.reactiveEng.SetOnDropped(func(_ *reactive.Event) { a.notifyEventOverflow(ctx) })
 		a.opStore.LogInfo("[STARTUP] 响应式事件桥接已启动, 注册 %d 个事件类型", len(eventTypes))
 	}
+}
+
+// notifyEventOverflow 在响应式事件被丢弃时，去抖触发一次前端"全量刷新"信号。
+// 事件桥接是 fire-and-forget，缓冲满或并发超限时事件会被丢弃；服务态由 5s 周期调和兜底，
+// 非服务态（环境/项目/配置）没有周期重发，靠这个 overflow 信号让前端重拉快照，
+// 避免 UI 永久停在丢弃前的旧状态。突发多条丢弃合并为一次刷新。
+func (a *App) notifyEventOverflow(ctx context.Context) {
+	a.overflowMu.Lock()
+	defer a.overflowMu.Unlock()
+	if a.overflowTimer != nil {
+		return // 去抖窗口内已有待发的刷新，合并本次
+	}
+	a.overflowTimer = time.AfterFunc(300*time.Millisecond, func() {
+		a.overflowMu.Lock()
+		a.overflowTimer = nil
+		a.overflowMu.Unlock()
+		wailsruntime.EventsEmit(ctx, "reactive:overflow", map[string]interface{}{})
+	})
 }
 
 // ==================== Environment APIs ====================
@@ -1872,6 +1896,7 @@ func (a *App) reinitManagers(installDir string) error {
 				})
 			})
 		}
+		a.reactiveEng.SetOnDropped(func(_ *reactive.Event) { a.notifyEventOverflow(a.ctx) })
 	}
 
 	// 重新加载 Procfile

@@ -100,14 +100,19 @@ func newReconcilerTestEnv(t *testing.T, failKinds map[string]bool) *reconcilerTe
 	config.EnsureDirs(dir)
 	cfg := config.NewConfigForDir(dir)
 
-	// registerDefaults 只注册 installDir/programs/<kind>/<version> 已存在的版本
-	install := func(kind, version string) {
-		if err := os.MkdirAll(filepath.Join(dir, "programs", kind, version), 0755); err != nil {
+	// registerDefaults 只注册 installDir/programs/<kind>/<version> 主可执行文件存在的版本
+	// （nginx 等已知类型校验 exe，未知类型退化为目录存在判断）。
+	install := func(kind, version, exeRel string) {
+		root := filepath.Join(dir, "programs", kind, version)
+		if err := os.MkdirAll(filepath.Join(root, filepath.Dir(exeRel)), 0755); err != nil {
 			t.Fatalf("创建安装目录失败: %v", err)
 		}
+		if err := os.WriteFile(filepath.Join(root, exeRel), []byte("fake"), 0755); err != nil {
+			t.Fatalf("创建可执行文件失败: %v", err)
+		}
 	}
-	install("memcached", "1.6.0")
-	install("nginx", "1.26.0")
+	install("memcached", "1.6.0", "memcached.exe")
+	install("nginx", "1.26.0", "nginx.exe")
 
 	procMgr := process.NewManager()
 	resMgr := resource.NewManager(filepath.Join(dir, "config"))

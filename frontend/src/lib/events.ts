@@ -86,6 +86,7 @@ export function subscribeReactiveEvents() {
     'reactive:project.deleted',
     'reactive:project.enabled',
     'reactive:project.disabled',
+    'reactive:overflow', // 后端事件丢弃兜底：合并触发一次全量刷新
   ]
 
   const unsubs = events.map((name) =>
