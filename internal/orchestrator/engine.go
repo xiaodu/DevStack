@@ -564,6 +564,8 @@ func (e *Engine) Stop(ctx context.Context, name string) error {
 	}
 	oldState := svc.State
 	svc.State = StateStopping
+	// 在锁内快照 PID，停止/等待全程用这个局部值，避免无锁反复读 svc.PID 的数据竞争。
+	pid := svc.PID
 	e.mu.Unlock()
 
 	e.notifyStateChange(name, oldState, StateStopping, nil)
@@ -579,14 +581,14 @@ func (e *Engine) Stop(ctx context.Context, name string) error {
 		if err := e.stopFunc(name); err != nil {
 			e.log(fmt.Sprintf("停止 %s 失败: %v", name, err))
 			// 回退到强制停止
-			e.group.ForceStop(svc.PID)
+			e.group.ForceStop(pid)
 		}
 	} else {
 		// 回退到直接停止（Procfile 模式）
-		if err := e.group.Stop(svc.PID); err != nil {
+		if err := e.group.Stop(pid); err != nil {
 			// 优雅停止失败，强制停止
 			e.log(fmt.Sprintf("优雅停止 %s 失败，尝试强制停止: %v", name, err))
-			e.group.ForceStop(svc.PID)
+			e.group.ForceStop(pid)
 		}
 	}
 
@@ -598,7 +600,7 @@ func (e *Engine) Stop(ctx context.Context, name string) error {
 	// markStopped 复核进程真的退出后才允许标记 Stopped；
 	// 进程仍在运行却置 Stopped 是"记账性僵尸"——后续 Start 会被幂等跳过，用户被欺骗
 	markStopped := func() bool {
-		if isPIDRunning(svc.PID) {
+		if isPIDRunning(pid) {
 			return false
 		}
 		e.mu.Lock()
@@ -614,18 +616,18 @@ func (e *Engine) Stop(ctx context.Context, name string) error {
 		select {
 		case <-ctx.Done():
 			if !markStopped() {
-				err := fmt.Errorf("停止 %s 被取消: 进程 %d 仍在运行", name, svc.PID)
+				err := fmt.Errorf("停止 %s 被取消: 进程 %d 仍在运行", name, pid)
 				e.setError(name, err)
 				return err
 			}
 			return ctx.Err()
 		case <-deadline:
 			// 超时，强制停止
-			e.group.ForceStop(svc.PID)
+			e.group.ForceStop(pid)
 			// 强杀后给进程 1 秒退出时间再复核
 			time.Sleep(1 * time.Second)
 			if !markStopped() {
-				err := fmt.Errorf("停止 %s 失败: 强制终止后进程 %d 仍在运行", name, svc.PID)
+				err := fmt.Errorf("停止 %s 失败: 强制终止后进程 %d 仍在运行", name, pid)
 				e.setError(name, err)
 				return err
 			}
