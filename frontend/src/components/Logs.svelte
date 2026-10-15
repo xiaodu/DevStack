@@ -12,6 +12,22 @@ let autoScroll = $state(true)
 let logContainer = $state()
 let loading = $state(true)
 let refreshInterval = $state()
+let loadedService = $state(null) // 当前已加载日志所属服务，用于区分"切换服务"与"刷新"
+
+const LOG_CAP = 800 // 上限，防止长时间追加把 DOM 撑爆
+
+function toEntries(lines: string[]) {
+  return lines.slice(-LOG_CAP).map((line, i) => ({ key: `${i}:${line}`, time: extractLogLevel(line), content: line }))
+}
+
+// 与现有列表逐项比对，内容完全一致时保持原数组引用，避免每 3s 无谓重渲染 500+ 行（P2）。
+function applyEntries(next: any[]) {
+  const prev = logEntries
+  if (prev.length === next.length && prev.every((e, i) => e.content === next[i].content)) {
+    return
+  }
+  logEntries = next
+}
 
 function extractLogLevel(line) {
   const m = line.match(/level=(\w+)/)
@@ -32,14 +48,26 @@ async function loadServices() {
 async function loadServiceLogs() {
   if (!selectedService) {
     loading = false
+    logEntries = []
+    loadedService = null
     return
   }
-  logEntries = []
+  // 仅切换服务时先清空；同服务刷新保持旧内容，避免"清空→重填"闪烁（P2）。
+  const switching = loadedService !== selectedService
+  if (switching) logEntries = []
   try {
-    logEntries = await api.getLogs(selectedService)
+    const logs = await api.getLogs(selectedService)
+    const next = (logs || []).slice(-LOG_CAP).map((e: any, i: number) => ({
+      key: `${i}:${e?.content ?? ''}`,
+      time: e?.time ?? '',
+      content: e?.content ?? '',
+    }))
+    if (switching) logEntries = next
+    else applyEntries(next)
+    loadedService = selectedService
   } catch (e) {
     console.error(e)
-    logEntries = []
+    if (switching) logEntries = []
   } finally {
     loading = false
   }
@@ -51,10 +79,7 @@ async function loadAppLogs() {
     logFiles = await api.getLogFiles()
     if (!selectedLogFile && logFiles.length > 0) selectedLogFile = logFiles[logFiles.length - 1]
     if (selectedLogFile)
-      logEntries = (await api.readLogFile(selectedLogFile)).map((line) => ({
-        time: extractLogLevel(line),
-        content: line,
-      }))
+      logEntries = toEntries((await api.readLogFile(selectedLogFile)) || [])
   } catch (e) {
     console.error(e)
   } finally {
@@ -64,7 +89,8 @@ async function loadAppLogs() {
 
 async function loadRecentAppLogs() {
   try {
-    logEntries = (await api.getRecentLogLines(500)).map((line) => ({ time: extractLogLevel(line), content: line }))
+    // 轮询走增量语义：内容没变就不重排 DOM（P2）。
+    applyEntries(toEntries((await api.getRecentLogLines(LOG_CAP)) || []))
   } catch (e) {
     console.error(e)
   }
