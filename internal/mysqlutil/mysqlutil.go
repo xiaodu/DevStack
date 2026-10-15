@@ -25,6 +25,80 @@ type Config struct {
 func (c Config) mysqlExe() string { return filepath.Join(c.MySQLDir, "bin", "mysqld.exe") }
 func (c Config) mysqlBin() string { return filepath.Join(c.MySQLDir, "bin", "mysql.exe") }
 
+// InitializeDataDir 初始化 MySQL 数据目录（创建系统表），幂等：已初始化则直接返回。
+//
+// 版本策略：
+//   - >= 5.7：mysqld --initialize-insecure（创建无密码 root@localhost）。
+//   - <  5.7（5.5/5.6）：--initialize-insecure 尚不存在，需 bin/mysql_install_db.exe；
+//     而官方 ZIP 发行包通常只带 scripts/mysql_install_db.pl（需 perl，终端用户没有），
+//     不含该 exe。此时返回可操作的错误，而不是让 mysqld 以普通服务模式启动后
+//     抛出 "Can't change dir / Table 'mysql.plugin' doesn't exist" 这类误导性崩溃日志。
+func InitializeDataDir(c Config) error {
+	if err := os.MkdirAll(c.DataDir, 0755); err != nil {
+		return fmt.Errorf("创建 MySQL 数据目录失败: %w", err)
+	}
+	if initialized(c.DataDir) {
+		return nil
+	}
+
+	if versionLessThan(c.Version, 5, 7) {
+		installer := filepath.Join(c.MySQLDir, "bin", "mysql_install_db.exe")
+		if !fileExists(installer) {
+			return fmt.Errorf(
+				"MySQL %s 的 ZIP 发行包不含 mysql_install_db.exe，无法自动初始化数据目录；"+
+					"请改用 MySQL 5.7+，或手动初始化 %s",
+				c.Version, c.DataDir)
+		}
+		cmd := exec.Command(installer, "--datadir="+c.DataDir)
+		cmd.Dir = c.MySQLDir
+		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("mysql_install_db 初始化数据目录失败: %v\n%s", err, string(out))
+		}
+		return nil
+	}
+
+	args := []string{"--initialize-insecure", "--datadir=" + c.DataDir}
+	if c.MyIni != "" && fileExists(c.MyIni) {
+		args = append([]string{"--defaults-file=" + c.MyIni}, args...)
+	}
+	// 可执行文件缺失（如未真正安装的 mock 场景）时静默跳过，与旧 service.Configure 行为一致；
+	// 真实未安装的服务已被 versionInstalled 的 exe 判据挡在注册之外，不会走到这里。
+	if !fileExists(c.mysqlExe()) {
+		return nil
+	}
+	cmd := exec.Command(c.mysqlExe(), args...)
+	cmd.Dir = c.MySQLDir
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("初始化 MySQL 数据目录失败: %v\n%s", err, string(out))
+	}
+	return nil
+}
+
+// initialized 判断数据目录是否已建好系统库（存在 mysql/ 子目录）。
+func initialized(dataDir string) bool {
+	fi, err := os.Stat(filepath.Join(dataDir, "mysql"))
+	return err == nil && fi.IsDir()
+}
+
+// versionLessThan 解析 "5.6.51" 这类版本串并与 (maj,min) 比较；解析失败按不低于处理。
+func versionLessThan(version string, maj, min int) bool {
+	parts := strings.Split(version, ".")
+	if len(parts) < 2 {
+		return false
+	}
+	major, err1 := strconv.Atoi(parts[0])
+	minor, err2 := strconv.Atoi(parts[1])
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	if major != maj {
+		return major < maj
+	}
+	return minor < min
+}
+
 type probeResult int
 
 const (

@@ -4,9 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"syscall"
 	"time"
 
 	"github.com/xiaodu/DevStack/internal/config"
@@ -219,13 +217,15 @@ func (i *MySQLInstance) Start(ctx context.Context) error {
 
 	i.status = core.StatusStarting
 
-	// 数据目录不存在或为空时，先执行初始化，否则 mysqld 会立即退出
-	if !dirExists(i.dataDir) || isEmptyDir(i.dataDir) {
-		initCmd := &initCommand{mysqlExe: i.mysqlExe, dataDir: i.dataDir}
-		if err := initCmd.run(); err != nil {
-			i.status = core.StatusError
-			return err
-		}
+	// 数据目录未初始化时先建系统表，否则 mysqld 会立即退出（版本策略见 mysqlutil）
+	if err := mysqlutil.InitializeDataDir(mysqlutil.Config{
+		MySQLDir: i.mysqlDir,
+		DataDir:  i.dataDir,
+		Version:  i.version,
+		MyIni:    i.configPath(),
+	}); err != nil {
+		i.status = core.StatusError
+		return err
 	}
 
 	// 确保日志目录存在（my.ini 中 log_error/slow_query_log_file 指向此处）
@@ -423,39 +423,4 @@ func (i *MySQLInstance) LogPaths() []string {
 
 func (i *MySQLInstance) Metrics(ctx context.Context) (Metrics, error) {
 	return Metrics{}, nil
-}
-
-type initCommand struct {
-	mysqlExe string
-	dataDir  string
-}
-
-func (c *initCommand) run() error {
-	if err := os.MkdirAll(c.dataDir, 0755); err != nil {
-		return fmt.Errorf("创建 MySQL 数据目录失败: %w", err)
-	}
-	args := []string{
-		"--initialize-insecure",
-		"--datadir=" + c.dataDir,
-	}
-	cmd := exec.Command(c.mysqlExe, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("MySQL 数据目录初始化失败: %v\n%s", err, string(out))
-	}
-	return nil
-}
-
-func dirExists(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && info.IsDir()
-}
-
-func isEmptyDir(path string) bool {
-	entries, err := os.ReadDir(path)
-	if err != nil {
-		return true
-	}
-	return len(entries) == 0
 }

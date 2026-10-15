@@ -51,7 +51,9 @@ func (c *Compensator) RenameFile(src, dest string) StepFunc {
 
 func (c *Compensator) RestoreBackup(backupPath, targetPath string) StepFunc {
 	return func(ctx context.Context) error {
-		if err := os.Remove(targetPath); err != nil && !os.IsNotExist(err) {
+		// targetPath 可能是目录（如 conf/），RemoveAll 才能清掉非空目录，
+		// 否则回滚报 "The directory is not empty" 导致失败事务留下垃圾。
+		if err := os.RemoveAll(targetPath); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("remove target %s: %w", targetPath, err)
 		}
 		if err := os.Rename(backupPath, targetPath); err != nil {

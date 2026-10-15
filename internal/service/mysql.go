@@ -10,6 +10,7 @@ import (
 
 	"github.com/xiaodu/DevStack/internal/config"
 	"github.com/xiaodu/DevStack/internal/core"
+	"github.com/xiaodu/DevStack/internal/mysqlutil"
 	"github.com/xiaodu/DevStack/internal/process"
 	"github.com/xiaodu/DevStack/internal/resource"
 )
@@ -38,18 +39,13 @@ func (h *MySQLHandler) Configure(s *ServiceInstance, cfg *config.Config, resMgr 
 		}
 	}
 
-	if !dirExists(dataDir) {
-		mysqld := filepath.Join(mysqlDir, "bin", "mysqld.exe")
-		if fileExists(mysqld) {
-			cmd := exec.Command(mysqld, fmt.Sprintf("--defaults-file=%s", myIni), "--initialize-insecure")
-			cmd.Dir = mysqlDir
-			cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-			if out, err := cmd.CombinedOutput(); err != nil {
-				return fmt.Errorf("初始化 MySQL 数据目录失败: %w\n输出: %s", err, string(out))
-			}
-		}
-	}
-	return nil
+	// 初始化数据目录（幂等：已建系统库则跳过；版本策略见 mysqlutil.InitializeDataDir）
+	return mysqlutil.InitializeDataDir(mysqlutil.Config{
+		MySQLDir: mysqlDir,
+		DataDir:  dataDir,
+		Version:  s.Info.Version,
+		MyIni:    myIni,
+	})
 }
 
 func (h *MySQLHandler) SaveConfig(s *ServiceInstance, cfg *config.Config, values map[string]string) error {
