@@ -11,7 +11,9 @@ export interface Toast {
   type: string
 }
 
-export const nanoLoading = atom(false)
+// 全局遮罩用引用计数而非布尔：并发多个 IPC 时，先结束的那个不应提前关掉遮罩（F2）。
+// 仅 beginLoading/endLoading 会改它，值 >0 即显示。
+export const nanoLoading = atom(0)
 export const nanoStatusMsg = atom('')
 export const nanoToasts = atom<Toast[]>([])
 export const nanoRefresh = atom(0)
@@ -22,6 +24,15 @@ export const nanoSettings = atom<any>({})
 export const nanoSysInfo = atom<any>({})
 export const nanoLastError = atom<any>(null)
 
+// beginLoading/endLoading 成对使用；endLoading 由调用方保证每次 begin 恰好调用一次。
+export function beginLoading() {
+  nanoLoading.set(nanoLoading.get() + 1)
+}
+export function endLoading() {
+  const next = nanoLoading.get() - 1
+  nanoLoading.set(next > 0 ? next : 0)
+}
+
 // 后台同步状态（用于状态栏展示，区别于全屏 loading）
 export interface SyncInfo {
   syncing: boolean
@@ -30,7 +41,7 @@ export interface SyncInfo {
 }
 export const nanoSyncInfo = atom<SyncInfo>({ syncing: false, msg: '', at: '' })
 
-export const nanoIsBusy = computed(nanoLoading, (v) => v)
+export const nanoIsBusy = computed(nanoLoading, (v) => v > 0)
 
 /*
  * ── 环境编排操作状态 ──

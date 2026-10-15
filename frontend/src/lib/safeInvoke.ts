@@ -1,4 +1,4 @@
-import { nanoLoading, nanoStatusMsg, pushToast } from './stores'
+import { beginLoading, endLoading, nanoLoading, nanoStatusMsg, pushToast } from './stores'
 
 /*
  * ── Debounce map ──
@@ -91,13 +91,21 @@ export async function safeInvoke(
   }
 
   // ── Enter loading ──
-  nanoLoading.set(true)
+  beginLoading()
   if (statusMsg) nanoStatusMsg.set(statusMsg)
+
+  // 遮罩计数只减一次：安全超时与 finally 二者取先者触发（并发时不误伤其它在途调用）。
+  let settled = false
+  const settle = () => {
+    if (settled) return
+    settled = true
+    if (nanoLoading.get() > 0) endLoading()
+    if (nanoLoading.get() === 0) nanoStatusMsg.set('')
+  }
 
   const safetyTimeout = setTimeout(() => {
     console.warn(`[safeInvoke] safety timeout for "${key}" after ${timeoutMs}ms`)
-    nanoLoading.set(false)
-    nanoStatusMsg.set('')
+    settle()
     debounceCleanup(key)
   }, timeoutMs)
 
@@ -118,8 +126,7 @@ export async function safeInvoke(
     if (rethrow) throw e
     return undefined
   } finally {
-    nanoLoading.set(false)
-    nanoStatusMsg.set('')
+    settle()
     debounceCleanup(key)
   }
 }
