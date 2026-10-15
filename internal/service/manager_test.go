@@ -19,7 +19,7 @@ import (
 
 type testFakeProvider struct {
 	*provider.BaseProvider
-	failStart bool
+	failStart  bool
 	startCalls int32
 	stopCalls  int32
 }
@@ -66,7 +66,7 @@ func (e *testFakeEntity) Stop(ctx context.Context) error {
 }
 
 func (e *testFakeEntity) Status() (string, error) { return string(e.status), nil }
-func (e *testFakeEntity) LogPaths() []string        { return nil }
+func (e *testFakeEntity) LogPaths() []string      { return nil }
 func (e *testFakeEntity) ConfigSchema() provider.ConfigSchema {
 	return provider.ConfigSchema{}
 }
@@ -222,5 +222,45 @@ func TestManager_ConcurrentStartStop(t *testing.T) {
 	valid := s.Info.Status == core.StatusStopped || s.Info.Status == core.StatusRunning
 	if !valid {
 		t.Fatalf("并发后状态非法: %s", s.Info.Status)
+	}
+}
+
+// TestVersionInstalled 覆盖批次B#5：目录存在 ≠ 已安装，主可执行文件存在才算。
+func TestVersionInstalled(t *testing.T) {
+	tmp := t.TempDir()
+	mk := func(kind, ver, rel string) {
+		d := filepath.Join(tmp, "programs", kind, ver)
+		if rel != "" {
+			if err := os.MkdirAll(filepath.Join(d, filepath.Dir(rel)), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(d, rel), []byte("x"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		} else if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	mk("mysql", "8.0.38", "")                                 // 空目录（半解压/误建）
+	mk("nginx", "1.26.0", "")                                 // 空目录
+	mk("redis", "7.2.0", "redis-server.exe")                  // 有 exe
+	mk("mysql", "8.0.39", filepath.Join("bin", "mysqld.exe")) // 有 exe
+	mk("apache", "2.4.60", "")                                // 未知类型：目录存在即算
+
+	if versionInstalled(tmp, core.TypeMySQL, "8.0.38") {
+		t.Errorf("空 mysqld 目录不应判为已安装")
+	}
+	if versionInstalled(tmp, core.TypeNginx, "1.26.0") {
+		t.Errorf("空 nginx 目录不应判为已安装")
+	}
+	if !versionInstalled(tmp, core.TypeRedis, "7.2.0") {
+		t.Errorf("含 redis-server.exe 应判为已安装")
+	}
+	if !versionInstalled(tmp, core.TypeMySQL, "8.0.39") {
+		t.Errorf("含 bin/mysqld.exe 应判为已安装")
+	}
+	if !versionInstalled(tmp, core.TypeApache, "2.4.60") {
+		t.Errorf("未知类型应退化为目录存在判断")
 	}
 }

@@ -121,8 +121,8 @@ func (m *Manager) registerDefaults() {
 				continue
 			}
 			version := entry.Name()
-			verDir := filepath.Join(svcDir, version)
-			if !dirExists(verDir) {
+			// 空目录/半解压残留不算已安装：要求主可执行文件存在。
+			if !versionInstalled(installDir, svcType, version) {
 				continue
 			}
 			id := string(svcType) + "@" + version
@@ -1315,7 +1315,7 @@ func (m *Manager) CheckVersionInstalled(serviceType, version string) bool {
 	if installDir == "" {
 		return false
 	}
-	return dirExists(filepath.Join(installDir, "programs", serviceType, version))
+	return versionInstalled(installDir, core.ServiceType(serviceType), version)
 }
 
 func (m *Manager) UninstallVersion(serviceType, version string) error {
@@ -1411,6 +1411,29 @@ func dirExists(path string) bool {
 	return err == nil && info.IsDir()
 }
 
+// versionExeRel 给出每个服务类型安装目录下的主可执行文件相对路径
+// （相对 programs/<kind>/<version>/）。目录存在不代表装好了——崩溃残留的
+// 半解压目录、手动建的空目录同样在。exe 存在才是"已安装"的可靠判据。
+// 路径与各 provider.IsInstalled 保持一致；未列入的类型（apache/pgsql/mongo 等）
+// 退化为目录存在性判断，避免用错 exe 名误伤。php 由 runtime 侧管理，不走此表。
+var versionExeRel = map[core.ServiceType]string{
+	core.TypeNginx: "nginx.exe",
+	core.TypeMySQL: filepath.Join("bin", "mysqld.exe"),
+	core.TypeRedis: "redis-server.exe",
+}
+
+// versionInstalled 判定 programs/<kind>/<version> 是否为完整安装：
+// 已知类型要求主可执行文件存在，未知类型退化为目录存在性判断。
+func versionInstalled(installDir string, svcType core.ServiceType, version string) bool {
+	verDir := filepath.Join(installDir, "programs", string(svcType), version)
+	exeRel, ok := versionExeRel[svcType]
+	if !ok {
+		return dirExists(verDir)
+	}
+	info, err := os.Stat(filepath.Join(verDir, exeRel))
+	return err == nil && !info.IsDir()
+}
+
 func (m *Manager) GetInstalledVersions(serviceType string) []string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -1426,7 +1449,7 @@ func (m *Manager) GetInstalledVersions(serviceType string) []string {
 	}
 	var versions []string
 	for _, e := range entries {
-		if e.IsDir() && dirExists(filepath.Join(svcDir, e.Name())) {
+		if e.IsDir() && versionInstalled(installDir, core.ServiceType(serviceType), e.Name()) {
 			versions = append(versions, e.Name())
 		}
 	}
