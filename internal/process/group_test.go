@@ -301,3 +301,30 @@ func TestGroupAssignPID(t *testing.T) {
 		t.Errorf("ping PID=%d should have been killed", pid2)
 	}
 }
+
+// TestAssignPIDAutoRemovesOnExit 覆盖 P2#10：进程自然退出后，
+// AssignPID 注册的 awaitExit（WaitSingleObject）应把它移出进程表，无需常驻轮询。
+func TestAssignPIDAutoRemovesOnExit(t *testing.T) {
+	g, err := NewGroup("test-exit-removal")
+	if err != nil {
+		t.Fatalf("NewGroup: %v", err)
+	}
+	defer g.Close()
+
+	proc, err := g.Start("shortping", "ping.exe", []string{"-n", "2", "127.0.0.1"}, nil, ".", 5)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	pid := proc.PID
+	if !g.HasPID(pid) {
+		t.Fatalf("刚启动的进程应在表中")
+	}
+
+	deadline := time.Now().Add(8 * time.Second)
+	for g.HasPID(pid) && time.Now().Before(deadline) {
+		time.Sleep(100 * time.Millisecond)
+	}
+	if g.HasPID(pid) {
+		t.Errorf("进程退出后 awaitExit 应将其移出进程表，仍在表中")
+	}
+}

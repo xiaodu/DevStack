@@ -238,17 +238,35 @@ func (g *Group) AssignPID(pid int, name string, graceSecs int) error {
 	g.procs[pid] = proc
 	g.mu.Unlock()
 
-	// 后台等待进程退出，从进程表中移除
-	go func() {
-		for isProcessRunning(pid) {
-			time.Sleep(500 * time.Millisecond)
-		}
-		g.mu.Lock()
-		delete(g.procs, pid)
-		g.mu.Unlock()
-	}()
+	// 后台等待进程退出，从进程表中移除。
+	// 用 WaitSingleObject 阻塞在进程句柄上（进程退出时内核置 signaled），
+	// 替代此前每 500ms 轮询 isProcessRunning 的常驻 goroutine：消除稳态轮询开销，
+	// 且句柄绑定的是这个进程对象本身，天然免疫 PID 复用误判。
+	go g.awaitExit(pid)
 
 	return nil
+}
+
+// awaitExit 阻塞等待进程退出后将其移出进程表。
+// 打不开句柄（进程已退出或权限不足）时直接清理，语义等价于轮询发现进程已不在。
+func (g *Group) awaitExit(pid int) {
+	h, err := windows.OpenProcess(windows.SYNCHRONIZE, false, uint32(pid))
+	if err != nil {
+		g.removeProc(pid)
+		return
+	}
+	defer windows.CloseHandle(h)
+	// INFINITE：进程句柄仅在进程终止时 signaled，等待期间进程若存活就该一直阻塞，
+	// 不存在“永不返回却仍在表内”的窗口；进程退出后立即清理。
+	_, _ = windows.WaitForSingleObject(h, windows.INFINITE)
+	g.removeProc(pid)
+}
+
+// removeProc 从进程表移除指定 PID（幂等，缺失即为 no-op）。
+func (g *Group) removeProc(pid int) {
+	g.mu.Lock()
+	delete(g.procs, pid)
+	g.mu.Unlock()
 }
 
 // ReleasePID 从 Job Object 中移除进程（不终止进程）
