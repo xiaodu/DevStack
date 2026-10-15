@@ -34,6 +34,36 @@ type Manager struct {
 	client     *http.Client
 	installDir string
 	cancels    sync.Map // key(string) -> context.CancelFunc
+	// inflight 防止两个并发下载写同一个 destDir。
+	// key 是 destDir（绝对路径），value 是 *sync.Mutex。
+	// 前端重复点击安装同版本、SetupWizard 与 Packages 同时装同一服务版本时，
+	// 两个调用的 key 可能不同（"download:mysql:8.4.3" vs "setup-download:mysql:8.4.3"），
+	// 但 destDir 相同，锁绑定在 destDir 上能覆盖所有并发场景。
+	inflight sync.Map
+}
+
+// perDirLock 返回 destDir 对应的互斥锁。首次访问时创建。
+func (m *Manager) perDirLock(destDir string) *sync.Mutex {
+	actual, _ := m.inflight.LoadOrStore(destDir, &sync.Mutex{})
+	return actual.(*sync.Mutex)
+}
+
+// isInstallationComplete 判断 destDir 是否已经有完整安装内容。
+// 锁拿到后、开始下载前调用，若已有安装则第二个并发调用直接返回 nil。
+func isInstallationComplete(destDir string) bool {
+	entries, err := os.ReadDir(destDir)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		name := e.Name()
+		// 跳过临时文件和未完成的下载包
+		if name == "package.zip" || name == "package.zip.tmp" || name == "downloading" {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 func NewManager(installDir string) *Manager {
@@ -308,10 +338,25 @@ func (m *Manager) DownloadAndExtract(url, destDir string, callback ProgressCallb
 }
 
 // TryDownloadAndExtract 按 key 下载并解压到 destDir。
-// key 用于下载进度与取消绑定；同 key 重复调用会覆盖进度与取消句柄（由调用方负责单飞去重）。
+// key 用于下载进度与取消绑定。
+// 同 destDir 的并发调用会被 per-dir mutex 串行化；第二个调用在锁拿到后若发现已安装完成，
+// 直接返回 nil——相当于"别人替我装好了"的幂等短路。
 // 仅在 destDir 本次新建时才在失败回滚中删除它，避免误删既有安装目录。
-// expectedChecksum 为 SHA256 hex；若为空则跳过校验。
+// expectedChecksum 为 SHA256 hex；若为空则跳过 SHA256 校验（仍会做 zip CRC32 完整性测试）。
 func (m *Manager) TryDownloadAndExtract(key string, urls []string, destDir string, callback ProgressCallback, expectedChecksum ...string) error {
+	// per-dir 互斥锁：确保同一 destDir 不会被两个 goroutine 同时写。
+	// key 可能不同（"download:xxx" vs "setup-download:xxx"），但 destDir 相同，锁绑定在 destDir 上。
+	dirLock := m.perDirLock(destDir)
+	dirLock.Lock()
+	defer dirLock.Unlock()
+
+	// 幂等短路：锁拿到后若 destDir 已有完整安装内容，说明另一个并发调用已经完成下载+解压，
+	// 本次直接返回 nil。destDir 存在但仅有临时文件（package.zip / .tmp）说明下载还在进行中，
+	// 等待上面的 dirLock 释放后再判断即可。
+	if isInstallationComplete(destDir) {
+		return nil
+	}
+
 	_, statErr := os.Stat(destDir)
 	created := os.IsNotExist(statErr)
 
