@@ -40,6 +40,12 @@ func InitializeDataDir(c Config) error {
 	if initialized(c.DataDir) {
 		return nil
 	}
+	// 目录里有东西但没有系统表 → 上次 --initialize 中断/损坏（半套 mysql 库），
+	// 此时直接启动会以 "Table 'mysql.user' doesn't exist" 之类的迷惑错误失败。
+	// 不自动清空（可能含用户数据），给出可操作提示。
+	if dirHasContent(c.DataDir) {
+		return fmt.Errorf("MySQL 数据目录不完整（缺系统表，疑似上次初始化中断）：%s；如需重置请删除该目录后重试（会清空其中数据）", c.DataDir)
+	}
 
 	if versionLessThan(c.Version, 5, 7) {
 		installer := filepath.Join(c.MySQLDir, "bin", "mysql_install_db.exe")
@@ -76,10 +82,24 @@ func InitializeDataDir(c Config) error {
 	return nil
 }
 
-// initialized 判断数据目录是否已建好系统库（存在 mysql/ 子目录）。
+// initialized 判断数据目录是否已建好系统表。
+// 仅凭 mysql/ 目录存在不够：中断的 --initialize 会留下半套系统表（缺 mysql.user 等），
+// 之后启动会以 "Table 'mysql.user' doesn't exist" 之类的迷惑错误失败。
+// 5.5/5.6/5.7 看 mysql/user.frm；8.x 用独立数据字典，看根级 mysql.ibd。
 func initialized(dataDir string) bool {
-	fi, err := os.Stat(filepath.Join(dataDir, "mysql"))
-	return err == nil && fi.IsDir()
+	if fileExists(filepath.Join(dataDir, "mysql", "user.frm")) {
+		return true
+	}
+	if fileExists(filepath.Join(dataDir, "mysql.ibd")) {
+		return true
+	}
+	return false
+}
+
+// dirHasContent 判断目录是否非空（含任意文件/子目录）。
+func dirHasContent(path string) bool {
+	entries, err := os.ReadDir(path)
+	return err == nil && len(entries) > 0
 }
 
 // versionLessThan 解析 "5.6.51" 这类版本串并与 (maj,min) 比较；解析失败按不低于处理。

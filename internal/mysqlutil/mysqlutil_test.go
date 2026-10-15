@@ -44,8 +44,37 @@ func TestInitializeDataDir_AlreadyInitializedSkips(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dataDir, "mysql"), 0755); err != nil {
 		t.Fatal(err)
 	}
+	// 真正的"已初始化"标志：系统表 mysql.user 存在
+	if err := os.WriteFile(filepath.Join(dataDir, "mysql", "user.frm"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
 	if err := InitializeDataDir(Config{MySQLDir: mysqlDir, DataDir: dataDir, Version: "5.7.44"}); err != nil {
 		t.Fatalf("已初始化应跳过，却返回错误: %v", err)
+	}
+}
+
+// TestInitializeDataDir_PartialDirGivesActionableError：目录里有残留但缺系统表时，
+// 返回"数据目录不完整"可操作错误，而不是静默跳过或以迷惑错误启动。
+func TestInitializeDataDir_PartialDirGivesActionableError(t *testing.T) {
+	dir := t.TempDir()
+	mysqlDir := filepath.Join(dir, "programs", "mysql", "5.7.44")
+	dataDir := filepath.Join(dir, "data", "mysql", "5.7.44")
+	if err := os.MkdirAll(filepath.Join(mysqlDir, "bin"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	// 半套初始化：有 mysql/ 目录和个别表，但没有 user.frm
+	if err := os.MkdirAll(filepath.Join(dataDir, "mysql"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "ibdata1"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	err := InitializeDataDir(Config{MySQLDir: mysqlDir, DataDir: dataDir, Version: "5.7.44"})
+	if err == nil {
+		t.Fatal("残缺数据目录应返回错误")
+	}
+	if !strings.Contains(err.Error(), "不完整") {
+		t.Errorf("应提示数据目录不完整，实际: %v", err)
 	}
 }
 
