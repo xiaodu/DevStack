@@ -1366,12 +1366,25 @@ func (m *Manager) UninstallVersion(serviceType, version string) error {
 			waitPIDsExited(pids, 3*time.Second)
 			return nil
 		}, compensator.Noop()).
-		Step("backup-before-delete", func(ctx context.Context) error {
+		Step("quarantine-dir", func(ctx context.Context) error {
 			if !dirExists(binPath) {
 				return nil
 			}
-			return copyDir(binPath, backupPath)
-		}, compensator.Noop()).
+			// 同父目录内改名是 O(1)，取代"整目录拷贝再删"的双倍磁盘 IO。
+			// 先清掉上次失败残留的同名备份，保证改名可重入。
+			if dirExists(backupPath) {
+				if err := removeAll(backupPath); err != nil {
+					return err
+				}
+			}
+			return os.Rename(binPath, backupPath)
+		}, func(ctx context.Context) error {
+			// 改名后、删除前若失败：把隔离目录改回原位。
+			if dirExists(backupPath) && !dirExists(binPath) {
+				return os.Rename(backupPath, binPath)
+			}
+			return nil
+		}).
 		Step("update-service-state", func(ctx context.Context) error {
 			m.mu.Lock()
 			defer m.mu.Unlock()
@@ -1384,20 +1397,21 @@ func (m *Manager) UninstallVersion(serviceType, version string) error {
 			return nil
 		}, compensator.Noop()).
 		Step("delete-install-dir", func(ctx context.Context) error {
-			if dirExists(binPath) {
-				return removeAll(binPath)
+			if dirExists(backupPath) {
+				return removeAll(backupPath)
 			}
 			return nil
 		}, func(ctx context.Context) error {
-			if dirExists(backupPath) {
-				return copyDir(backupPath, binPath)
+			// 删除隔离目录中途失败：把残留改回原位，避免"半删"隐身数据。
+			if dirExists(backupPath) && !dirExists(binPath) {
+				return os.Rename(backupPath, binPath)
 			}
 			return nil
 		})
 
 	if err := txn.Commit(); err != nil {
-		if dirExists(backupPath) {
-			copyDir(backupPath, binPath)
+		if dirExists(backupPath) && !dirExists(binPath) {
+			os.Rename(backupPath, binPath)
 		}
 		return fmt.Errorf("卸载事务失败: %w", err)
 	}

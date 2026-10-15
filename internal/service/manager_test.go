@@ -264,3 +264,28 @@ func TestVersionInstalled(t *testing.T) {
 		t.Errorf("未知类型应退化为目录存在判断")
 	}
 }
+
+// TestUninstallVersionRenameQuarantine 覆盖 P2：卸载走"同目录改名隔离→删除"，
+// 不再整目录拷贝备份；成功后原位与 .backup 都不应残留。
+func TestUninstallVersionRenameQuarantine(t *testing.T) {
+	mgr, _ := newTestManager(t, false)
+	dir := mgr.cfg.Get().InstallDir
+	binPath := filepath.Join(dir, "programs", "memcached", "1.6.0")
+	backupPath := binPath + ".backup"
+	if err := os.WriteFile(filepath.Join(binPath, "memcached.exe"), []byte("x"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := mgr.UninstallVersion("memcached", "1.6.0"); err != nil {
+		t.Fatalf("UninstallVersion: %v", err)
+	}
+	if dirExists(binPath) {
+		t.Errorf("原位目录应已被移走/删除")
+	}
+	if dirExists(backupPath) {
+		t.Errorf(".backup 隔离目录应在事务成功后被删除")
+	}
+	if s := mgr.GetService("memcached@1.6.0"); s != nil && s.Info.Installed {
+		t.Errorf("卸载后 Installed 应为 false")
+	}
+}
