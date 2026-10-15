@@ -23,7 +23,7 @@ let confirmDeleteEnvId = $state<any>(null)
 let selectedSnapshotId = $state<any>(null)
 let activeTab = $state('environments')
 // 基于后端 getInstalledVersions 构建的安装状态映射，格式: { 'nginx 1.24.0': true }
-let installStatus: Record<string, boolean> = {}
+let installStatus = $state<Record<string, boolean>>({})
 let installStatusReady = $state(false)
 
 // 安装进度相关

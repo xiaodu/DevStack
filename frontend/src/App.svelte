@@ -185,18 +185,18 @@ function wizardComplete() {
 }
 
 async function startAll() {
-  // 获取当前环境状态，使用 activeProfileID 激活
+  // 顶部按钮只负责启动「当前已激活环境」的组件，不切换环境（切换在「环境」页做）
   const env = await api.getEnvironment().catch(() => ({ activeProfileID: '' }))
   const envId = env?.activeProfileID || ''
   if (!envId) {
-    pushToast('未激活任何环境，请先在「环境」页激活并运行', 'info')
+    pushToast('尚未激活环境，请先在「环境」页激活', 'info')
     return
   }
   await runOperation({
-    action: 'activate',
-    title: '正在激活环境',
-    call: () => api.activateEnvironment(envId),
-    successMsg: '环境已按依赖顺序激活',
+    action: 'run',
+    title: '正在启动组件',
+    call: () => api.runEnvironment(envId),
+    successMsg: '组件已启动',
     onDone: () => refreshSignal.update((n) => n + 1),
   })
 }
@@ -207,14 +207,14 @@ async function stopAll() {
   const runningRuntimes = Object.entries(env.runtimes || {}).filter(([, r]) => r.state === 'running')
   const total = runningSvcEntries.length + runningRuntimes.length
   if (total === 0) {
-    pushToast('没有正在运行的服务', 'info')
+    pushToast('没有正在运行的组件', 'info')
     return
   }
 
-  // 逐个停止运行中的服务/运行时，不清除环境激活状态
+  // 逐个停止运行中的组件，不清除环境激活状态
   await runOperation({
     action: 'stop-all',
-    title: '正在停止全部组件',
+    title: '正在停止组件',
     call: async () => {
       const results = await Promise.all([
         ...runningSvcEntries.map(([id]) =>
@@ -233,7 +233,7 @@ async function stopAll() {
       const failed = results.filter((ok) => !ok).length
       if (failed > 0) throw new Error(`有 ${failed} 个组件未能停止`)
     },
-    successMsg: `已停止 ${total} 个运行中的组件`,
+    successMsg: `已停止 ${total} 个组件`,
     onDone: () => refreshSignal.update((n) => n + 1),
   })
 }
@@ -278,7 +278,7 @@ let pageTitle = $derived(
       <div class="text-base font-semibold">{pageTitle}</div>
       {#if currentView === 'dashboard'}
         <div class="flex gap-2">
-          <button class="btn btn-circle btn-sm bg-success text-white border-none hover:brightness-110" title="激活当前项目所需环境" onclick={startAll} disabled={$operation.active}>
+          <button class="btn btn-circle btn-sm bg-success text-white border-none hover:brightness-110" title="启动当前环境的组件" onclick={startAll} disabled={$operation.active}>
             <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16"><path d="M8 5v14l11-7z"/></svg>
           </button>
           <button class="btn btn-circle btn-sm bg-warning text-white border-none hover:brightness-110" title={nginxRunning ? '重启 Nginx' : 'Nginx 未运行'} onclick={restartNginx} disabled={$operation.active || restartingNginx || !nginxRunning}>
@@ -288,7 +288,7 @@ let pageTitle = $derived(
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
             {/if}
           </button>
-          <button class="btn btn-circle btn-sm bg-error text-white border-none hover:brightness-110" title="停止全部服务" onclick={stopAll} disabled={$operation.active}>
+          <button class="btn btn-circle btn-sm bg-error text-white border-none hover:brightness-110" title="停止当前环境的组件" onclick={stopAll} disabled={$operation.active}>
             <svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>
           </button>
         </div>

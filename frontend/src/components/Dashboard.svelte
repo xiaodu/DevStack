@@ -228,7 +228,7 @@ onMount(() => {
     <!-- Service mini cards - 与当前激活环境联动，纯展示 -->
     <div class="card bg-base-100 border border-base-300 overflow-hidden">
       <div class="flex justify-between items-center px-4 py-3.5 border-b border-base-300">
-        <h3 class="text-sm font-semibold">服务</h3>
+        <h3 class="text-sm font-semibold">组件</h3>
         {#if hasLoaded && activeEnv?.activeProfileID}
           {@const activeProfile = profiles.find((p) => p.id === activeEnv.activeProfileID)}
           {#if activeProfile}
@@ -290,7 +290,7 @@ onMount(() => {
       <div class="grid grid-cols-4 gap-0 p-4 stat-grid">
         <div class="flex flex-col items-center gap-1 px-3 py-3 border-base-300">
           <div class="text-2xl font-bold font-mono">{hasLoaded ? envSummary.services.running : '-'}/{hasLoaded ? envSummary.services.total : '-'}</div>
-          <div class="text-xs text-base-content/60">服务运行中</div>
+          <div class="text-xs text-base-content/60">组件运行中</div>
         </div>
         <div class="flex flex-col items-center gap-1 px-3 py-3 border-base-300">
           <div class="text-2xl font-bold font-mono">{hasLoaded ? envSummary.runtimes.running : '-'}/{hasLoaded ? envSummary.runtimes.total : '-'}</div>

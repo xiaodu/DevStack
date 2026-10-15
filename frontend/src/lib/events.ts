@@ -96,6 +96,16 @@ export function subscribeReactiveEvents() {
     }),
   )
 
+  // 安装/卸载完成（download:phase 到达 done/error）也要刷新已安装状态与按钮，
+  // 否则 Environment/Packages 页要切走再进来才更新（#1）。
+  unsubs.push(
+    EventsOn('download:phase', (data: any) => {
+      if (data?.phase === 'done' || data?.phase === 'error') {
+        nanoRefresh.set(nanoRefresh.get() + 1)
+      }
+    }),
+  )
+
   return () => unsubs.forEach((fn) => fn())
 }
 
