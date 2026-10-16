@@ -1,6 +1,5 @@
 <script lang="ts">
 import { onMount } from 'svelte'
-import { stopPropagation } from 'svelte/legacy'
 import { api } from '../lib/api'
 import { useDownloadPhase, useDownloadProgress } from '../lib/events'
 import { safeInvoke } from '../lib/safeInvoke'
@@ -13,15 +12,8 @@ let envsLoading = $state(true)
 let selectedEnv: any = null
 let editingEnv = $state<any>(null)
 let envModalOpen = $state(false)
-let snapshots = $state<any[]>([])
-let snapshotDetails = $state<Record<string, any>>({})
-let snapLoading = $state(true)
 let busy = $state(false)
-let confirmRollbackId: any = null
-let confirmDeleteId = $state<any>(null)
 let confirmDeleteEnvId = $state<any>(null)
-let selectedSnapshotId = $state<any>(null)
-let activeTab = $state('environments')
 // 基于后端 getInstalledVersions 构建的安装状态映射，格式: { 'nginx 1.24.0': true }
 let installStatus = $state<Record<string, boolean>>({})
 let installStatusReady = $state(false)
@@ -72,8 +64,6 @@ useDownloadPhase((data) => {
   installTasks = [...installTasks]
 })
 
-let sortedSnapshots = $derived(Array.isArray(snapshots) ? [...snapshots].reverse() : [])
-
 // 当前激活的环境 ID
 let activeEnvID = $derived(env.activeProfileID || '')
 let hasRunningServices = $derived(
@@ -119,21 +109,8 @@ async function loadEnvironments() {
   }
 }
 
-async function loadSnapshots() {
-  snapLoading = true
-  try {
-    const result = await withTimeout(api.getSnapshots(), 5000, [])
-    snapshots = Array.isArray(result) ? result : []
-  } catch (e) {
-    console.error('[Environment] snapshots error:', e)
-    snapshots = []
-  } finally {
-    snapLoading = false
-  }
-}
-
 async function load() {
-  await Promise.all([loadEnvironment(), loadEnvironments(), loadSnapshots()])
+  await Promise.all([loadEnvironment(), loadEnvironments()])
   await refreshInstallStatus()
 }
 
@@ -366,42 +343,6 @@ async function doDeleteEnv() {
   )
 }
 
-async function doDeleteSnapshot() {
-  if (!confirmDeleteId) return
-  if (busy) return
-  busy = true
-  const id = confirmDeleteId
-  try {
-    await withTimeout(api.deleteSnapshot(id), 10000)
-    delete snapshotDetails[id]
-    if (selectedSnapshotId === id) selectedSnapshotId = null
-    confirmDeleteId = null
-    snapshots = snapshots.filter((s) => s !== id)
-    addToast('快照已删除', 'success', 3500)
-  } catch (e: any) {
-    addToast(`删除失败: ${e.message || e}`, 'error', 3500)
-  } finally {
-    busy = false
-  }
-}
-
-function formatTime(snapshotId: string) {
-  if (!snapshotId?.startsWith('snapshot-')) return snapshotId
-  const ts = snapshotId.replace('snapshot-', '')
-  if (ts.length !== 13) return snapshotId
-  return `${ts.slice(0, 4)}-${ts.slice(4, 6)}-${ts.slice(6, 8)} ${ts.slice(9, 11)}:${ts.slice(11, 13)}`
-}
-
-function stateLabel(state: string) {
-  const labels: Record<string, string> = {
-    running: '运行中',
-    stopped: '已停止',
-    starting: '启动中',
-    stopping: '停止中',
-  }
-  return labels[state] || state || '未知'
-}
-
 function openCreateEnv() {
   expandedVersions = {}
   editingEnv = { id: '', name: '', description: '', isBuiltin: false, units: [] }
@@ -414,25 +355,6 @@ function openEditEnv(env: any) {
   editingEnv = JSON.parse(JSON.stringify(env))
   preloadVersions()
   envModalOpen = true
-}
-
-function loadSnapshotDetail(id: string) {
-  if (selectedSnapshotId === id) {
-    selectedSnapshotId = null
-    return
-  }
-  if (snapshotDetails[id]) {
-    selectedSnapshotId = id
-    return
-  }
-  withTimeout(api.getSnapshotDetail(id), 8000)
-    .then((detail) => {
-      if (detail) {
-        snapshotDetails = { ...snapshotDetails, [id]: detail }
-        selectedSnapshotId = id
-      }
-    })
-    .catch(() => addToast('加载快照详情失败', 'error', 3500))
 }
 
 // 组件目录：环境编辑器中可选的全部组件类型
@@ -533,10 +455,6 @@ const iconMap = {
   python: 'icon-python',
 }
 
-let svcEntries = $derived(Object.entries(env.services || {}))
-let projEntries = $derived(Object.entries(env.projects || {}))
-let rtEntries = $derived(Object.entries(env.runtimes || {}))
-
 const unsub = refreshSignal.subscribe(() => load())
 onMount(() => {
   load()
@@ -548,294 +466,142 @@ onMount(() => {
   <div class="flex justify-between items-center">
     <div>
       <h1 class="text-xl font-bold">环境管理</h1>
-      <p class="text-sm text-base-content/60 mt-1">管理环境模板、当前状态和快照存档</p>
+      <p class="text-sm text-base-content/60 mt-1">管理环境模板与各环境的组件安装状态</p>
     </div>
     <div class="flex gap-2">
-      {#if activeTab === 'environments'}
-        <button class="btn btn-primary btn-sm" onclick={openCreateEnv} disabled={busy}>新建环境</button>
+      <button class="btn btn-primary btn-sm" onclick={openCreateEnv} disabled={busy}>新建环境</button>
+    </div>
+  </div>
+
+  <!-- 当前环境操作栏 -->
+  <div class="flex items-center justify-between px-4 py-3 bg-base-100 border border-base-300 rounded-lg">
+    <div class="flex items-center gap-3">
+      {#if envLoading}
+        <span class="text-sm text-base-content/60">加载中...</span>
+      {:else if activeEnvID}
+        <span class="w-2 h-2 rounded-full bg-success"></span>
+        <span class="text-sm">
+          当前环境：
+          <span class="font-semibold text-primary">
+            {environments.find((e) => e.id === activeEnvID)?.name || '自定义环境'}
+          </span>
+        </span>
+      {:else if hasRunningServices}
+        <span class="w-2 h-2 rounded-full bg-success"></span>
+        <span class="text-sm">当前环境：<span class="font-semibold">基于项目推导</span></span>
+      {:else}
+        <span class="w-2 h-2 rounded-full bg-base-content/30"></span>
+        <span class="text-sm text-base-content/60">未激活环境</span>
+      {/if}
+    </div>
+    <div class="flex gap-2">
+      {#if activeEnvID || hasRunningServices}
+        <button class="btn btn-sm btn-outline" onclick={deactivateCurrent} disabled={$operation.active || busy}>
+          停止环境
+        </button>
       {/if}
     </div>
   </div>
 
-  <div role="tablist" class="tabs tabs-bordered">
-    <button class="tab" class:tab-active={activeTab === 'environments'} onclick={() => activeTab = 'environments'}>我的环境</button>
-    <button class="tab" class:tab-active={activeTab === 'overview'} onclick={() => activeTab = 'overview'}>运行状态</button>
-    <button class="tab" class:tab-active={activeTab === 'snapshots'} onclick={() => activeTab = 'snapshots'}>快照存档</button>
-  </div>
-
-  {#if activeTab === 'environments'}
-    <!-- 当前环境操作栏 -->
-    <div class="flex items-center justify-between px-4 py-3 bg-base-100 border border-base-300 rounded-lg">
-      <div class="flex items-center gap-3">
-        {#if envLoading}
-          <span class="text-sm text-base-content/60">加载中...</span>
-        {:else if activeEnvID}
-          <span class="w-2 h-2 rounded-full bg-success"></span>
-          <span class="text-sm">
-            当前环境：
-            <span class="font-semibold text-primary">
-              {environments.find((e) => e.id === activeEnvID)?.name || '自定义环境'}
-            </span>
-          </span>
-        {:else if hasRunningServices}
-          <span class="w-2 h-2 rounded-full bg-success"></span>
-          <span class="text-sm">当前环境：<span class="font-semibold">基于项目推导</span></span>
-        {:else}
-          <span class="w-2 h-2 rounded-full bg-base-content/30"></span>
-          <span class="text-sm text-base-content/60">未激活环境</span>
-        {/if}
-      </div>
-      <div class="flex gap-2">
-        {#if activeEnvID || hasRunningServices}
-          <button class="btn btn-sm btn-outline" onclick={deactivateCurrent} disabled={$operation.active || busy}>
-            停止环境
-          </button>
-        {/if}
-      </div>
+  {#if envsLoading}
+    <div class="text-center py-16 text-base-content/60">加载环境中...</div>
+  {:else if environments.length === 0}
+    <div class="flex flex-col items-center justify-center py-16 text-base-content/60 gap-2">
+      <p class="text-base font-semibold">暂无环境</p>
+      <p class="text-sm">新建一个环境，组合不同版本的软件和运行时</p>
+      <p class="text-xs text-base-content/50">多个项目可共享同一个环境</p>
+      <div class="mt-4"><button class="btn btn-primary btn-sm" onclick={openCreateEnv} disabled={busy}>新建第一个环境</button></div>
     </div>
-
-    {#if envsLoading}
-      <div class="text-center py-16 text-base-content/60">加载环境中...</div>
-    {:else if environments.length === 0}
-      <div class="flex flex-col items-center justify-center py-16 text-base-content/60 gap-2">
-        <p class="text-base font-semibold">暂无环境</p>
-        <p class="text-sm">新建一个环境，组合不同版本的软件和运行时</p>
-        <p class="text-xs text-base-content/50">多个项目可共享同一个环境</p>
-        <div class="mt-4"><button class="btn btn-primary btn-sm" onclick={openCreateEnv} disabled={busy}>新建第一个环境</button></div>
-      </div>
-    {:else}
-      <div class="grid grid-cols-[repeat(auto-fill,minmax(320px,1fr))] gap-4">
-        {#each environments as env (env.id)}
-          {@const isActive = activeEnvID === env.id}
-          {@const installCheck = checkEnvInstalled(env)}
-          {@const envUnits = env.units ? (Array.isArray(env.units) ? env.units : Object.values(env.units)) : []}
-          <div class="card bg-base-100 border border-base-300 overflow-hidden transition-all hover:border-primary hover:-translate-y-0.5 {isActive ? 'border-l-4 border-l-success border-primary shadow-md' : ''} {env.isBuiltin ? 'bg-gradient-to-br from-base-100 to-base-200' : ''}">
-            <!-- 卡片头部 -->
-            <div class="px-4 pt-4 pb-3">
-              <div class="min-w-0">
-                <div class="text-[15px] font-semibold flex items-center gap-1.5">
-                  {#if env.isBuiltin}<span class="text-xs text-base-content/40 font-normal shrink-0">预设</span>{/if}
-                  <span class="truncate">{env.name}</span>
-                </div>
-                {#if env.description}
-                  <div class="text-xs text-base-content/60 mt-1 leading-relaxed">{env.description}</div>
-                {/if}
+  {:else}
+    <div class="grid grid-cols-[repeat(auto-fill,minmax(320px,1fr))] gap-4">
+      {#each environments as env (env.id)}
+        {@const isActive = activeEnvID === env.id}
+        {@const installCheck = checkEnvInstalled(env)}
+        {@const envUnits = env.units ? (Array.isArray(env.units) ? env.units : Object.values(env.units)) : []}
+        <div class="card bg-base-100 border border-base-300 overflow-hidden transition-all hover:border-primary hover:-translate-y-0.5 {isActive ? 'border-l-4 border-l-success border-primary shadow-md' : ''} {env.isBuiltin ? 'bg-gradient-to-br from-base-100 to-base-200' : ''}">
+          <!-- 卡片头部 -->
+          <div class="px-4 pt-4 pb-3">
+            <div class="min-w-0">
+              <div class="text-[15px] font-semibold flex items-center gap-1.5">
+                {#if env.isBuiltin}<span class="text-xs text-base-content/40 font-normal shrink-0">预设</span>{/if}
+                <span class="truncate">{env.name}</span>
               </div>
+              {#if env.description}
+                <div class="text-xs text-base-content/60 mt-1 leading-relaxed">{env.description}</div>
+              {/if}
             </div>
+          </div>
 
-            <!-- 卡片内容：组件摘要 + 安装状态 -->
-            <div class="px-4 pb-3">
-              <div class="text-xs bg-base-200 rounded-lg overflow-hidden min-h-[40px]">
-                {#if envUnits.length === 0}
-                  <div class="px-3 py-2.5"><span class="text-base-content/50">空环境</span></div>
-                {:else}
-                  <div class="px-3 py-2.5 flex flex-wrap gap-x-4 gap-y-1.5">
-                    {#each envUnits as u}
-                      <span class="inline-flex items-center gap-1.5">
-                        {#if iconMap[u.kind]}
-                          <span class="iconfont text-lg {iconMap[u.kind]}"></span>
-                        {:else}
-                          <span class="w-[18px] h-[18px] rounded-full bg-base-content/20 flex items-center justify-center text-[10px] font-bold text-base-content/50">{u.kind ? u.kind.charAt(0).toUpperCase() : '?'}</span>
-                        {/if}
-                        <span class="text-base-content/70">{unitNames[u.kind] || u.kind || '?'}</span>
-                        <span class="text-base-content/40 font-mono">{u.version}</span>
-                      </span>
-                    {/each}
-                  </div>
-                {/if}
-                {#if installStatusReady && installCheck.total > 0}
-                  <div class="px-3 py-1.5 border-t border-base-300/50 flex items-center gap-1.5">
-                    {#if installCheck.allInstalled}
-                      <span class="text-success">✓ 全部已安装</span>
-                    {:else}
-                      <span class="text-warning">⚠ {installCheck.missing.length} 项未安装: {installCheck.missing.slice(0, 3).join('，')}{installCheck.missing.length > 3 ? '...' : ''}</span>
-                    {/if}
-                  </div>
-                {:else if !installStatusReady}
-                  <div class="px-3 py-1.5 border-t border-base-300/50 flex items-center gap-1.5">
-                    <span class="loading loading-dots loading-xs text-primary"></span>
-                    <span class="text-base-content/40">检查中...</span>
-                  </div>
-                {/if}
-              </div>
-            </div>
-
-            <!-- 卡片底部：操作按钮 -->
-            <div class="px-4 pb-4 pt-1 flex gap-2 items-center flex-wrap">
-              {#if !installStatusReady}
-                <button class="btn btn-sm btn-disabled" disabled>检查中...</button>
-              {:else if isActive}
-                <span class="text-xs text-success font-medium px-1">当前在用</span>
-              {:else if installCheck.allInstalled}
-                <button class="btn btn-sm btn-ghost" onclick={() => activateEnvOnly(env)} disabled={$operation.active || busy} title="仅切换当前环境标记，不启动组件">激活</button>
-                <button class="btn btn-sm btn-primary" onclick={() => activateEnv(env)} disabled={$operation.active || busy} title="切换标记并启动全部组件">激活并运行</button>
+          <!-- 卡片内容：组件摘要 + 安装状态 -->
+          <div class="px-4 pb-3">
+            <div class="text-xs bg-base-200 rounded-lg overflow-hidden min-h-[40px]">
+              {#if envUnits.length === 0}
+                <div class="px-3 py-2.5"><span class="text-base-content/50">空环境</span></div>
               {:else}
-                <button class="btn btn-sm btn-warning" onclick={() => installEnvComponents(env)} disabled={$operation.active || busy}>安装</button>
-                <button class="btn btn-sm btn-ghost" onclick={() => activateEnvOnly(env)} disabled={$operation.active || busy} title="仅切换当前环境标记">激活</button>
+                <div class="px-3 py-2.5 flex flex-wrap gap-x-4 gap-y-1.5">
+                  {#each envUnits as u}
+                    <span class="inline-flex items-center gap-1.5">
+                      {#if iconMap[u.kind]}
+                        <span class="iconfont text-lg {iconMap[u.kind]}"></span>
+                      {:else}
+                        <span class="w-[18px] h-[18px] rounded-full bg-base-content/20 flex items-center justify-center text-[10px] font-bold text-base-content/50">{u.kind ? u.kind.charAt(0).toUpperCase() : '?'}</span>
+                      {/if}
+                      <span class="text-base-content/70">{unitNames[u.kind] || u.kind || '?'}</span>
+                      <span class="text-base-content/40 font-mono">{u.version}</span>
+                    </span>
+                  {/each}
+                </div>
               {/if}
-              <div class="flex-1"></div>
-              <button class="btn btn-sm btn-ghost btn-square" onclick={() => openEditEnv(env)} disabled={$operation.active || busy} title="编辑环境">
-                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg>
-              </button>
-              <button class="btn btn-sm btn-ghost btn-square text-base-content/40 hover:text-error" onclick={() => confirmDeleteEnvId = env.id} disabled={$operation.active || busy} title="删除环境">
-                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
-              </button>
-            </div>
-          </div>
-        {/each}
-      </div>
-    {/if}
-  {/if}
-
-  {#if activeTab === 'overview'}
-    {#if envLoading}
-      <div class="text-center py-16 text-base-content/60">加载环境状态中...</div>
-    {:else}
-      <div class="grid grid-cols-3 gap-5">
-        <!-- Services -->
-        <div class="card bg-base-100 border border-base-300 p-4">
-          <h3 class="text-sm font-semibold text-primary mb-3">服务 ({svcEntries.length})</h3>
-          {#if svcEntries.length === 0}
-            <div class="text-xs text-base-content/50 py-2">暂无已安装的服务</div>
-          {:else}
-            <div class="flex flex-col gap-1.5">
-              {#each svcEntries as [id, svc]}
-                <div class="flex items-center gap-2 px-2.5 py-2 bg-base-200 rounded-lg text-sm">
-                  <span class="font-medium">{id}</span>
-                  <span class="font-mono text-base-content/50 text-xs">{svc.version}</span>
-                  <span class="ml-auto text-xs px-2 py-0.5 rounded-full {svc.state === 'running' ? 'bg-success/10 text-success' : svc.state === 'stopped' ? 'bg-base-200 text-base-content/50' : 'bg-warning/10 text-warning'}">{stateLabel(svc.state)}</span>
-                </div>
-              {/each}
-            </div>
-          {/if}
-        </div>
-
-        <!-- Projects -->
-        <div class="card bg-base-100 border border-base-300 p-4">
-          <h3 class="text-sm font-semibold text-primary mb-3">项目 ({projEntries.length})</h3>
-          {#if projEntries.length === 0}
-            <div class="text-xs text-base-content/50 py-2">暂无已启用的项目</div>
-          {:else}
-            <div class="flex flex-col gap-1.5">
-              {#each projEntries as [id, proj]}
-                <div class="flex items-center gap-2 px-2.5 py-2 bg-base-200 rounded-lg text-sm flex-wrap">
-                  <span class="font-medium">{proj.name || id}</span>
-                  <span class="text-xs px-1.5 py-0.5 rounded bg-primary/10 text-primary">{proj.type}</span>
-                  {#if proj.phpVersion}<span class="font-mono text-base-content/50 text-xs">PHP {proj.phpVersion}</span>{/if}
-                  {#if proj.mysqlVersion}<span class="font-mono text-base-content/50 text-xs">MySQL {proj.mysqlVersion}</span>{/if}
-                  {#if proj.nginxVersion}<span class="font-mono text-base-content/50 text-xs">Nginx {proj.nginxVersion}</span>{/if}
-                  <span class="ml-auto text-xs px-2 py-0.5 rounded-full {proj.enabled ? 'bg-success/10 text-success' : 'bg-base-200 text-base-content/50'}">{proj.enabled ? '已启用' : '已禁用'}</span>
-                </div>
-              {/each}
-            </div>
-          {/if}
-        </div>
-
-        <!-- Runtimes -->
-        <div class="card bg-base-100 border border-base-300 p-4">
-          <h3 class="text-sm font-semibold text-primary mb-3">运行时 ({rtEntries.length})</h3>
-          {#if rtEntries.length === 0}
-            <div class="text-xs text-base-content/50 py-2">暂无运行时</div>
-          {:else}
-            <div class="flex flex-col gap-1.5">
-              {#each rtEntries as [id, rt]}
-                <div class="flex items-center gap-2 px-2.5 py-2 bg-base-200 rounded-lg text-sm">
-                  <span class="font-medium">{id}</span>
-                  <span class="font-mono text-base-content/50 text-xs">{rt.version}</span>
-                  {#if rt.active}<span class="text-xs px-1.5 py-0.5 rounded bg-warning/10 text-warning">默认</span>{/if}
-                  <span class="ml-auto text-xs px-2 py-0.5 rounded-full {rt.state === 'running' ? 'bg-success/10 text-success' : rt.state === 'stopped' ? 'bg-base-200 text-base-content/50' : 'bg-warning/10 text-warning'}">{stateLabel(rt.state)}</span>
-                </div>
-              {/each}
-            </div>
-          {/if}
-        </div>
-      </div>
-    {/if}
-  {/if}
-
-  {#if activeTab === 'snapshots'}
-    {#if snapLoading}
-      <div class="text-center py-16 text-base-content/60">加载快照中...</div>
-    {:else if snapshots.length === 0}
-      <div class="flex flex-col items-center justify-center py-16 text-base-content/60 gap-2">
-        <p class="text-base font-semibold">暂无快照</p>
-        <p class="text-sm">快照保存当前所有服务的运行状态和配置</p>
-        <p class="text-xs text-base-content/50">创建快照功能暂未迁移</p>
-      </div>
-    {:else}
-      <div class="flex flex-col gap-2.5">
-        {#each sortedSnapshots as snap}
-          <div class="card bg-base-100 border border-base-300" class:border-primary={selectedSnapshotId === snap}>
-            <div class="card-body p-3.5">
-              <div class="flex items-center justify-between cursor-pointer" role="button" tabindex="0" onclick={() => loadSnapshotDetail(snap)} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); loadSnapshotDetail(snap) } }}>
-                <div class="flex-1">
-                  <div class="font-mono text-sm">{snap}</div>
-                  <div class="text-xs text-base-content/60 mt-0.5">{formatTime(snap)}</div>
-                  {#if snapshotDetails[snap]}
-                    {@const detail = snapshotDetails[snap]}
-                    <div class="flex gap-1.5 mt-1.5 flex-wrap">
-                      {#if detail.services}<span class="badge badge-sm badge-ghost">{Object.keys(detail.services).length} 个服务</span>{/if}
-                      {#if detail.projects}<span class="badge badge-sm badge-ghost">{Object.keys(detail.projects).length} 个项目</span>{/if}
-                      {#if detail.runtimes}<span class="badge badge-sm badge-ghost">{Object.keys(detail.runtimes).length} 个运行时</span>{/if}
-                    </div>
+              {#if installStatusReady && installCheck.total > 0}
+                <div class="px-3 py-1.5 border-t border-base-300/50 flex items-center gap-1.5">
+                  {#if installCheck.allInstalled}
+                    <span class="text-success">✓ 全部已安装</span>
+                  {:else}
+                    <span class="text-warning">⚠ {installCheck.missing.length} 项未安装: {installCheck.missing.slice(0, 3).join('，')}{installCheck.missing.length > 3 ? '...' : ''}</span>
                   {/if}
                 </div>
-                <div class="flex gap-2 shrink-0">
-                  <button class="btn btn-sm btn-ghost text-error" onclick={stopPropagation(() => confirmDeleteId = snap)} disabled={busy}>删除</button>
-                </div>
-              </div>
-
-              {#if selectedSnapshotId === snap && snapshotDetails[snap]}
-                {@const detail = snapshotDetails[snap]}
-                <div class="mt-3 pt-3 border-t border-base-300 space-y-3.5">
-                  {#if detail.services && Object.keys(detail.services).length > 0}
-                    <div>
-                      <h4 class="text-xs font-semibold text-base-content/70 mb-2">服务状态</h4>
-                      <div class="grid grid-cols-[repeat(auto-fill,minmax(240px,1fr))] gap-1.5">
-                        {#each Object.entries(detail.services) as [id, svc]}
-                          <div class="flex items-center gap-2 px-2.5 py-1.5 bg-base-200 rounded-lg text-xs">
-                            <span class="font-medium">{id}</span>
-                            <span class="font-mono text-base-content/50">{svc.version}</span>
-                            <span class="ml-auto px-1.5 py-0.5 rounded-full {svc.state === 'running' ? 'bg-success/10 text-success' : 'bg-base-200 text-base-content/50'}">{svc.state === 'running' ? '运行中' : '已停止'}</span>
-                          </div>
-                        {/each}
-                      </div>
-                    </div>
-                  {/if}
-                  {#if detail.projects && Object.keys(detail.projects).length > 0}
-                    <div>
-                      <h4 class="text-xs font-semibold text-base-content/70 mb-2">项目环境</h4>
-                      <div class="grid grid-cols-[repeat(auto-fill,minmax(240px,1fr))] gap-1.5">
-                        {#each Object.entries(detail.projects) as [id, proj]}
-                          <div class="flex items-center gap-2 px-2.5 py-1.5 bg-base-200 rounded-lg text-xs">
-                            <span class="font-medium">{proj.name || id}</span>
-                            <span class="text-base-content/50">{proj.type}</span>
-                            {#if proj.phpVersion}<span class="font-mono text-base-content/50">PHP {proj.phpVersion}</span>{/if}
-                          </div>
-                        {/each}
-                      </div>
-                    </div>
-                  {/if}
-                  {#if detail.runtimes && Object.keys(detail.runtimes).length > 0}
-                    <div>
-                      <h4 class="text-xs font-semibold text-base-content/70 mb-2">运行时</h4>
-                      <div class="grid grid-cols-[repeat(auto-fill,minmax(240px,1fr))] gap-1.5">
-                        {#each Object.entries(detail.runtimes) as [id, rt]}
-                          <div class="flex items-center gap-2 px-2.5 py-1.5 bg-base-200 rounded-lg text-xs">
-                            <span class="font-medium">{id}</span>
-                            <span class="font-mono text-base-content/50">{rt.version}</span>
-                          </div>
-                        {/each}
-                      </div>
-                    </div>
-                  {/if}
+              {:else if !installStatusReady}
+                <div class="px-3 py-1.5 border-t border-base-300/50 flex items-center gap-1.5">
+                  <span class="loading loading-dots loading-xs text-primary"></span>
+                  <span class="text-base-content/40">检查中...</span>
                 </div>
               {/if}
             </div>
           </div>
-        {/each}
-      </div>
-    {/if}
+
+          <!-- 卡片底部：操作按钮 -->
+          <div class="px-4 pb-4 pt-1 flex gap-2 items-center flex-wrap">
+            {#if !installStatusReady}
+              <button class="btn btn-sm btn-disabled" disabled>检查中...</button>
+            {:else if isActive}
+              <span class="text-xs text-success font-medium px-1">当前在用</span>
+              {#if !installCheck.allInstalled}
+                {#if hasRunningServices}
+                  <!-- 运行中的环境不能装组件，给出「先停止」的入口，安装按钮暂不可用 -->
+                  <button class="btn btn-sm btn-outline" onclick={deactivateCurrent} disabled={$operation.active || busy}>停止环境</button>
+                  <button class="btn btn-sm btn-warning" disabled title="组件正在运行，请先停止环境再安装">安装</button>
+                {:else}
+                  <button class="btn btn-sm btn-warning" onclick={() => installEnvComponents(env)} disabled={$operation.active || busy}>安装缺失组件</button>
+                {/if}
+              {/if}
+            {:else if installCheck.allInstalled}
+              <button class="btn btn-sm btn-ghost" onclick={() => activateEnvOnly(env)} disabled={$operation.active || busy} title="仅切换当前环境标记，不启动组件">激活</button>
+              <button class="btn btn-sm btn-primary" onclick={() => activateEnv(env)} disabled={$operation.active || busy} title="切换标记并启动全部组件">激活并运行</button>
+            {:else}
+              <!-- 组件未齐全时不提供「激活」，避免激活一个跑不起来的环境 -->
+              <button class="btn btn-sm btn-warning" onclick={() => installEnvComponents(env)} disabled={$operation.active || busy}>安装</button>
+            {/if}
+            <div class="flex-1"></div>
+            <button class="btn btn-sm btn-ghost btn-square" onclick={() => openEditEnv(env)} disabled={$operation.active || busy} title="编辑环境">
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg>
+            </button>
+            <button class="btn btn-sm btn-ghost btn-square text-base-content/40 hover:text-error" onclick={() => confirmDeleteEnvId = env.id} disabled={$operation.active || busy} title="删除环境">
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+            </button>
+          </div>
+        </div>
+      {/each}
+    </div>
   {/if}
 </div>
 
@@ -1025,18 +791,4 @@ onMount(() => {
     </div>
   </div>
   <form method="dialog" class="modal-backdrop"><button onclick={() => confirmDeleteEnvId = null}>关闭</button></form>
-</dialog>
-
-<!-- Delete Snapshot Confirm -->
-<dialog class="modal" class:modal-open={!!confirmDeleteId}>
-  <div class="modal-box">
-    <h3 class="font-bold text-lg">确认删除</h3>
-    <p class="py-2 text-sm text-base-content/70">确定要删除快照 <code class="bg-base-300 px-1.5 py-0.5 rounded text-xs font-mono">{confirmDeleteId}</code> 吗？</p>
-    <p class="text-xs text-warning">删除后无法恢复。</p>
-    <div class="modal-action">
-      <button class="btn btn-ghost" onclick={() => confirmDeleteId = null}>取消</button>
-      <button class="btn btn-error" onclick={doDeleteSnapshot} disabled={busy}>确认删除</button>
-    </div>
-  </div>
-  <form method="dialog" class="modal-backdrop"><button onclick={() => confirmDeleteId = null}>关闭</button></form>
 </dialog>

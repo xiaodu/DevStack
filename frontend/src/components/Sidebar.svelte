@@ -1,5 +1,6 @@
 <script lang="ts">
 import { createEventDispatcher } from 'svelte'
+import UserProfile from './UserProfile.svelte'
 
 interface Props {
   currentView?: string
@@ -7,12 +8,13 @@ interface Props {
 
 let { currentView = 'dashboard' }: Props = $props()
 const dispatch = createEventDispatcher()
+let profileOpen = $state(false)
 
 const navItems = [
   { id: 'dashboard', label: '控制面板', icon: 'dashboard' },
-  { id: 'sites', label: '项目管理', icon: 'sites' },
-  { id: 'software', label: '软件管理', icon: 'software' },
   { id: 'environment', label: '环境管理', icon: 'environment' },
+  { id: 'sites', label: '项目与网站', icon: 'sites' },
+  { id: 'software', label: '已安装软件', icon: 'software' },
   { id: 'logs', label: '日志监控', icon: 'logs' },
 ]
 const bottomItems = [
@@ -67,15 +69,17 @@ const bottomItems = [
   </div>
 
   <div class="sidebar-footer">
-    <div class="user-info">
+    <button class="user-info" onclick={() => (profileOpen = true)} title="个人资料">
       <div class="avatar">D</div>
       <div class="user-details">
         <span class="user-name">DevStack User</span>
         <span class="user-plan">Community Edition</span>
       </div>
-    </div>
+    </button>
   </div>
 </aside>
+
+<UserProfile open={profileOpen} onclose={() => (profileOpen = false)} />
 
 <style>
   .sidebar {
@@ -160,6 +164,18 @@ const bottomItems = [
     display: flex;
     align-items: center;
     gap: 10px;
+    width: 100%;
+    padding: 6px;
+    margin: -6px;
+    border: none;
+    border-radius: 8px;
+    background: transparent;
+    text-align: left;
+    cursor: pointer;
+    transition: background 0.12s;
+  }
+  .user-info:hover {
+    background: var(--sidebar-hover);
   }
   .avatar {
     width: 34px;

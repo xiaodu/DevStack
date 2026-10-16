@@ -34,8 +34,9 @@ async function loadEnvBar() {
 }
 
 // 当前激活环境名（ID→name 映射，映射不到回退 ID）
+let activeEnvID = $derived(envState?.activeProfileID || '')
 let activeEnvName = $derived.by(() => {
-  const id = envState?.activeProfileID
+  const id = activeEnvID
   if (!id) return '未激活'
   const p = envProfiles.find((e: any) => e.id === id)
   return p?.name || id
@@ -73,7 +74,7 @@ let nginxRunning = $derived.by(() => {
 
 function navigate(view) {
   currentView = view
-  // 视图保持挂载（class:hidden 切换），切换到「软件管理」时强制刷新数据，避免过期状态
+  // 视图保持挂载（class:hidden 切换），切换到「已安装软件」时强制刷新数据，避免过期状态
   if (view === 'software') refreshSignal.update((n) => n + 1)
 }
 
@@ -185,11 +186,11 @@ function wizardComplete() {
 }
 
 async function startAll() {
-  // 顶部按钮只负责启动「当前已激活环境」的组件，不切换环境（切换在「环境」页做）
+  // 顶部按钮只负责启动「当前已激活环境」的组件，不切换环境（切换在「环境管理」页做）
   const env = await api.getEnvironment().catch(() => ({ activeProfileID: '' }))
   const envId = env?.activeProfileID || ''
   if (!envId) {
-    pushToast('尚未激活环境，请先在「环境」页激活', 'info')
+    pushToast('尚未激活环境，请先在「环境管理」页激活', 'info')
     return
   }
   await runOperation({
@@ -260,9 +261,9 @@ async function restartNginx() {
 let pageTitle = $derived(
   {
     dashboard: '仪表盘',
-    sites: '项目',
-    software: '软件管理',
-    environment: '环境',
+    sites: '项目与网站',
+    software: '已安装软件',
+    environment: '环境管理',
     packages: '软件仓库',
     logs: '日志',
     settings: '设置',
@@ -309,7 +310,7 @@ let pageTitle = $derived(
     <footer class="flex items-center gap-4 px-6 py-1.5 bg-base-100 border-t border-base-300 text-xs text-base-content/60 shrink-0 rounded-none">
       <span class="flex items-center gap-1.5 min-w-0">
         <span>环境:</span>
-        <strong class="text-base-content/80 shrink-0">{activeEnvName}</strong>
+        <strong class="shrink-0 {activeEnvID ? 'text-base-content/80' : 'text-base-content/40 font-normal'}">{activeEnvName}</strong>
         {#if runningServices.length > 0}
           <span class="shrink-0">(</span>
           <span class="flex items-center gap-3.5 min-w-0">
@@ -321,7 +322,8 @@ let pageTitle = $derived(
             {/each}
           </span>
           <span class="shrink-0">)</span>
-        {:else}
+        {:else if activeEnvID}
+          <!-- 仅在确实激活了环境时才标注停止，未激活时不再叠加「已停止」造成语义重复 -->
           <span class="text-base-content/40">(已停止)</span>
         {/if}
       </span>
