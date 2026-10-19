@@ -93,6 +93,21 @@ func NewManager(cfg *config.Config, procMgr *process.Manager, resMgr *resource.M
 	return m
 }
 
+// SetResourceManager 注入资源管理器。首跑向导之前安装目录为空、资源管理器尚未创建，
+// 向导完成后必须补注入，否则端口分配与配置落盘会走 nil（见 app.reinitManagers）。
+func (m *Manager) SetResourceManager(rm *resource.Manager) {
+	m.mu.Lock()
+	m.resMgr = rm
+	m.mu.Unlock()
+}
+
+// resourceMgr 读取当前资源管理器（受同一把锁保护）。
+func (m *Manager) resourceMgr() *resource.Manager {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.resMgr
+}
+
 func kindFromID(id string) string {
 	if idx := strings.IndexByte(id, '@'); idx > 0 {
 		return id[:idx]
@@ -1198,47 +1213,81 @@ func (m *Manager) SaveConfig(id string, values map[string]string) error {
 	return handler.SaveConfig(s, m.cfg, values)
 }
 
-func (m *Manager) Configure(id string) error {
-	m.mu.Lock()
-	s, ok := m.services[id]
-	if !ok {
-		// 调用方只传 kind（如前端 applyServiceConfig('nginx')）时不能按 map 随机序挑版本，
-		// 否则多版本共存时配置到不可预期的版本上。确定性选择：运行中 > 默认版本 > 最高版本。
-		kind := kindFromID(id)
-		for _, cand := range m.services {
-			if cand.Info.Kind != kind {
+// resolveConfigTarget 把调用方传入的标识解析为服务表里真实存在的完整 ID（kind@version）。
+//
+// 前端存在只传 kind 的调用（applyServiceConfig('nginx')），多版本共存时不能按 map
+// 随机序挑版本，必须确定性选择：运行中 > 注册表默认版本 > 最高版本。
+// 解析结果贯穿到后续每一步——此前只在这里选出实例，apply-config 又拿原始入参回查，
+// 裸 kind 必然查不到，导致"配置事务失败"。
+func (m *Manager) resolveConfigTarget(id string) (string, *ServiceInstance) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if s, ok := m.services[id]; ok {
+		return id, s
+	}
+
+	kind := kindFromID(id)
+	defVer := defaultVersionOf(kind)
+	var best *ServiceInstance
+	for _, cand := range m.services {
+		if cand.Info.Kind != kind {
+			continue
+		}
+		// 运行中的实例优先，且一旦命中即为最终选择。
+		if cand.Info.Status == core.StatusRunning {
+			return cand.Info.ID, cand
+		}
+		if best == nil {
+			best = cand
+			continue
+		}
+		// 其次注册表默认版本。
+		if defVer != "" {
+			if cand.Info.Version == defVer {
+				best = cand
 				continue
 			}
-			if s == nil || cand.Info.Status == core.StatusRunning {
-				s = cand
-				ok = true
-				if s.Info.Status == core.StatusRunning {
-					break
-				}
+			if best.Info.Version == defVer {
 				continue
-			}
-			if s.Info.Status != core.StatusRunning && cand.Info.Version > s.Info.Version {
-				s = cand
 			}
 		}
+		// 最后取最高版本（按数字段比较，字符串序会把 3.9.13 判得比 3.12.8 高）。
+		if versionGreater(cand.Info.Version, best.Info.Version) {
+			best = cand
+		}
 	}
-	if !ok {
-		m.mu.Unlock()
+	if best == nil {
+		return "", nil
+	}
+	return best.Info.ID, best
+}
+
+// ResolveInstanceID 把可能只含 kind 的标识解析为服务表里的完整 ID，
+// 让日志等按 ID 查表的调用方复用同一套版本选择规则。解析不出返回空串。
+func (m *Manager) ResolveInstanceID(id string) string {
+	target, _ := m.resolveConfigTarget(id)
+	return target
+}
+
+func (m *Manager) Configure(id string) error {
+	targetID, s := m.resolveConfigTarget(id)
+	if s == nil {
 		return core.ErrServiceNotFound
 	}
-	handler := m.matchConfigHandler(id)
+	handler := m.matchConfigHandler(targetID)
 	if handler == nil {
-		m.mu.Unlock()
 		return nil
 	}
-	oldVersion := s.Info.Version
-	m.mu.Unlock()
+
+	kind := kindFromID(targetID)
+	version := s.Info.Version
 
 	compensator := tx.NewCompensator()
-	txn := tx.NewTransaction("configure-" + id)
+	txn := tx.NewTransaction("configure-" + targetID)
 
 	installDir := m.cfg.Get().InstallDir
-	configPath := filepath.Join(installDir, "programs", kindFromID(id), oldVersion, "conf")
+	configPath := filepath.Join(installDir, "programs", kind, version, "conf")
 	backupPath := configPath + ".bak"
 
 	txn.
@@ -1247,12 +1296,12 @@ func (m *Manager) Configure(id string) error {
 		}, compensator.RestoreBackup(backupPath, configPath)).
 		Step("apply-config", func(ctx context.Context) error {
 			m.mu.RLock()
-			si := m.services[id]
+			si := m.services[targetID]
 			m.mu.RUnlock()
 			if si == nil {
 				return core.ErrServiceNotFound
 			}
-			return handler.Configure(si, m.cfg, m.resMgr)
+			return handler.Configure(si, m.cfg, m.resourceMgr())
 		}, compensator.RestoreBackup(backupPath, configPath))
 
 	if err := txn.Commit(); err != nil {
@@ -1425,11 +1474,11 @@ func (m *Manager) UninstallVersion(serviceType, version string) error {
 				m.mu.Unlock()
 				return nil
 			}
-	if s.stopped != nil {
-		close(s.stopped)
-		s.stopped = nil
-	}
-	s.stoppedFlag = true
+			if s.stopped != nil {
+				close(s.stopped)
+				s.stopped = nil
+			}
+			s.stoppedFlag = true
 			var pids []int
 			if s.process != nil {
 				pids = append(pids, s.process.PID)

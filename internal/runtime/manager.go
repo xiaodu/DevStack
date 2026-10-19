@@ -106,15 +106,36 @@ func (m *Manager) GetPHPVersionPort(version string) int {
 	return GetPHPVersionPort(m.cfg, version)
 }
 
+// SetResourceManager 注入资源管理器：首跑向导完成前安装目录为空、资源管理器尚未创建，
+// 向导结束后必须补注入（见 app.reinitManagers），否则启动 php/node 取端口会空指针。
+func (m *Manager) SetResourceManager(rm *resource.Manager) {
+	m.mu.Lock()
+	m.resMgr = rm
+	m.mu.Unlock()
+	// 注入后立即补一次此前跳过的端口预分配
+	m.scan()
+}
+
+// resourceMgr 读取当前资源管理器（受同一把锁保护）。
+func (m *Manager) resourceMgr() *resource.Manager {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.resMgr
+}
+
 // nodePort 返回 Node 版本对应的持久化端口；首次调用时从端口池分配。
 func (m *Manager) nodePort(version string) int {
-	allocated := m.resMgr.Ports().ListAllocated()
+	rm := m.resourceMgr()
+	if rm == nil {
+		return 0
+	}
+	allocated := rm.Ports().ListAllocated()
 	for port, owner := range allocated {
 		if owner == "node:"+version {
 			return port
 		}
 	}
-	port, err := m.resMgr.Ports().Allocate("node:"+version, 0)
+	port, err := rm.Ports().Allocate("node:"+version, 0)
 	if err != nil {
 		return 0
 	}
@@ -126,8 +147,13 @@ func (m *Manager) scan() {
 	if installDir == "" {
 		return
 	}
+	rm := m.resourceMgr()
+	if rm == nil {
+		// 首跑向导之前资源管理器尚未创建（安装目录为空），跳过端口预分配
+		return
+	}
 
-	AutoAssignPorts(m.cfg, installDir, m.resMgr.Ports())
+	AutoAssignPorts(m.cfg, installDir, rm.Ports())
 
 	typeDirs := map[core.RuntimeType]string{
 		core.RuntimePHP:    filepath.Join(installDir, "programs", "php"),
@@ -269,6 +295,10 @@ func (m *Manager) Scan() {
 }
 
 func (m *Manager) startPHP(inst *Instance) error {
+	rm := m.resourceMgr()
+	if rm == nil {
+		return fmt.Errorf("资源管理器未初始化，无法为 PHP 分配端口")
+	}
 	installDir := m.cfg.Get().InstallDir
 	version := inst.Info.Version
 	phpDir := filepath.Join(installDir, "programs", "php", version)
@@ -283,7 +313,7 @@ func (m *Manager) startPHP(inst *Instance) error {
 		os.WriteFile(phpIni, []byte(ini), 0644)
 	}
 
-	AutoAssignPorts(m.cfg, installDir, m.resMgr.Ports())
+	AutoAssignPorts(m.cfg, installDir, rm.Ports())
 	port := GetPHPVersionPort(m.cfg, version)
 	inst.Info.Port = port
 

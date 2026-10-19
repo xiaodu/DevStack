@@ -85,7 +85,13 @@ func (sm *SnapshotManager) LoadSnapshot(ctx context.Context, snapshotID string) 
 func (sm *SnapshotManager) ListSnapshots(ctx context.Context) ([]string, error) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
+	return sm.listLocked()
+}
 
+// listLocked 列出快照标识。**调用方必须已持有 sm.mu**。
+// Go 的 sync.Mutex 不可重入，持锁路径上一律走这些 *Locked 版本，
+// 否则会自我死锁（TakeSnapshot → cleanupOldSnapshots → ListSnapshots 就是这么卡的）。
+func (sm *SnapshotManager) listLocked() ([]string, error) {
 	if !sm.exists(sm.baseDir) {
 		return nil, nil
 	}
@@ -143,6 +149,11 @@ func (sm *SnapshotManager) DeleteSnapshot(ctx context.Context, snapshotID string
 	}
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
+	return sm.removeLocked(snapshotID)
+}
+
+// removeLocked 删除快照文件。**调用方必须已持有 sm.mu**。
+func (sm *SnapshotManager) removeLocked(snapshotID string) error {
 	snapshotPath := filepath.Join(sm.baseDir, snapshotID+".json")
 	if err := os.Remove(snapshotPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("删除快照失败: %w", err)
@@ -180,11 +191,11 @@ func validSnapshotID(snapshotID string) bool {
 
 func (sm *SnapshotManager) CreateSnapshotStep(env EnvironmentState) (tx.StepFunc, tx.StepFunc) {
 	return func(ctx context.Context) error {
-		_, err := sm.TakeSnapshot(ctx, env)
-		return err
-	}, func(ctx context.Context) error {
-		return nil
-	}
+			_, err := sm.TakeSnapshot(ctx, env)
+			return err
+		}, func(ctx context.Context) error {
+			return nil
+		}
 }
 
 func (sm *SnapshotManager) RestoreLastSnapshot() (EnvironmentState, error) {
@@ -196,10 +207,11 @@ func (sm *SnapshotManager) RestoreLastSnapshot() (EnvironmentState, error) {
 	return sm.LoadSnapshot(context.Background(), last)
 }
 
+// cleanupOldSnapshots 保留最近 maxSnapshots 个快照。**调用方必须已持有 sm.mu**。
 func (sm *SnapshotManager) cleanupOldSnapshots() {
 	const maxSnapshots = 10
 
-	snapshots, err := sm.ListSnapshots(context.Background())
+	snapshots, err := sm.listLocked()
 	if err != nil {
 		return
 	}
@@ -209,7 +221,11 @@ func (sm *SnapshotManager) cleanupOldSnapshots() {
 	}
 
 	for i := 0; i < len(snapshots)-maxSnapshots; i++ {
-		sm.DeleteSnapshot(context.Background(), snapshots[i])
+		if !validSnapshotID(snapshots[i]) {
+			// 外部/历史遗留文件不参与清理，避免按意外的标识删东西
+			continue
+		}
+		_ = sm.removeLocked(snapshots[i])
 	}
 }
 

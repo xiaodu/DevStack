@@ -35,7 +35,6 @@ type App struct {
 	ctx         context.Context
 	cfg         *config.Config
 	procMgr     *process.Manager
-	resMgr      *resource.Manager
 	svcMgr      *service.Manager
 	rtMgr       *runtime.Manager
 	projMgr     *project.Manager
@@ -51,8 +50,11 @@ type App struct {
 	envOpMu     sync.Mutex // 串行化环境启停操作，防止并发激活
 	isQuitting  bool       // 标记正在退出，防止 HandleWindowClose 拦截退出
 
-	downloadMu sync.Mutex               // 保护 downloads 单飞去重表
-	downloads  map[string]struct{}      // 正在下载中的 service@version
+	resMu  sync.RWMutex      // 保护 resMgr：首跑向导结束后会被替换
+	resMgr *resource.Manager // 端口池等资源，读取请走 resourceManager()
+
+	downloadMu sync.Mutex          // 保护 downloads 单飞去重表
+	downloads  map[string]struct{} // 正在下载中的 service@version
 
 	overflowMu    sync.Mutex // 保护事件丢弃去抖定时器
 	overflowTimer *time.Timer
@@ -66,6 +68,37 @@ var wailsLogFile *os.File
 
 var runtimeNames = map[string]string{
 	"php": "PHP", "node": "Node.js", "python": "Python",
+}
+
+// resourceManager 返回当前资源管理器；首跑向导完成前后它会被替换，所以读取必须走这里。
+func (a *App) resourceManager() *resource.Manager {
+	a.resMu.RLock()
+	defer a.resMu.RUnlock()
+	return a.resMgr
+}
+
+// setResourceManager 原子地替换资源管理器。
+func (a *App) setResourceManager(rm *resource.Manager) {
+	a.resMu.Lock()
+	a.resMgr = rm
+	a.resMu.Unlock()
+}
+
+// registerProviders 注册内置服务提供者，幂等：
+// 已注册的不重复创建，避免把 provider 内部持有的活动实例与进程号丢掉。
+func registerProviders(cfg *config.Config, procMgr *process.Manager, resMgr *resource.Manager) {
+	if provider.Get("nginx") == nil {
+		provider.NewNginxProvider(cfg, procMgr, resMgr)
+	}
+	if provider.Get("mysql") == nil {
+		provider.NewMySQLProvider(cfg, procMgr)
+	}
+	if provider.Get("redis") == nil {
+		provider.NewRedisProvider(cfg, procMgr)
+	}
+	if provider.Get("php") == nil {
+		provider.NewPHPProvider(cfg, procMgr, resMgr)
+	}
 }
 
 func NewApp() *App {
@@ -213,14 +246,12 @@ func NewApp() *App {
 		opStore.LogInfo("[INIT] 协调器初始化完成")
 
 		opStore.LogInfo("[INIT] 注册服务提供者...")
-		provider.NewNginxProvider(cfg, procMgr, resMgr)
-		provider.NewMySQLProvider(cfg, procMgr)
-		provider.NewRedisProvider(cfg, procMgr)
-		provider.NewPHPProvider(cfg, procMgr, resMgr)
+		registerProviders(cfg, procMgr, resMgr)
 		opStore.LogInfo("[INIT] 服务提供者注册完成")
 	} else {
 		opStore.LogInfo("[INIT] 安装目录为空，跳过服务/运行时/项目/环境/下载/状态/协调器初始化")
-		// 创建空的管理器实例，避免 nil 指针
+		// 创建空的管理器实例，避免 nil 指针；资源管理器与 providers 由首跑向导完成后的
+		// reinitManagers 补齐（见 SetResourceManager / registerProviders）。
 		svcMgr = service.NewManager(cfg, procMgr, nil, reactiveEng)
 		rtMgr = runtime.NewManager(cfg, procMgr, nil)
 		projMgr = project.NewManager("", "1.26.0", rtMgr, nil)
@@ -230,31 +261,11 @@ func NewApp() *App {
 		reconciler = engine.NewReconciler(stateStore, svcMgr, projMgr, rtMgr)
 	}
 
+	// 内置规则在 app 构造之后注册：回调按调用时的 app 状态解析管理器，
+	// 首跑向导后 reinitManagers 换上真实资源管理器时，规则不会仍握着旧的 nil 引用。
 	opStore.LogInfo("[INIT] 初始化日志监视器...")
 	logWatcher := log.NewLogWatcher()
 	opStore.LogInfo("[INIT] 日志监视器初始化完成")
-
-	opStore.LogInfo("[INIT] 注册内置响应式规则...")
-	reactive.RegisterBuiltinRules(reactiveEng,
-		func(serviceID string) error {
-			if strings.HasPrefix(serviceID, "php@") {
-				return rtMgr.Start(serviceID)
-			}
-			return svcMgr.Start(serviceID)
-		},
-		func(owner string, oldPort int) (int, error) {
-			if resMgr != nil {
-				resMgr.Ports().Release(oldPort, owner)
-				return resMgr.Ports().Allocate(owner, 0)
-			}
-			return 0, fmt.Errorf("资源管理器未初始化")
-		},
-		func(eventType reactive.EventType, source string, data map[string]interface{}) {
-			opStore.Add("告警", string(eventType), source, fmt.Sprintf("%v", data))
-		},
-	)
-	reactiveEng.Start()
-	opStore.LogInfo("[INIT] 响应式引擎启动完成")
 
 	opStore.LogInfo("[INIT] 初始化系统托盘...")
 	app := &App{
@@ -274,6 +285,31 @@ func NewApp() *App {
 		AppVersion:  version,
 		downloads:   map[string]struct{}{},
 	}
+	opStore.LogInfo("[INIT] 注册内置响应式规则...")
+	// 回调一律通过 app 解析当前管理器与资源管理器：首跑向导结束后 reinitManagers 会换上
+	// 真实的资源管理器并把活依赖注入 svcMgr/rtMgr，规则不能握着构造期的快照。
+	reactive.RegisterBuiltinRules(reactiveEng,
+		func(serviceID string) error {
+			if strings.HasPrefix(serviceID, "php@") {
+				return app.rtMgr.Start(serviceID)
+			}
+			return app.svcMgr.Start(serviceID)
+		},
+		func(owner string, oldPort int) (int, error) {
+			rm := app.resourceManager()
+			if rm == nil {
+				return 0, fmt.Errorf("资源管理器未初始化")
+			}
+			rm.Ports().Release(oldPort, owner)
+			return rm.Ports().Allocate(owner, 0)
+		},
+		func(eventType reactive.EventType, source string, data map[string]interface{}) {
+			opStore.Add("告警", string(eventType), source, fmt.Sprintf("%v", data))
+		},
+	)
+	reactiveEng.Start()
+	opStore.LogInfo("[INIT] 响应式引擎启动完成")
+
 	app.tray = tray.New(
 		func() {
 			if app.ctx == nil {
@@ -790,12 +826,16 @@ func isRuntime(kind string) bool {
 
 // 保留旧 API 别名，兼容前端
 func (a *App) ListEnvironmentProfiles() ([]EnvironmentWithUsage, error) { return a.ListEnvironments() }
-func (a *App) GetEnvironmentProfile(id string) (EnvironmentWithUsage, error) { return a.GetEnvironment(id) }
-func (a *App) CreateEnvironmentProfile(env environment.Environment) (environment.Environment, error) { return a.CreateEnvironment(env) }
-func (a *App) UpdateEnvironmentProfile(env environment.Environment) (environment.Environment, error) { return a.UpdateEnvironment(env) }
+func (a *App) GetEnvironmentProfile(id string) (EnvironmentWithUsage, error) {
+	return a.GetEnvironment(id)
+}
+func (a *App) CreateEnvironmentProfile(env environment.Environment) (environment.Environment, error) {
+	return a.CreateEnvironment(env)
+}
+func (a *App) UpdateEnvironmentProfile(env environment.Environment) (environment.Environment, error) {
+	return a.UpdateEnvironment(env)
+}
 func (a *App) DeleteEnvironmentProfile(id string) error { return a.DeleteEnvironment(id) }
-
-
 
 // ==================== Service APIs ====================
 
@@ -1401,9 +1441,9 @@ func (a *App) CancelDownload(key string) {
 // ==================== Provider APIs ====================
 
 type ProviderInfo struct {
-	Name        string   `json:"name"`
-	Version     string   `json:"version"`
-	Description string   `json:"description"`
+	Name         string   `json:"name"`
+	Version      string   `json:"version"`
+	Description  string   `json:"description"`
 	Capabilities []string `json:"capabilities"`
 }
 
@@ -1417,9 +1457,9 @@ func (a *App) GetProviders() []ProviderInfo {
 				caps = append(caps, string(cap))
 			}
 			result = append(result, ProviderInfo{
-				Name:        p.Name(),
-				Version:     p.Version(),
-				Description: p.Description(),
+				Name:         p.Name(),
+				Version:      p.Version(),
+				Description:  p.Description(),
 				Capabilities: caps,
 			})
 		}
@@ -1436,9 +1476,9 @@ func (a *App) GetProvidersByCapability(cap string) []ProviderInfo {
 			caps = append(caps, string(c))
 		}
 		result = append(result, ProviderInfo{
-			Name:        p.Name(),
-			Version:     p.Version(),
-			Description: p.Description(),
+			Name:         p.Name(),
+			Version:      p.Version(),
+			Description:  p.Description(),
 			Capabilities: caps,
 		})
 	}
@@ -1512,33 +1552,56 @@ func (a *App) GetSystemInfo() core.SystemInfo {
 	return result
 }
 
-func (a *App) GetLogs(serviceID string) ([]log.LogEntry, error) {
-	installDir := a.cfg.Get().InstallDir
-	var logPath string
+// serviceLogFile 各组件主日志相对安装目录的位置（kind → 版本目录下的相对路径）。
+var serviceLogFile = map[string]string{
+	"nginx":  "logs/error.log",
+	"mysql":  "error.log",
+	"redis":  "redis.log",
+	"php":    "php_errors.log",
+	"node":   "node.log",
+	"python": "python.log",
+}
 
-	if serviceID == "nginx" {
-		svc := a.svcMgr.GetService(serviceID)
-		if svc != nil {
-			logPath = joinPath(installDir, "programs", "nginx", svc.Info.Version, "logs", "error.log")
-		}
-	} else if serviceID == "mysql" {
-		svc := a.svcMgr.GetService(serviceID)
-		if svc != nil {
-			logPath = joinPath(installDir, "programs", "mysql", svc.Info.Version, "error.log")
-		}
-	} else if strings.HasPrefix(serviceID, "redis@") {
-		version := strings.TrimPrefix(serviceID, "redis@")
-		logPath = joinPath(installDir, "programs", "redis", version, "redis.log")
-	} else if strings.HasPrefix(serviceID, "php@") {
-		version := strings.TrimPrefix(serviceID, "php@")
-		logPath = joinPath(installDir, "programs", "php", version, "php_errors.log")
-	} else if strings.HasPrefix(serviceID, "node@") {
-		version := strings.TrimPrefix(serviceID, "node@")
-		logPath = joinPath(installDir, "programs", "node", version, "node.log")
-	} else if strings.HasPrefix(serviceID, "python@") {
-		version := strings.TrimPrefix(serviceID, "python@")
-		logPath = joinPath(installDir, "programs", "python", version, "python.log")
+// splitServiceID 拆分服务标识为 kind 与 version；标识不含版本时返回 version="" 。
+func splitServiceID(id string) (string, string) {
+	if i := strings.IndexByte(id, '@'); i > 0 {
+		return id[:i], id[i+1:]
 	}
+	return id, ""
+}
+
+// resolveServiceLogPath 统一按 kind@version 解析组件日志路径。
+// 历史实现里 nginx/mysql 用裸 kind 去查以 kind@version 为键的服务表，永远查不到，
+// 导致这两个组件的日志一直是空的；现在所有组件走同一条拆分逻辑，不再靠 GetService 兜版本。
+func (a *App) resolveServiceLogPath(serviceID string) string {
+	installDir := a.cfg.Get().InstallDir
+	kind, version := splitServiceID(serviceID)
+	rel, ok := serviceLogFile[kind]
+	if !ok {
+		return ""
+	}
+	if version == "" {
+		// 兼容只传 kind 的调用：解析出当前应该看的那个版本（运行中 > 默认 > 最高）
+		if resolved := a.svcMgr.ResolveInstanceID(serviceID); resolved != "" {
+			_, version = splitServiceID(resolved)
+		}
+	}
+	if version == "" {
+		return ""
+	}
+	// 版本段来自前端标识，会直接拼进文件路径：与 ReadLogFile/snapshotID 一样做包含校验，
+	// 防止 "nginx@../../config" 这类标识越权读取安装目录之外的文件。
+	if !isSafePathComponent(version) {
+		return ""
+	}
+	return joinPath(installDir, "programs", kind, version, filepath.FromSlash(rel))
+}
+
+func (a *App) GetLogs(serviceID string) ([]log.LogEntry, error) {
+	if a.opStore != nil {
+		a.opStore.LogDebug("[API] GetLogs 调用, serviceID: %s", serviceID)
+	}
+	logPath := a.resolveServiceLogPath(serviceID)
 	if logPath == "" {
 		return []log.LogEntry{}, nil
 	}
@@ -1599,13 +1662,13 @@ func (a *App) SelectInstallDir(defaultPath string) (string, error) {
 
 // PortConflict 端口冲突信息
 type PortConflict struct {
-	Port       int    `json:"port"`
-	Service    string `json:"service"`
-	InUse      bool   `json:"inUse"`
-	PID        int    `json:"pid"`
-	ExePath    string `json:"exePath"`
-	OwnedByUs  bool   `json:"ownedByUs"`
-	Message    string `json:"message"`
+	Port      int    `json:"port"`
+	Service   string `json:"service"`
+	InUse     bool   `json:"inUse"`
+	PID       int    `json:"pid"`
+	ExePath   string `json:"exePath"`
+	OwnedByUs bool   `json:"ownedByUs"`
+	Message   string `json:"message"`
 }
 
 // CheckSetupPorts 检查向导阶段的默认端口冲突
@@ -1630,8 +1693,8 @@ func (a *App) CheckSetupPorts(services []string) []PortConflict {
 			Service: svc,
 			Message: fmt.Sprintf("端口 %d 可用", port),
 		}
-		if a.resMgr != nil {
-			status := a.resMgr.Ports().CheckPort(port)
+		if rm := a.resourceManager(); rm != nil {
+			status := rm.Ports().CheckPort(port)
 			conflict.InUse = status.InUse
 			conflict.PID = status.PID
 			conflict.ExePath = status.ExePath
@@ -1815,9 +1878,9 @@ func (a *App) runSetup(args CompleteSetupArgs) {
 	if a.ctx != nil {
 		if len(failedServices) > 0 {
 			wailsruntime.EventsEmit(a.ctx, "setup:complete", map[string]interface{}{
-				"ok":              true,
-				"failedServices":  failedServices,
-				"message":         "安装完成，部分组件下载失败",
+				"ok":             true,
+				"failedServices": failedServices,
+				"message":        "安装完成，部分组件下载失败",
 			})
 		} else {
 			wailsruntime.EventsEmit(a.ctx, "setup:complete", map[string]interface{}{
@@ -1828,13 +1891,34 @@ func (a *App) runSetup(args CompleteSetupArgs) {
 	}
 }
 
-// reinitManagers 向导完成后重新初始化依赖安装目录的管理器
+// reinitManagers 首跑向导完成后补齐依赖安装目录的管理器。
+//
+// 刻意不新建响应式引擎、也不重建 svcMgr/rtMgr：
+//   - 换引擎会让 service.Manager 继续往旧引擎发事件（崩溃自愈规则与事件丢弃兜底只挂在新引擎上），
+//     同时留下两套规则、两个 processEvents goroutine；
+//   - 换 svcMgr 会再造一个 orchestrator 引擎（Job Object 与周期同步都挂在旧实例上）。
+//
+// 因此这里只做"补齐缺失的依赖"：换上真实资源管理器、把它注入两个管理器、
+// 补注册构造期跳过的 providers。
 func (a *App) reinitManagers(installDir string) error {
 	// 重新初始化资源管理器（端口池等）
-	a.resMgr = resource.NewManager(filepath.Join(installDir, "config"))
+	resMgr := resource.NewManager(filepath.Join(installDir, "config"))
+	a.setResourceManager(resMgr)
+
+	// 向导之前 svcMgr/rtMgr 是带 nil 资源管理器构造的，必须补上，
+	// 否则端口分配与运行时启动会走空指针（首跑后启 php/node 直接崩溃）。
+	if a.svcMgr != nil {
+		a.svcMgr.SetResourceManager(resMgr)
+	}
+	if a.rtMgr != nil {
+		a.rtMgr.SetResourceManager(resMgr)
+	}
+
+	// 安装目录为空时跳过了 provider 注册，这里补上（幂等，不会覆盖已注册实例）
+	registerProviders(a.cfg, a.procMgr, resMgr)
 
 	// 重新初始化项目管理器
-	a.projMgr = project.NewManager(installDir, "1.26.0", a.rtMgr, a.resMgr)
+	a.projMgr = project.NewManager(installDir, "1.26.0", a.rtMgr, resMgr)
 	a.projMgr.SetServiceManager(a.svcMgr)
 	a.projMgr.SetRuntimeManager(a.rtMgr)
 
@@ -1851,53 +1935,6 @@ func (a *App) reinitManagers(installDir string) error {
 	// 重新初始化协调器
 	a.reconciler = engine.NewReconciler(a.stateStore, a.svcMgr, a.projMgr, a.rtMgr)
 	a.reconciler.SetReporter(a)
-
-	// 重新注册响应式规则（需要新的端口分配器）
-	a.reactiveEng = reactive.NewEngine(100)
-	reactive.RegisterBuiltinRules(a.reactiveEng,
-		func(serviceID string) error {
-			if strings.HasPrefix(serviceID, "php@") {
-				return a.rtMgr.Start(serviceID)
-			}
-			return a.svcMgr.Start(serviceID)
-		},
-		func(owner string, oldPort int) (int, error) {
-			a.resMgr.Ports().Release(oldPort, owner)
-			return a.resMgr.Ports().Allocate(owner, 0)
-		},
-		func(eventType reactive.EventType, source string, data map[string]interface{}) {
-			a.opStore.Add("告警", string(eventType), source, fmt.Sprintf("%v", data))
-		},
-	)
-	a.reactiveEng.Start()
-
-	// 重新订阅响应式事件到前端
-	if a.ctx != nil {
-		eventTypes := []reactive.EventType{
-			reactive.EventServiceStarted, reactive.EventServiceStopped,
-			reactive.EventServiceStarting, reactive.EventServiceStopping,
-			reactive.EventServiceCrashed, reactive.EventServiceHealthFailed,
-			reactive.EventServiceRestarted, reactive.EventServiceError,
-			reactive.EventPortConflict, reactive.EventConfigChanged,
-			reactive.EventConfigReloaded, reactive.EventResourceAllocated,
-			reactive.EventResourceReleased, reactive.EventProjectCreated,
-			reactive.EventProjectDeleted, reactive.EventProjectEnabled,
-			reactive.EventProjectDisabled,
-		}
-		for _, et := range eventTypes {
-			etCopy := et
-			a.reactiveEng.Subscribe(et, func(event *reactive.Event) {
-				wailsruntime.EventsEmit(a.ctx, "reactive:"+string(etCopy), map[string]interface{}{
-					"id":        event.ID,
-					"type":      string(event.Type),
-					"source":    event.Source,
-					"timestamp": event.Timestamp,
-					"data":      event.Data,
-				})
-			})
-		}
-		a.reactiveEng.SetOnDropped(func(_ *reactive.Event) { a.notifyEventOverflow(a.ctx) })
-	}
 
 	// 重新加载 Procfile
 	procfilePath := filepath.Join(installDir, "Procfile")

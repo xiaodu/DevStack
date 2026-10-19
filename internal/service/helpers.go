@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/xiaodu/DevStack/internal/config"
+	"github.com/xiaodu/DevStack/internal/registry"
 	"github.com/xiaodu/DevStack/internal/resource"
 )
 
@@ -45,6 +47,48 @@ func updateIniValue(content, key, value string) string {
 		return re.ReplaceAllString(content, key+" = "+value)
 	}
 	return content + "\n" + key + " = " + value
+}
+
+// defaultVersionOf 返回注册表里该组件的默认版本，找不到返回空串。
+func defaultVersionOf(kind string) string {
+	if pkg := registry.Builtin().Get(kind); pkg != nil {
+		return pkg.DefaultVersion
+	}
+	return ""
+}
+
+// versionGreater 按数字段逐段比较版本号。
+// 不能用字符串序：字典序下 "3.9.13" 会被判为高于 "3.12.8"，多版本共存时选错目标。
+func versionGreater(a, b string) bool {
+	as, bs := versionSegments(a), versionSegments(b)
+	for i := 0; i < len(as) || i < len(bs); i++ {
+		var x, y int
+		if i < len(as) {
+			x = as[i]
+		}
+		if i < len(bs) {
+			y = bs[i]
+		}
+		if x != y {
+			return x > y
+		}
+	}
+	return false
+}
+
+// versionSegments 提取 "8.0.36"、"1.26.2-1" 这类版本号里的数字段，非数字部分丢弃。
+func versionSegments(v string) []int {
+	var out []int
+	for _, seg := range strings.FieldsFunc(v, func(r rune) bool {
+		return r < '0' || r > '9'
+	}) {
+		n, err := strconv.Atoi(seg)
+		if err != nil {
+			continue
+		}
+		out = append(out, n)
+	}
+	return out
 }
 
 func updateConfValue(content, key, value string) string {
