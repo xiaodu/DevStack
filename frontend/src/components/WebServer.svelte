@@ -9,6 +9,9 @@ const dispatch = createEventDispatcher()
 
 let nc = $state<Record<string, any>>({})
 let configLoading = $state(false)
+// 配置没读到就绝不保存：模型保持 {} 时所有数值字段会渲染成 0，
+// 直接点保存会把 0/空值写进真实的 nginx.conf（见下方保存按钮的禁用条件）
+let configError = $state('')
 
 const toggleKey = `service:toggle:${service.id}`
 const saveKey = `service:savecfg:${service.id}`
@@ -34,10 +37,20 @@ onMount(() => {
 
 async function loadConfig() {
   configLoading = true
+  configError = ''
   try {
-    nc = await api.getServiceConfig('nginx')
+    const cfg = await api.getServiceConfig('nginx')
+    if (!cfg || typeof cfg !== 'object') {
+      // 空响应同样按失败处理：否则数值字段全渲染成 0，保存即覆盖真实配置
+      nc = {}
+      configError = '读取到的配置为空'
+    } else {
+      nc = cfg
+    }
   } catch (e) {
     console.error(e)
+    nc = {}
+    configError = (e as any)?.message || String(e)
   } finally {
     configLoading = false
   }
@@ -58,6 +71,7 @@ function loadRecommended() {
 }
 
 async function save() {
+  if (configError) return // 加载未成功前不允许写盘（按钮已禁用，这里兜底防键盘回车等旁路）
   await safeInvoke(
     saveKey,
     async () => {
@@ -113,6 +127,12 @@ async function toggle() {
     {#if configLoading}
       <div class="text-center py-10 text-base-content/60">加载配置...</div>
     {:else}
+      {#if configError}
+        <div class="alert alert-error alert-sm flex items-center gap-3 py-2.5 mb-4">
+          <span class="text-sm">配置读取失败（{configError}），为避免用空值覆盖 nginx.conf，已禁止保存。</span>
+          <button class="btn btn-sm btn-ghost shrink-0" onclick={loadConfig} disabled={configLoading}>重新加载</button>
+        </div>
+      {/if}
       <div class="card bg-base-100 border border-base-300 p-5 mb-4">
         <div class="flex justify-between items-center mb-3.5">
           <h3 class="text-sm font-semibold text-primary">性能配置</h3>
@@ -171,10 +191,12 @@ async function toggle() {
       </div>
 
       <div class="flex items-center gap-3 mt-6 pt-4 border-t border-base-300">
-        <button class="btn btn-primary" onclick={save} disabled={saving}>
+        <button class="btn btn-primary" onclick={save} disabled={saving || !!configError}>
           {#if saving}<span class="loading loading-spinner loading-xs"></span>{/if}保存并生效
         </button>
-        <span class="text-xs text-base-content/50">保存后自动重新生成配置文件并重启 Nginx</span>
+        <span class="text-xs {configError ? 'text-error' : 'text-base-content/50'}">
+          {configError ? '配置未成功读取，无法保存（请先重新加载）' : '保存后自动重新生成配置文件并重启 Nginx'}
+        </span>
       </div>
     {/if}
   {:else}

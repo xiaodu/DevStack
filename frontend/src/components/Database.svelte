@@ -15,6 +15,9 @@ let saving = $derived(($nanoBusy[saveKey] || 0) > 0)
 
 let mc = $state<Record<string, any>>({})
 let configLoading = $state(false)
+// my.ini 读取失败时模型是 {}，端口/连接数等数值字段全部渲染成 0，
+// 此时保存会把 port=0 等垃圾值写进真实配置，必须禁止（见下方保存按钮的禁用条件）
+let configError = $state('')
 let mysqlRootHasPassword = $state(null)
 let checkingAuth = $state(false)
 let authError = $state('')
@@ -77,10 +80,19 @@ async function checkMysqlAuth() {
 
 async function loadMysqlConfig() {
   configLoading = true
+  configError = ''
   try {
-    mc = await api.getServiceConfig('mysql')
+    const cfg = await api.getServiceConfig('mysql')
+    if (!cfg || typeof cfg !== 'object') {
+      mc = {}
+      configError = '读取到的配置为空'
+    } else {
+      mc = cfg
+    }
   } catch (e) {
     console.error(e)
+    mc = {}
+    configError = (e as any)?.message || String(e)
   } finally {
     configLoading = false
   }
@@ -101,6 +113,7 @@ function loadRecommendedMySQL() {
 }
 
 async function save() {
+  if (configError) return // 配置未成功读取前不允许写盘（按钮已禁用，这里兜底）
   const vals: Record<string, any> = {}
   if (service.kind === 'mysql') {
     Object.assign(vals, {
@@ -193,6 +206,12 @@ run(() => {
     {#if configLoading}
       <div class="text-center py-10 text-base-content/60">加载配置...</div>
     {:else}
+      {#if configError}
+        <div class="alert alert-error alert-sm flex items-center gap-3 py-2.5 mb-4">
+          <span class="text-sm">my.ini 读取失败（{configError}），为避免用空值覆盖配置，已禁止保存。</span>
+          <button class="btn btn-sm btn-ghost shrink-0" onclick={loadMysqlConfig} disabled={configLoading}>重新加载</button>
+        </div>
+      {/if}
       <div class="card bg-base-100 border border-base-300 p-5 mb-4">
         <div class="flex items-center gap-2 px-3.5 py-2.5 bg-base-200 rounded-lg">
           <span class="w-2 h-2 rounded-full {service.status === 'running' ? 'bg-success' : 'bg-error'}"></span>
@@ -348,10 +367,16 @@ run(() => {
 
   {#if service.kind === 'mysql' || service.kind === 'redis'}
     <div class="flex items-center gap-3 mt-6 pt-4 border-t border-base-300">
-      <button class="btn btn-primary" onclick={save} disabled={saving}>
+      <button class="btn btn-primary" onclick={save} disabled={saving || !!configError}>
         {#if saving}<span class="loading loading-spinner loading-xs"></span>{/if}保存设置
       </button>
-      <span class="text-xs text-base-content/50">{service.kind === 'mysql' ? '配置修改与密码修改后需重启生效' : 'Redis 配置修改后需重启生效'}</span>
+      <span class="text-xs {configError ? 'text-error' : 'text-base-content/50'}">
+        {configError
+          ? '配置未成功读取，无法保存（请先重新加载）'
+          : service.kind === 'mysql'
+            ? '配置修改与密码修改后需重启生效'
+            : 'Redis 配置修改后需重启生效'}
+      </span>
     </div>
   {/if}
 </div>

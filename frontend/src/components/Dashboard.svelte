@@ -8,7 +8,12 @@ let services = $state<any[]>([])
 let runtimes = $state<any[]>([])
 let sites = $state<any[]>([])
 let hasLoaded = $state(false)
-let loadError = $state(false)
+// 加载失败必须与「没有数据」区分开：wrap() 吞掉的每个数据源都按名字记录在这里（失败不再显示为空列表）
+let failedSources = $state<string[]>([])
+let timedOut = $state(false)
+let loadError = $derived(failedSources.length > 0 || timedOut)
+// 项目列表卡片的失败分支：仅当「项目列表」这一路失败（或整体超时）才用错误态替代「暂无项目」
+let sitesFailed = $derived(timedOut || failedSources.includes('项目列表'))
 let envSummary = $state({
   services: { total: 0, running: 0 },
   runtimes: { total: 0, running: 0 },
@@ -44,9 +49,10 @@ async function load() {
     return
   }
   isLoading = true
-  loadError = false
+  failedSources = []
+  timedOut = false
   // 不再使用全屏遮罩：首次加载由卡片骨架屏占位，刷新进度统一在状态栏提示
-  nanoSyncInfo.set({ syncing: true, msg: '正在同步服务状态…', at: nanoSyncInfo.get().at })
+  nanoSyncInfo.set({ syncing: true, msg: '正在同步组件状态…', at: nanoSyncInfo.get().at })
 
   // 全局超时保护：确保同步状态不会被永久卡住
   let globalTimedOut = false
@@ -54,7 +60,7 @@ async function load() {
     globalTimedOut = true
     console.warn('[Dashboard] load 全局超时(10s)，强制结束加载状态')
     nanoSyncInfo.set({ syncing: false, msg: '同步超时', at: '' })
-    loadError = true
+    timedOut = true
     hasLoaded = true
     isLoading = false
     if (pendingReload) {
@@ -65,15 +71,22 @@ async function load() {
 
   try {
     const timeout = (ms: number) => new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), ms))
-    const wrap = (p: Promise<any>, fallback: any) => Promise.race([p, timeout(8000)]).catch(() => fallback)
+    // 失败不再静默回退成空数组：先记在本次调用的局部列表里，避免超时后迟到的 reject 污染下一次加载
+    const failed: string[] = []
+    const wrap = (label: string, p: Promise<any>, fallback: any) =>
+      Promise.race([p, timeout(8000)]).catch((e) => {
+        console.error(`[Dashboard] ${label} 加载失败:`, e)
+        failed.push(label)
+        return fallback
+      })
     const [s, r, st, opEntries, env, snaps, profileList] = await Promise.all([
-      wrap(api.getServices(), []),
-      wrap(api.getRuntimes(), []),
-      wrap(api.getProjects(), []),
-      wrap(api.getRecentOps(100), []),
-      wrap(api.getEnvironment(), { services: {}, runtimes: {}, projects: {}, activeProfileID: '' }),
-      wrap(api.getSnapshots(), []),
-      wrap(api.listEnvironments(), []),
+      wrap('组件状态', api.getServices(), []),
+      wrap('运行时状态', api.getRuntimes(), []),
+      wrap('项目列表', api.getProjects(), []),
+      wrap('操作日志', api.getRecentOps(100), []),
+      wrap('环境概览', api.getEnvironment(), { services: {}, runtimes: {}, projects: {}, activeProfileID: '' }),
+      wrap('快照列表', api.getSnapshots(), []),
+      wrap('环境模板', api.listEnvironments(), []),
     ])
 
     // 如果全局超时已触发，放弃本次结果
@@ -81,6 +94,7 @@ async function load() {
       return
     }
 
+    failedSources = failed
     services = s
     runtimes = r
     sites = st
@@ -105,7 +119,7 @@ async function load() {
     hasLoaded = true
   } catch (e) {
     console.error('[Dashboard] load failed:', e)
-    loadError = true
+    failedSources = [...failedSources, '整体同步']
     hasLoaded = true
   } finally {
     clearTimeout(globalTimeout)
@@ -223,6 +237,20 @@ onMount(() => {
 </script>
 
 <div class="flex flex-col gap-5 h-full overflow-hidden">
+  <!-- 加载失败横幅：明确指出是取数失败而不是没有数据，并提供重试 -->
+  {#if hasLoaded && loadError}
+    <div class="alert alert-warning alert-sm flex items-center gap-3 py-2.5">
+      <span class="text-sm">
+        {#if timedOut}
+          数据加载超时，以下信息可能不完整
+        {:else}
+          部分数据加载失败：{failedSources.join('、')}
+        {/if}
+      </span>
+      <button class="btn btn-sm btn-ghost ml-auto shrink-0" onclick={() => load()}>重试</button>
+    </div>
+  {/if}
+
   <!-- Cards row -->
   <div class="grid grid-cols-1 gap-5">
     <!-- Service mini cards - 与当前激活环境联动，纯展示 -->
@@ -316,9 +344,9 @@ onMount(() => {
     </div>
     {#if !hasLoaded}
       <div class="flex items-center justify-center py-8 text-base-content/60 text-sm">加载项目中...</div>
-    {:else if loadError}
+    {:else if sitesFailed}
       <div class="flex flex-col items-center justify-center py-8 text-base-content/60 text-sm gap-2">
-        <p>数据加载失败或超时</p>
+        <p class="text-error">{timedOut ? '项目列表加载超时' : '项目列表加载失败'}</p>
         <button class="btn btn-xs btn-ghost text-primary" onclick={() => load()}>重试</button>
       </div>
     {:else if sites.length === 0}

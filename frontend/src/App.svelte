@@ -74,7 +74,7 @@ let nginxRunning = $derived.by(() => {
 
 function navigate(view) {
   currentView = view
-  // 视图保持挂载（class:hidden 切换），切换到「已安装软件」时强制刷新数据，避免过期状态
+  // 只挂载当前视图（{#if} 切换，切走即卸载），切到「已安装软件」时再补一次全局刷新，确保计数为最新
   if (view === 'software') refreshSignal.update((n) => n + 1)
 }
 
@@ -258,15 +258,16 @@ async function restartNginx() {
   refreshSignal.update((n) => n + 1)
 }
 
+// 顶栏标题与侧边栏导航文案保持一致（Sidebar.svelte 为准）
 let pageTitle = $derived(
   {
-    dashboard: '仪表盘',
+    dashboard: '控制面板',
     sites: '项目与网站',
     software: '已安装软件',
     environment: '环境管理',
     packages: '软件仓库',
-    logs: '日志',
-    settings: '设置',
+    logs: '日志监控',
+    settings: '系统设置',
   }[currentView] || '',
 )
 </script>

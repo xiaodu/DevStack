@@ -67,6 +67,8 @@ function toItem(x: any) {
 
 // 并发去重：进行中不重复发起，但不丢弃 —— 结束后补跑一次，保证批量启停后状态最终一致
 let pendingReload = false
+// 取数失败与「没有已安装软件」必须区分开，否则 IPC 出错时页面只是安静地空着
+let loadError = $state('')
 
 async function load() {
   if (loadingNow) {
@@ -74,12 +76,21 @@ async function load() {
     return
   }
   loadingNow = true
+  const failed: string[] = []
+  // 每一路单独降级，避免一个接口失败连带整页空白；但失败必须被记下来
+  const track = <T,>(label: string, p: Promise<T>, fallback: T): Promise<T> =>
+    p.catch((e) => {
+      console.error(`[Software] ${label} 加载失败:`, e)
+      failed.push(label)
+      return fallback
+    })
   try {
     const [all, rts, settings] = await Promise.all([
-      api.getServices().catch(() => []),
-      api.getRuntimes().catch(() => []),
-      api.getSettings().catch(() => ({})),
+      track('已安装组件', api.getServices(), [] as any[]),
+      track('运行时列表', api.getRuntimes(), [] as any[]),
+      track('全局设置', api.getSettings(), {} as any),
     ])
+    loadError = failed.length > 0 ? `${failed.join('、')}加载失败` : ''
     installDir = (settings as any).installDir || ''
     serviceItems = (all || []).filter((s: any) => s.installed).map((s: any) => toItem({ ...s, source: 'service' }))
     runtimeItems = (rts || [])
@@ -166,7 +177,9 @@ onDestroy(() => {
                   <span class="loading loading-spinner loading-xs"></span>加载中...
                 </div>
               {:else if cat.items.length === 0}
-                <div class="text-xs text-base-content/40 px-2.5 py-2">暂无可用的{cat.label}软件，请先到「软件仓库」安装</div>
+                <div class="text-xs text-base-content/40 px-2.5 py-2">
+                  {loadError ? '数据加载失败，此处数量不可信' : `暂无可用的${cat.label}软件，请先到「软件仓库」安装`}
+                </div>
               {:else}
                 {#each cat.items as item}
                   <button
@@ -193,6 +206,13 @@ onDestroy(() => {
   </div>
 
   <div class="overflow-y-auto min-w-0">
+    <!-- 取数失败横幅：避免把「加载失败」当成「没装软件」 -->
+    {#if !loading && loadError}
+      <div class="alert alert-warning alert-sm flex items-center gap-3 mx-6 mt-6 py-2.5">
+        <span class="text-sm">{loadError}，列表可能不完整</span>
+        <button class="btn btn-sm btn-ghost ml-auto shrink-0" onclick={() => load()}>重试</button>
+      </div>
+    {/if}
     {#if loading}
       <div class="flex items-center justify-center h-full text-base-content/60">加载中...</div>
     {:else if selected}
@@ -208,8 +228,10 @@ onDestroy(() => {
     {:else}
       <div class="flex flex-col items-center justify-center h-full text-base-content/60 gap-2">
         <div class="text-4xl opacity-50"><span class="iconfont icon-OSruanjianbao"></span></div>
-        <p>未找到已安装的软件</p>
-        <p class="text-xs text-base-content/50">请前往「软件仓库」页面安装 Nginx、MySQL、PHP 等组件</p>
+        <p>{loadError ? '未能获取已安装软件' : '未找到已安装的软件'}</p>
+        <p class="text-xs text-base-content/50">
+          {loadError ? '请点击上方「重试」，或稍后自动同步' : '请前往「软件仓库」页面安装 Nginx、MySQL、PHP 等组件'}
+        </p>
       </div>
     {/if}
   </div>

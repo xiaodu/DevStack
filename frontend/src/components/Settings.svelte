@@ -64,7 +64,7 @@ onMount(load)
         <div class="flex flex-col gap-3">
           <label class="form-control w-full">
             <div class="label"><span class="label-text">安装目录</span></div>
-            <input class="input input-bordered w-full" bind:value={settings.installDir} oninput={handleChange} placeholder="服务安装路径" />
+            <input class="input input-bordered w-full" bind:value={settings.installDir} oninput={handleChange} placeholder="组件安装路径" />
           </label>
         </div>
       </div>

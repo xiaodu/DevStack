@@ -155,12 +155,12 @@ onDestroy(() => clearInterval(refreshInterval))
   <div class="flex justify-between items-center mb-3 shrink-0">
     <div>
       <h1 class="text-xl font-bold">日志查看</h1>
-      <p class="text-sm text-base-content/60">实时监控服务和应用日志</p>
+      <p class="text-sm text-base-content/60">实时监控组件与应用日志</p>
     </div>
     <div class="flex gap-2 items-center">
       <div class="join">
         <button class="join-item btn btn-sm" class:btn-active={activeTab === 'app'} onclick={() => switchTab('app')}>应用日志</button>
-        <button class="join-item btn btn-sm" class:btn-active={activeTab === 'service'} onclick={() => switchTab('service')}>服务日志</button>
+        <button class="join-item btn btn-sm" class:btn-active={activeTab === 'service'} onclick={() => switchTab('service')}>组件日志</button>
       </div>
       {#if activeTab === 'app'}
         <select class="select select-bordered select-sm w-auto" bind:value={selectedLogFile} onchange={(e) => { selectedLogFile = e.target.value; loadAppLogs() }}>

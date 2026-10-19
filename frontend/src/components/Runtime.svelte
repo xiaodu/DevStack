@@ -3,12 +3,23 @@ import { createEventDispatcher, onMount } from 'svelte'
 import type { runtime } from '../../wailsjs/go/models'
 import { api } from '../lib/api'
 import { safeInvoke } from '../lib/safeInvoke'
+import { nanoBusy } from '../lib/stores'
 
 let { service, installDir = '' } = $props()
 const dispatch = createEventDispatcher()
 
+// 显式去重 key：匿名函数走 safeInvoke 的 key 生成逻辑会得到每次不同的 'anon-N'，
+// 去重永远不命中，双击即并发写 php.ini。这里与 WebServer/Database 保持一致。
+// 用 $derived 读取 prop，避免 state_referenced_locally（key 只取一次快照）。
+const toggleKey = $derived(`runtime:toggle:${service.id}`)
+const saveKey = $derived(`runtime:savecfg:${service.id}`)
+let toggling = $derived(($nanoBusy[toggleKey] || 0) > 0)
+let saving = $derived(($nanoBusy[saveKey] || 0) > 0)
+
 let pc = $state<Record<string, any>>({})
 let configLoading = $state(false)
+// php.ini 读取失败时模型是 {}，数值字段全渲染成 0，保存即写坏真实配置 —— 禁止保存
+let configError = $state('')
 let extensions = $state<runtime.PHPExtensionInfo[]>([])
 let extLoading = $state(false)
 let extSearch = $state('')
@@ -57,10 +68,19 @@ onMount(() => {
 
 async function loadPHPConfig() {
   configLoading = true
+  configError = ''
   try {
-    pc = await api.getServiceConfig('php')
+    const cfg = await api.getServiceConfig('php')
+    if (!cfg || typeof cfg !== 'object') {
+      pc = {}
+      configError = '读取到的配置为空'
+    } else {
+      pc = cfg
+    }
   } catch (e) {
     console.error(e)
+    pc = {}
+    configError = (e as any)?.message || String(e)
   } finally {
     configLoading = false
   }
@@ -112,7 +132,9 @@ function loadRecommendedPHP() {
 }
 
 async function save() {
+  if (configError) return // 配置未成功读取前不允许写盘（按钮已禁用，这里兜底）
   await safeInvoke(
+    saveKey,
     async () => {
       await api.saveServiceConfig(service.id, {
         memoryLimit: pc.memoryLimit || '256M',
@@ -146,6 +168,7 @@ async function save() {
 
 async function toggle() {
   await safeInvoke(
+    toggleKey,
     async () => {
       if (service.running) await api.stopRuntime(service.id)
       else await api.startRuntime(service.id)
@@ -175,7 +198,8 @@ async function toggle() {
     {#if service.active}<span class="text-xs px-2 py-0.5 rounded bg-primary/10 text-primary">命令行默认</span>{/if}
     {#if service.port}<span class="text-xs px-2 py-0.5 rounded bg-primary/10 text-primary">端口 {service.port}</span>{/if}
     {#if service.running && service.uptime}<span class="text-base-content/60">运行 {service.uptime}</span>{/if}
-    <button class="btn btn-xs ml-auto {service.running ? 'btn-error' : 'btn-success'}" onclick={toggle}>
+    <button class="btn btn-xs ml-auto {service.running ? 'btn-error' : 'btn-success'}" onclick={toggle} disabled={toggling}>
+      {#if toggling}<span class="loading loading-spinner loading-xs"></span>{/if}
       {service.running ? '停止' : '启动'}
     </button>
   </div>
@@ -184,6 +208,12 @@ async function toggle() {
     {#if configLoading}
       <div class="text-center py-10 text-base-content/60">加载配置...</div>
     {:else}
+      {#if configError}
+        <div class="alert alert-error alert-sm flex items-center gap-3 py-2.5 mb-4">
+          <span class="text-sm">php.ini 读取失败（{configError}），为避免用空值覆盖配置，已禁止保存。</span>
+          <button class="btn btn-sm btn-ghost shrink-0" onclick={loadPHPConfig} disabled={configLoading}>重新加载</button>
+        </div>
+      {/if}
       <div class="card bg-base-100 border border-base-300 p-5 mb-4">
         <div class="flex justify-between items-center mb-3.5">
           <h3 class="text-sm font-semibold text-primary">PHP 配置</h3>
@@ -279,8 +309,12 @@ async function toggle() {
       </div>
 
       <div class="flex items-center gap-3 mt-6 pt-4 border-t border-base-300">
-        <button class="btn btn-primary" onclick={save}>保存配置</button>
-        <span class="text-xs text-base-content/50">保存后重新生成 php.ini，需重启 PHP 生效</span>
+        <button class="btn btn-primary" onclick={save} disabled={saving || !!configError}>
+          {#if saving}<span class="loading loading-spinner loading-xs"></span>{/if}保存配置
+        </button>
+        <span class="text-xs {configError ? 'text-error' : 'text-base-content/50'}">
+          {configError ? '配置未成功读取，无法保存（请先重新加载）' : '保存后重新生成 php.ini，需重启 PHP 生效'}
+        </span>
       </div>
     {/if}
   {:else}

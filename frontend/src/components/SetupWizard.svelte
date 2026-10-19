@@ -84,19 +84,45 @@ let packages = $state([
 let portConflicts = $state<Record<string, { port: number; inUse: boolean; message: string }>>({})
 let checkingPorts = $state(false)
 
-onMount(async () => {
-  const settings = await api.getSettings()
-  if (settings.installDir) installDir = settings.installDir
+// 向导首屏数据加载失败必须可见：此前 getSettings / getAvailableVersions 没有 try/catch，
+// 失败时既产生 unhandled rejection，又留下一份空版本列表让用户以为「没有可装版本」
+let initError = $state('')
+let versionErrors = $state<string[]>([])
+let initializing = $state(true)
+
+async function loadWizardData() {
+  initializing = true
+  initError = ''
+  versionErrors = []
+  try {
+    const settings = await api.getSettings()
+    if (settings?.installDir) installDir = settings.installDir
+  } catch (e) {
+    console.error('[SetupWizard] 读取设置失败:', e)
+    initError = `读取设置失败：${(e as any)?.message || e}`
+  }
+  const failed: string[] = []
   // 并行拉取全部包的版本列表（此前逐包串行 await，6 次瀑布拖慢向导首屏）
   await Promise.all(
     packages.map(async (pkg) => {
-      const releases = await api.getAvailableVersions(pkg.id)
-      if (releases?.length > 0) {
-        pkg.versions = releases.map((r) => r.version)
-        pkg.selected = releases[releases.length - 1].version
+      try {
+        const releases = await api.getAvailableVersions(pkg.id)
+        if (releases?.length > 0) {
+          pkg.versions = releases.map((r) => r.version)
+          pkg.selected = releases[releases.length - 1].version
+        }
+      } catch (e) {
+        console.error(`[SetupWizard] 获取 ${pkg.name} 版本列表失败:`, e)
+        failed.push(pkg.name)
       }
     }),
   )
+  versionErrors = failed
+  initializing = false
+}
+
+onMount(async () => {
+  await loadWizardData()
   // 默认选中推荐预设
   selectedPreset = 'builtin-modern-php8'
   applyPreset(selectedPreset)
@@ -196,10 +222,43 @@ async function checkPorts() {
   }
 }
 
-type ProgressItem = { name: string; phase: string; status: 'pending' | 'active' | 'done' | 'error'; progress?: number }
+type ProgressItem = {
+  name: string
+  phase: string
+  status: 'pending' | 'active' | 'done' | 'error' | 'cancelled'
+  progress?: number
+}
 let installProgress = $state<ProgressItem[]>([])
 let installing = $state(false)
+let cancelling = $state(false) // 取消进行中：保持 installing 直到后端结束，不允许再次点击（同 Packages F12 口径）
+let cancelled = $state(false) // 本轮安装被用户取消过，用于完成后如实提示
 let currentInstall = $state('')
+
+// 下载取消 key：后端 runSetup 用 "setup-download:<kind>:<version>" 注册可取消任务，
+// 其中的 version 是后端从可用列表里挑的最新版，前端无法自行推断，
+// 因此统一从 setup:progress / setup:download-progress 事件里记录真实 key。
+const setupKeys = new Map<string, string>()
+
+function rememberSetupKey(data: any) {
+  if (!data?.service) return
+  setupKeys.set(data.service, data.key || `setup-download:${data.service}:${data.version}`)
+}
+
+function sendCancel(key: string) {
+  api.cancelDownload(key).catch((e) => {
+    console.error('取消下载失败:', e)
+    addToast(`取消下载失败: ${(e as any)?.message || e}`, 'error', 3500)
+  })
+}
+
+function cancelInstall() {
+  if (!installing || cancelling) return
+  cancelling = true
+  cancelled = true
+  for (const key of new Set(setupKeys.values())) sendCancel(key)
+  currentInstall = '正在取消安装，等待当前下载结束…'
+  addToast('正在取消安装，请稍候', 'warning', 4000)
+}
 
 async function startInstall() {
   if (!installDir) {
@@ -220,6 +279,9 @@ async function startInstall() {
 
   step = 2
   installing = true
+  cancelling = false
+  cancelled = false
+  setupKeys.clear()
   installProgress = toInstall.map((p) => ({
     name: `${p.name} ${p.selected}`,
     phase: '',
@@ -233,10 +295,12 @@ async function startInstall() {
     console.error('安装失败:', e)
     addToast(`初始化失败: ${e}`, 'error', 5000)
     installing = false
+    cancelling = false
   }
 }
 
 function handleSetupProgress(data: any) {
+  rememberSetupKey(data)
   const idx = installProgress.findIndex((p) => p.name.includes(data.service) && p.name.includes(data.version))
   if (idx >= 0) {
     const phaseLabels: Record<string, string> = {
@@ -262,24 +326,29 @@ function handleSetupProgress(data: any) {
 }
 
 function handleSetupComplete(data: any) {
+  // 取消后仍被后端跳过的条目如实标为「已取消」，不能被本轮完成事件刷成成功
   installProgress = installProgress.map((p) => {
-    if (p.status !== 'done' && p.status !== 'error') {
-      return { ...p, status: 'done' as const, phase: 'done' }
-    }
-    return p
+    if (p.status === 'done' || p.status === 'error') return p
+    return cancelled ? { ...p, status: 'cancelled' as const } : { ...p, status: 'done' as const, phase: 'done' }
   })
   step = 3
   installing = false
-  if (data.failedServices?.length) {
+  cancelling = false
+  if (cancelled) {
+    addToast('已取消安装，未完成的组件可在「软件仓库」中单独安装', 'warning', 5000)
+  } else if (data.failedServices?.length) {
     addToast(`安装完成，${data.failedServices.join('、')} 下载失败`, 'warning', 5000)
   }
 }
 
 function handleSetupError(data: any) {
   installProgress = installProgress.map((p) =>
-    p.status === 'active' || p.status === 'pending' ? { ...p, status: 'error' as const, phase: 'error' } : p,
+    p.status === 'active' || p.status === 'pending'
+      ? { ...p, status: (cancelled ? 'cancelled' : 'error') as ProgressItem['status'], phase: cancelled ? 'cancelled' : 'error' }
+      : p,
   )
   installing = false
+  cancelling = false
   addToast(data.message || '安装失败', 'error', 5000)
 }
 
@@ -290,6 +359,10 @@ onMount(() => {
     api.onSetupComplete(handleSetupComplete),
     api.onSetupError(handleSetupError),
     api.onSetupDownloadProgress((data: any) => {
+      rememberSetupKey(data)
+      // 取消点击后 runSetup 仍会继续下一个组件；它一开始上报进度就补发取消，
+      // 这样无需改后端也能把后续下载一起中止
+      if (cancelling && data?.key) sendCancel(data.key)
       const idx = installProgress.findIndex((p) => p.name.includes(data.service) && p.name.includes(data.version))
       if (idx >= 0 && data.total > 0) {
         installProgress[idx] = {
@@ -327,7 +400,7 @@ function finish() {
         <ul class="list-disc pl-5 text-base-content/70 space-y-1 text-sm">
           <li>一键安装开发环境</li>
           <li>多版本预配置的开发者工具</li>
-          <li>自动配置和启动服务</li>
+          <li>自动配置和启动组件</li>
           <li>完整的本地开发工具栈</li>
         </ul>
       </div>
@@ -341,6 +414,22 @@ function finish() {
         <div>
           <h3 class="text-lg font-semibold mb-2 text-base-content">让我们开始安装 DevStack</h3>
           <p class="text-base-content/60 text-sm mb-4">选择安装目录并检查端口占用。</p>
+
+          {#if initializing}
+            <div class="mb-4 p-3 bg-base-200 rounded text-xs text-base-content/60 flex items-center gap-2">
+              <span class="loading loading-dots loading-xs text-primary"></span>正在读取安装目录与可用版本…
+            </div>
+          {:else if initError || versionErrors.length > 0}
+            <div class="mb-4 p-3 border border-warning/40 bg-warning/10 rounded text-sm flex items-start gap-2">
+              <div class="flex-1 space-y-0.5">
+                {#if initError}<span class="block">{initError}</span>{/if}
+                {#if versionErrors.length > 0}
+                  <span class="block">{versionErrors.join('、')} 的可用版本获取失败；下拉框为空不代表没有可安装版本。</span>
+                {/if}
+              </div>
+              <button class="btn btn-xs btn-ghost shrink-0" onclick={loadWizardData}>重试</button>
+            </div>
+          {/if}
           
           <div class="mb-6">
             <div class="flex gap-2">
@@ -498,6 +587,7 @@ function finish() {
               {#if item.status === 'done'}✅
               {:else if item.status === 'active'}⏳
               {:else if item.status === 'error'}❌
+              {:else if item.status === 'cancelled'}<span class="text-base-content/40">⊘</span>
               {:else}○
               {/if}
             </span>
@@ -516,22 +606,40 @@ function finish() {
               <span class="text-xs text-success w-10 text-right">完成</span>
             {:else if item.status === 'error'}
               <span class="text-xs text-error w-10 text-right">失败</span>
+            {:else if item.status === 'cancelled'}
+              <span class="text-xs text-base-content/50 w-10 text-right">已取消</span>
             {/if}
           </div>
         {/each}
+      </div>
+
+      <!-- 取消安装：后端按 setup-download:<kind>:<version> 注册了可取消任务，这里用事件带回的真实 key 中止 -->
+      <div class="max-w-md mx-auto mt-6">
+        {#if cancelling}
+          <div class="flex items-center justify-center gap-2 text-xs text-warning">
+            <span class="loading loading-spinner loading-xs"></span>取消中，等待当前下载结束…
+          </div>
+        {:else if installing}
+          <div class="flex flex-col items-center gap-1">
+            <button class="btn btn-ghost btn-sm text-warning" onclick={cancelInstall} disabled={!installing}>取消安装</button>
+            <span class="text-xs text-base-content/40">已下载完成的组件不会被回滚</span>
+          </div>
+        {/if}
       </div>
     </div>
 
   {:else if step === 3}
     <div class="flex-1 overflow-y-auto px-12 py-8 flex flex-col items-center justify-center text-center">
       <h2 class="text-2xl font-bold text-success mb-2">安装完成！</h2>
-      <p class="text-base-content/60 text-sm mb-6">您的开发环境已准备就绪</p>
+      <p class="text-base-content/60 text-sm mb-6">
+        {cancelled ? '安装已中止，已完成的组件保持原样，其余可稍后在「软件仓库」单独安装' : '您的开发环境已准备就绪'}
+      </p>
       <div class="text-left mb-6 max-w-sm">
         <p class="font-medium mb-2 text-base-content">接下来您可以：</p>
         <ol class="list-decimal pl-5 text-base-content/70 space-y-1 text-sm">
           <li>访问仪表盘 - 查看系统状态</li>
           <li>管理网站 - 添加您的第一个项目</li>
-          <li>配置服务 - 调整服务设置</li>
+          <li>配置组件 - 调整组件设置</li>
         </ol>
       </div>
       <button class="btn btn-primary btn-lg min-w-[160px]" onclick={finish}>完成</button>

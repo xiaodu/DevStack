@@ -117,8 +117,10 @@ export function dismissToast(id: number) {
 
 /*
  * ── Bidirectional bridge: nanostores ↔ Svelte stores ──
- * Writing to the writable also updates the atom, so Dashboard.load()
- * can call globalLoading.set() and it propagates both ways.
+ * 订阅方向：atom → writable，所以组件既能 $store 也能 atom.subscribe。
+ * 写入方向：store.set() 会同步写回 atom，两条 API 操作的是同一份状态。
+ * （组件请优先用 beginLoading/endLoading、nanoSyncInfo 等语义化入口，
+ *  不要直接 set 这些桥接 store。）
  */
 function bridge<T>(atom: WritableAtom<T>) {
   const store = writable<T>(atom.get(), (set) => atom.subscribe((v) => set(v)))

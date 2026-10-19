@@ -9,6 +9,10 @@ let env = $state<any>({ services: {}, projects: {}, runtimes: {}, activeProfileI
 let envLoading = $state(true)
 let environments = $state<any[]>([])
 let envsLoading = $state(true)
+// 加载失败与「暂无环境」必须区分：失败时展示横幅 + 重试，而不是空的卡片列表
+let envError = $state('')
+let envsError = $state('')
+let loadErrors = $derived([envError, envsError].filter(Boolean))
 let selectedEnv: any = null
 let editingEnv = $state<any>(null)
 let envModalOpen = $state(false)
@@ -75,18 +79,31 @@ async function withTimeout(promise: Promise<any>, timeoutMs = 5000, fallback: an
   return Promise.race([promise, new Promise((resolve) => setTimeout(() => resolve(fallback), timeoutMs))])
 }
 
+// 首屏两路数据用「会抛错」的超时：withTimeout 的静默回退会把失败伪装成空列表，
+// 用户看到「暂无环境」其实是没有取到数据（F：失败要能看出来）。
+async function withTimeoutStrict(promise: Promise<any>, timeoutMs = 5000) {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('加载超时')), timeoutMs)
+      }),
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
 async function loadEnvironment() {
   envLoading = true
   try {
-    const result = await withTimeout(api.getEnvironment(), 5000, {
-      services: {},
-      projects: {},
-      runtimes: {},
-      activeProfileID: '',
-    })
+    const result = await withTimeoutStrict(api.getEnvironment(), 5000)
     env = result || { services: {}, projects: {}, runtimes: {}, activeProfileID: '' }
+    envError = ''
   } catch (e) {
     console.error('[Environment] load error:', e)
+    envError = (e as any)?.message || String(e)
   } finally {
     envLoading = false
   }
@@ -95,15 +112,18 @@ async function loadEnvironment() {
 async function loadEnvironments() {
   envsLoading = true
   try {
-    const result = await withTimeout(api.listEnvironments(), 5000, [])
+    const result = await withTimeoutStrict(api.listEnvironments(), 5000)
     environments = (Array.isArray(result) ? result : []).sort((a, b) => {
       // 预设环境排前面，然后按名称字母排序
       if (a.isBuiltin && !b.isBuiltin) return -1
       if (!a.isBuiltin && b.isBuiltin) return 1
       return (a.name || '').localeCompare(b.name || 'zh-CN')
     })
+    envsError = ''
   } catch (e) {
+    console.error('[Environment] 环境列表加载失败:', e)
     environments = []
+    envsError = (e as any)?.message || String(e)
   } finally {
     envsLoading = false
   }
@@ -473,6 +493,16 @@ onMount(() => {
     </div>
   </div>
 
+  <!-- 加载失败横幅：取数失败 ≠ 没有环境 -->
+  {#if loadErrors.length > 0}
+    <div class="alert alert-warning alert-sm flex items-center gap-3 py-2.5">
+      <span class="text-sm">数据加载失败：{loadErrors.join('；')}</span>
+      <button class="btn btn-sm btn-ghost ml-auto shrink-0" onclick={() => load()} disabled={envLoading || envsLoading}>
+        {envLoading || envsLoading ? '重试中...' : '重试'}
+      </button>
+    </div>
+  {/if}
+
   <!-- 当前环境操作栏 -->
   <div class="flex items-center justify-between px-4 py-3 bg-base-100 border border-base-300 rounded-lg">
     <div class="flex items-center gap-3">
@@ -505,7 +535,7 @@ onMount(() => {
 
   {#if envsLoading}
     <div class="text-center py-16 text-base-content/60">加载环境中...</div>
-  {:else if environments.length === 0}
+  {:else if environments.length === 0 && !envsError}
     <div class="flex flex-col items-center justify-center py-16 text-base-content/60 gap-2">
       <p class="text-base font-semibold">暂无环境</p>
       <p class="text-sm">新建一个环境，组合不同版本的软件和运行时</p>
