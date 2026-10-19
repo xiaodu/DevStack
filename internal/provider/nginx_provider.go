@@ -389,21 +389,12 @@ func (i *NginxInstance) Stop(ctx context.Context) error {
 
 	i.status = core.StatusStopping
 
-	// 收集属于本实例的进程：自管 pid、主进程 mpid，以及端口上属于本版本目录内的进程。
-	// 用 ownedPIDByPort（只收集 PID 不杀），避免旧的 stopOwnedProcessByPort 边收集边用新 Manager
-	// 实例杀进程（与 i.pm 不是同一注册表，且重复杀）的设计缺陷。
-	targets := make(map[int]struct{})
-	if i.pid > 0 {
-		targets[i.pid] = struct{}{}
-	}
-	if i.mpid > 0 && i.mpid != i.pid {
-		targets[i.mpid] = struct{}{}
-	}
-	if i.pid <= 0 {
-		if pid := ownedPIDByPort(i.port, i.nginxDir); pid > 0 {
-			targets[pid] = struct{}{}
-		}
-	}
+	// 收集属于本实例的进程：自管 pid、主进程 mpid，以及端口上属于本版本目录内的**全部**进程。
+	// 必须无条件并入端口归属集合，而不是只在 i.pid<=0 时才查：
+	// nginx 是 master/worker 结构，master 与每个 worker 都监听同一端口；且历史停止失败
+	// 会在同版本目录上累积出多个孤儿 master（logs/nginx.pid 被最后一次启动覆盖，
+	// `nginx -s stop` 只对最新那个 master 生效）。只按自管 pid 停止 = 永远停不干净。
+	targets := collectOwnedTargets(i.port, i.nginxDir, i.pid, i.mpid)
 
 	if len(targets) == 0 {
 		// 本实例未运行：端口可能被其它程序占用，与本实例无关，视为已停止
@@ -422,23 +413,33 @@ func (i *NginxInstance) Stop(ctx context.Context) error {
 
 	// 2. 等待本实例进程退出（8s）。判据=进程退出，不用端口是否释放。
 	remaining := waitProcessesExited(targets, 8*time.Second)
-	if len(remaining) == 0 {
+
+	// 2.1 master 存活时会立刻重生 worker：targets 里的 worker 全退出 ≠ 实例已停。
+	//     nginx master 本身常不出现在 netstat 里，只能靠"端口上又出现本目录进程"反查。
+	//     因此必须重新扫一次归属集合并把复活出来的进程并入待杀集，
+	//     否则这里会谎报"已停止"，master 继续存活 —— 正是同端口累积出多个 master 的机制。
+	pending := pidSlice(remaining)
+	pending = append(pending, ownedPIDsByPort(i.port, i.nginxDir)...)
+	if len(pending) == 0 {
 		i.pid = 0
 		i.mpid = 0
 		i.status = core.StatusStopped
 		return nil
 	}
 
-	// 3. 兜底强杀：pm.Stop 已是 taskkill /F /T，递归杀子进程覆盖 worker 残留。
+	// 3. 兜底强杀：沿父链归并到各自的根 master，整树击杀。
+	//    不能逐个 taskkill 传入的 PID —— 杀掉的是 worker，其父 master 会立刻补一个新的。
 	var lastErr error
-	for pid := range remaining {
-		if err := i.pm.Stop(pid); err != nil {
+	for _, root := range topLevelAncestors(pending) {
+		if err := killRootTree(root); err != nil {
 			lastErr = err
 		}
 	}
-	// 再等 3s 确认退出
-	if rem2 := waitProcessesExited(remaining, 3*time.Second); len(rem2) > 0 {
-		return fmt.Errorf("Nginx 停止失败: 进程 %s 未退出（优雅停止超时后强制终止仍失败，可能权限不足）: %v", pidList(rem2), lastErr)
+
+	// 4. 复核：端口上不再出现本版本目录的进程才算停止成功（最多再等 3s）。
+	//    自管 PID 全退出不足以判定停止 —— master 会重生 worker，必须以端口归属集合为准。
+	if rest := verifyStoppedByPort(i.port, i.nginxDir, 3*time.Second); len(rest) > 0 {
+		return fmt.Errorf("Nginx 停止失败: 端口 %d 上仍有本实例进程 (PID %s) 未退出（优雅停止超时后强制终止仍失败，可能权限不足，请手动结束）: %v", i.port, pidList(pidSet(rest)), lastErr)
 	}
 
 	i.pid = 0

@@ -136,19 +136,50 @@ func (m *Manager) registerDefaults() {
 			}
 		}
 	}
+	portPIDMap := process.FindAllPIDsByPort()
 	for _, s := range m.services {
-		pid := process.FindPIDByPort(s.Info.Port)
-		if pid <= 0 {
+		pids := ownedPIDsFromMap(portPIDMap, s.Info.Port, installDir, s.Info.Kind, s.Info.Version)
+		if len(pids) == 0 {
 			continue
 		}
 		// 端口占用者必须是本 kind/version 安装目录内的进程才算本实例在运行：
 		// 多个版本共享端口（如 nginx 1.20/1.24/1.26 共享 80）时只有真正占用者标记为运行中，
 		// 端口被其它程序占用时也不应把本服务误标为运行中。
-		if exePathMatchesPID(pid, installDir, s.Info.Kind, s.Info.Version) {
-			s.Info.Status = core.StatusRunning
-			s.Info.PID = pid
-		}
+		s.Info.Status = core.StatusRunning
+		s.Info.PID = pids[0]
+		s.process = &process.ProcessHandle{PID: pids[0], Started: time.Now()}
+		// 冷启动接管：进程在跑就必须同步登记到编排引擎，否则停止时引擎查不到条目
+		// （历史表现：界面显示运行中，点停止报"服务 xxx 不存在"且进程一个都没杀）。
+		m.adoptOrchestrator(s.Info.ID, s.Info.Port, pids)
 	}
+}
+
+// adoptOrchestrator 把"端口上实际在跑的一批进程"登记到编排引擎（幂等，引擎不可用时静默跳过）。
+func (m *Manager) adoptOrchestrator(id string, port int, pids []int) {
+	if m.orch == nil || len(pids) == 0 {
+		return
+	}
+	if err := m.orch.Adopt(id, port, pids); err != nil {
+		// 接管失败不影响判活，只影响 Job Object 归属；不阻断启动流程
+		m.reactive.Publish(reactive.NewEvent(reactive.EventServiceHealthFailed, id, map[string]interface{}{
+			"serviceID": id,
+			"reason":    err.Error(),
+		}))
+	}
+}
+
+// livePIDs 返回本实例（kind@version 安装目录）当前在端口上运行的全部进程 PID。
+//
+// fresh=true 时先作废端口缓存，用于强杀之后的复核：netstat 结果有 2s TTL，
+// 不作废就会读到停止动作发生前的快照，把已经停成功的操作误判成"仍在监听"。
+func (m *Manager) livePIDs(kind, version string, port int, fresh bool) []int {
+	if port <= 0 {
+		return nil
+	}
+	if fresh {
+		process.InvalidatePortCache()
+	}
+	return process.FindPIDsByPortOwned(port, instanceDir(m.cfg.Get().InstallDir, kind, version))
 }
 
 // LoadProcfile 加载 Procfile 到编排引擎
@@ -225,9 +256,14 @@ func (m *Manager) startServiceByName(name string) (int, error) {
 		return 0, err
 	}
 
-	// 获取启动后的 PID
-	pid := process.FindPIDByPort(port)
-	return pid, nil
+	// 获取启动后的 PID：必须按"本 kind/version 安装目录"过滤，
+	// 直接取端口上的任意监听者会在多版本共享端口（nginx 1.20/1.24/1.26 同占 80）时
+	// 把别的版本的进程 PID 记到本实例头上。
+	pids := m.livePIDs(kind, version, port, false)
+	if len(pids) == 0 {
+		return 0, nil
+	}
+	return pids[0], nil
 }
 
 // stopServiceByName 由 orchestrator 调用，实际停止服务
@@ -275,23 +311,14 @@ func (m *Manager) matchConfigHandler(id string) ConfigHandler {
 	return nil
 }
 
-func (m *Manager) syncServiceState(s *ServiceInstance, portPIDMap map[int]int) core.ServiceInfo {
+func (m *Manager) syncServiceState(s *ServiceInstance, portPIDMap map[int][]int) core.ServiceInfo {
 	info := s.Info
 	installDir := m.cfg.Get().InstallDir
 
-	// ownedPID 返回本服务端口上属于本 kind/version 的进程 PID；端口被其它程序占用时返回 0。
-	ownedPID := func() int {
-		if info.Port <= 0 {
-			return 0
-		}
-		pid, ok := portPIDMap[info.Port]
-		if !ok || pid <= 0 {
-			return 0
-		}
-		if exePathMatchesPID(pid, installDir, info.Kind, info.Version) {
-			return pid
-		}
-		return 0
+	// ownedPIDs 返回本服务端口上属于本 kind/version 实例的全部进程 PID。
+	// 端口被其它程序或其它版本占用时返回空，既不会误判在运行，也不会误杀外部进程。
+	ownedPIDs := func() []int {
+		return ownedPIDsFromMap(portPIDMap, info.Port, installDir, info.Kind, info.Version)
 	}
 
 	switch info.Status {
@@ -303,11 +330,10 @@ func (m *Manager) syncServiceState(s *ServiceInstance, portPIDMap map[int]int) c
 		if s.process != nil && s.process.PID > 0 && m.procMgr.IsRunning(s.process.PID) {
 			stillRunning = true
 		}
-		if !stillRunning {
-			if pid := ownedPID(); pid > 0 {
-				stillRunning = true
-				info.PID = pid
-			}
+		pids := ownedPIDs()
+		if !stillRunning && len(pids) > 0 {
+			stillRunning = true
+			info.PID = pids[0]
 		}
 		if !stillRunning {
 			info.Status = core.StatusStopped
@@ -315,9 +341,27 @@ func (m *Manager) syncServiceState(s *ServiceInstance, portPIDMap map[int]int) c
 		}
 
 	case core.StatusStopped:
-		if pid := ownedPID(); pid > 0 {
+		if pids := ownedPIDs(); len(pids) > 0 {
 			info.Status = core.StatusRunning
-			info.PID = pid
+			info.PID = pids[0]
+		}
+
+	case core.StatusError:
+		// 错误态必须可自愈：之前 switch 里没有这一分支，服务一旦落 Error
+		// 就永远显示"错误"（哪怕进程早就停干净了），用户只能重启整个 DevStack。
+		// 这里回到唯一真相——端口上到底还有没有本实例的进程。
+		if pids := ownedPIDs(); len(pids) > 0 {
+			info.Status = core.StatusRunning
+			info.PID = pids[0]
+			info.Error = ""
+			if s.process == nil || s.process.PID <= 0 {
+				s.process = &process.ProcessHandle{PID: pids[0], Started: time.Now()}
+			}
+		} else {
+			info.Status = core.StatusStopped
+			info.PID = 0
+			info.Error = ""
+			s.process = nil
 		}
 	}
 
@@ -370,57 +414,40 @@ func (m *Manager) List() []core.ServiceInfo {
 		result[i] = e.info
 	}
 
-	// 同端口多个版本只会有一个真正在运行：通过监听进程的可执行文件路径判定归属版本。
-	return m.resolvePortConflicts(result, portPIDMap)
+	return result
 }
 
-// resolvePortConflicts 同一端口被多个版本的服务实例占用时（如 nginx 1.20/1.24/1.26 共享 80 端口），
-// 只允许可执行文件路径匹配到安装目录的版本显示"运行中"，其余版本保持"已停止"。
-func (m *Manager) resolvePortConflicts(infos []core.ServiceInfo, portPIDMap map[int]int) []core.ServiceInfo {
-	type portGroup struct {
-		pid int
-		idx []int
-	}
-	groups := make(map[int]*portGroup)
-	for i := range infos {
-		info := &infos[i]
-		if info.Status != core.StatusRunning || info.Port <= 0 {
-			continue
-		}
-		g := groups[info.Port]
-		if g == nil {
-			g = &portGroup{pid: portPIDMap[info.Port]}
-			groups[info.Port] = g
-		}
-		g.idx = append(g.idx, i)
-	}
+// resolvePortConflicts 的旧实现已删除。
+//
+// 旧逻辑建立在"一个端口只有一个监听 PID"的前提上：同端口多版本时随机挑一个
+// （匹配不到就取排序首位）当作唯一 owner，把其它版本一律压成"已停止"。
+// 现在 syncServiceState 按"该 kind@version 安装目录实际拥有哪些 PID"判定归属，
+// 归属是精确的，不再需要事后压制；两个版本真的同时占同一端口属于真实的端口冲突，
+// 应该如实暴露出来，而不是被随机压掉一个制造"没在运行"的假象。
 
-	installDir := m.cfg.Get().InstallDir
-	for _, g := range groups {
-		if len(g.idx) < 2 || g.pid <= 0 {
-			continue
-		}
-		owner := -1
-		for _, i := range g.idx {
-			info := &infos[i]
-			if exePathMatchesPID(g.pid, installDir, info.Kind, info.Version) {
-				owner = i
-				break
-			}
-		}
-		if owner < 0 {
-			// 无法匹配（进程已退出或 wmic 失败）：保留排序靠前的版本
-			owner = g.idx[0]
-		}
-		for _, i := range g.idx {
-			if i == owner {
-				continue
-			}
-			infos[i].Status = core.StatusStopped
-			infos[i].PID = 0
+// instanceDir 返回某服务实例的安装根目录（<install>\programs\<kind>\<version>），
+// 它是"哪些进程属于这个实例"的唯一归属依据。
+func instanceDir(installDir, kind, version string) string {
+	return filepath.Join(installDir, "programs", kind, version)
+}
+
+// ownedPIDsFromMap 从端口→PID 集合里取出属于本实例（kind@version 目录）的全部 PID。
+//
+// 必须返回集合：Windows 上 nginx/redis 等的 master 与每个 worker 都会出现在同一端口的
+// netstat 行里，只取一个 PID 会导致"杀一个 worker、master 重生一个"的死循环。
+func ownedPIDsFromMap(portPIDMap map[int][]int, port int, installDir, kind, version string) []int {
+	if port <= 0 {
+		return nil
+	}
+	dir := strings.ToLower(instanceDir(installDir, kind, version))
+	var out []int
+	for _, pid := range portPIDMap[port] {
+		exe := strings.ToLower(process.GetExecutablePath(pid))
+		if exe != "" && strings.Contains(exe, dir) {
+			out = append(out, pid)
 		}
 	}
-	return infos
+	return out
 }
 
 // exePathMatchesPID 判断端口监听进程的 exe 路径是否落在 installDir/programs/<kind>/<version> 目录下。
@@ -429,7 +456,7 @@ func exePathMatchesPID(pid int, installDir, kind, version string) bool {
 	if exe == "" {
 		return false
 	}
-	installPath := strings.ToLower(filepath.Join(installDir, "programs", kind, version))
+	installPath := strings.ToLower(instanceDir(installDir, kind, version))
 	return strings.Contains(strings.ToLower(exe), installPath)
 }
 
@@ -500,12 +527,18 @@ func (m *Manager) Start(id string) error {
 			return err
 		}
 
-		// 获取启动后的 PID
-		pid := process.FindPIDByPort(port)
+		// 获取启动后的 PID 集合（master + 全部 worker），并同步登记到编排引擎。
+		// 只记一个 PID 会让后续停止/复核漏掉其余进程，Job Object 也管不全。
+		pids := m.livePIDs(kind, version, port, false)
+		pid := 0
+		if len(pids) > 0 {
+			pid = pids[0]
+		}
 		proc := &process.ProcessHandle{PID: pid, Started: time.Now()}
 		if pid <= 0 {
 			proc = nil
 		}
+		m.adoptOrchestrator(id, port, pids)
 
 		m.mu.Lock()
 		s = m.services[id]
@@ -577,16 +610,20 @@ func (m *Manager) Start(id string) error {
 		})
 		return err
 	}
-	pid := process.FindPIDByPort(port)
+	pids := m.livePIDs(kind, version, port, false)
+	pid := 0
+	if len(pids) > 0 {
+		pid = pids[0]
+	}
 	proc := &process.ProcessHandle{PID: pid, Started: time.Now()}
 	if pid <= 0 {
 		proc = nil
 	}
 
-	// 将进程加入 Job Object（如果编排引擎可用）
-	if m.orch != nil && pid > 0 {
-		m.orch.AssignPID(kind, pid)
-	}
+	// 将本实例的全部进程纳入 Job Object 管理。
+	// 键必须是完整 ID（kind@version）：之前用裸 kind 登记成 "nginx"，
+	// 而停止/释放用 "nginx@1.24.0"，两个键空间对不上时 Job Object 形同虚设。
+	m.adoptOrchestrator(id, port, pids)
 
 	m.mu.Lock()
 	s = m.services[id]
@@ -637,7 +674,6 @@ func (m *Manager) Stop(id string) error {
 	kind := kindFromID(id)
 	version := s.Info.Version
 	port := s.Info.Port
-	installDir := m.cfg.Get().InstallDir
 
 	s.Info.Status = core.StatusStopping
 	m.mu.Unlock()
@@ -661,25 +697,27 @@ func (m *Manager) Stop(id string) error {
 			m.orch.ReleasePID(id, pid)
 		}
 
-		// 复核真实状态：端口仍被本实例进程监听说明没停掉。
-		// 先做一次最终强制终止（provider 可能漏杀 worker/孤儿进程树），再复核；
+		// 复核真实状态：端口上仍有本实例进程就说明没停干净。
+		// 先做最终强制终止（provider 可能漏杀 worker/孤儿进程树），再复核；
 		// 仍不干净才如实报错，绝不谎报"已停止"（否则 UI 显示已停而进程还在，下次 Start 被幂等跳过）。
-		occupied := func() int {
-			if o := process.FindPIDByPort(port); o > 0 && exePathMatchesPID(o, installDir, kind, version) {
-				return o
+		//
+		// 两个必须按集合/真实扫描处理的点：
+		// ① 判据是"本实例在该端口上的全部 PID"而不是随机一个 worker —— 只杀一个，
+		//    master 会立刻重生 worker 抢回端口，永远复核不干净；
+		// ② 每轮复核前作废端口缓存 —— netstat 结果有 2s TTL，
+		//    否则轮询全程读到停止前的陈旧快照，把已经停成功的动作误报成停止失败。
+		remaining := m.livePIDs(kind, version, port, true)
+		for round := 0; len(remaining) > 0 && round < 5; round++ {
+			for _, pid := range remaining {
+				_ = m.procMgr.Stop(pid) // taskkill /F /T
 			}
-			return 0
+			time.Sleep(400 * time.Millisecond)
+			remaining = m.livePIDs(kind, version, port, true)
 		}
-		if occ := occupied(); occ > 0 {
-			_ = m.procMgr.Stop(occ) // taskkill /F /T，覆盖 provider 漏杀的进程
-			for i := 0; i < 10 && occupied() > 0; i++ {
-				time.Sleep(200 * time.Millisecond)
-			}
-		}
-		if occ := occupied(); occ > 0 {
-			msg := fmt.Sprintf("停止失败: 进程 PID %d 仍在监听端口 %d", occ, port)
+		if len(remaining) > 0 {
+			msg := fmt.Sprintf("停止失败: 端口 %d 上仍有本服务进程 (PID %v) 未退出，可能需要更高权限或手动结束", port, remaining)
 			if stopErr != nil {
-				msg = "停止失败: " + stopErr.Error()
+				msg += "：" + stopErr.Error()
 			}
 			m.mu.Lock()
 			if si, ok := m.services[id]; ok {
@@ -692,7 +730,7 @@ func (m *Manager) Stop(id string) error {
 			})
 			return fmt.Errorf("%s", msg)
 		}
-		// stopErr != nil 但进程确实退出了：按已停止处理（orch 超时误报等场景），不阻塞用户
+		// stopErr != nil 但进程确实全部退出了：按已停止处理（优雅停止超时后强杀成功等场景）
 
 		// 更新状态
 		m.mu.Lock()
@@ -731,10 +769,13 @@ func (m *Manager) Stop(id string) error {
 		}
 		stopErr = entity.Stop(context.Background())
 	} else {
-		// 无 provider 注册的服务：按端口反查本实例进程并终止
-		pid := process.FindPIDByPort(port)
-		if pid > 0 && exePathMatchesPID(pid, installDir, kind, version) {
-			stopErr = m.procMgr.Stop(pid)
+		// 无 provider 注册的服务：按端口 + 安装目录归属找出本实例的全部进程并终止。
+		// 只杀一个 PID 对 master/worker 结构无效（master 会重生 worker）。
+		pids := m.livePIDs(kind, version, port, false)
+		for _, pid := range pids {
+			if err := m.procMgr.Stop(pid); err != nil {
+				stopErr = err
+			}
 		}
 	}
 
@@ -836,6 +877,12 @@ func (m *Manager) reconcileStates() {
 		}
 	}
 	var changes []change
+	type adoptTask struct {
+		id   string
+		port int
+		pids []int
+	}
+	var adopts []adoptTask
 
 	m.mu.Lock()
 	for _, id := range ids {
@@ -848,13 +895,26 @@ func (m *Manager) reconcileStates() {
 			continue
 		}
 		info := m.syncServiceState(s, portPIDMap)
-		if info.Status == s.Info.Status && info.PID == s.Info.PID {
-			continue
-		}
+		changed := info.Status != s.Info.Status || info.PID != s.Info.PID
 		old := s.Info.Status
 		s.Info.Status = info.Status
 		s.Info.PID = info.PID
-		if info.Status == core.StatusStopped && old == core.StatusRunning {
+		s.Info.Error = info.Error
+
+		// 运行中的实例必须始终在编排引擎里有登记（幂等 Adopt）：
+		// 登记是 Start 的副作用，冷启动接管、reinit 清表、外部启动都会让"进程在跑但没登记"，
+		// 此时 Stop 会以记账缺失为由拒绝执行 —— 用户看到的就是"运行中却停不掉"。
+		// 真正的接管动作放到锁外做（涉及进程枚举与 Job Object 系统调用）。
+		if info.Status == core.StatusRunning {
+			if pids := ownedPIDsFromMap(portPIDMap, info.Port, m.cfg.Get().InstallDir, info.Kind, info.Version); len(pids) > 0 {
+				adopts = append(adopts, adoptTask{id: id, port: info.Port, pids: pids})
+			}
+		}
+
+		switch {
+		case !changed:
+			// 状态未变，不发事件（Adopt 已在上面兜底）
+		case info.Status == core.StatusStopped && (old == core.StatusRunning || old == core.StatusError):
 			// 进程消失：清掉句柄，允许下次 Start 正常走流程
 			s.process = nil
 			c := change{id: id, info: info}
@@ -863,9 +923,11 @@ func (m *Manager) reconcileStates() {
 				extra map[string]interface{}
 			}{reactive.EventServiceStopped, map[string]interface{}{"reason": "process-exited"}})
 			changes = append(changes, c)
-		} else if info.Status == core.StatusRunning && old == core.StatusStopped {
-			// 端口上发现本实例进程（外部手动启动等）：认领
-			s.process = &process.ProcessHandle{PID: info.PID, Started: time.Now()}
+		case info.Status == core.StatusRunning && (old == core.StatusStopped || old == core.StatusError):
+			// 端口上发现本实例进程（外部手动启动、历史孤儿进程等）：认领
+			if s.process == nil || s.process.PID != info.PID {
+				s.process = &process.ProcessHandle{PID: info.PID, Started: time.Now()}
+			}
 			c := change{id: id, info: info}
 			c.events = append(c.events, struct {
 				evt   reactive.EventType
@@ -875,6 +937,12 @@ func (m *Manager) reconcileStates() {
 		}
 	}
 	m.mu.Unlock()
+
+	// 锁外接管：保证"进程在跑 ⇔ 编排引擎有登记"这条不变式，
+	// 让 Stop 永远有能力停掉正在运行的实例，而不是以记账缺失为由拒绝。
+	for _, a := range adopts {
+		m.adoptOrchestrator(a.id, a.port, a.pids)
+	}
 
 	// 锁外发事件，避免 handler 回调死锁
 	for _, c := range changes {
@@ -1021,9 +1089,10 @@ func (m *Manager) Uninstall(id string) error {
 
 	// 接管清理残留进程：上一会话遗留的进程 s.process 为 nil 但仍在运行，
 	// 只停登记过的 PID 会让删目录报"删除失败"且用户看不懂原因。
-	// 按端口 + 安装目录归属识别本实例进程（不误杀外部程序）
+	// 按端口 + 安装目录归属识别本实例的**全部**进程（不误杀外部程序）：
+	// master/worker 结构下漏掉任何一个，目录都会被占用而删不掉。
 	if port > 0 {
-		if occ := process.FindPIDByPort(port); occ > 0 && exePathMatchesPID(occ, installDir, kind, version) {
+		for _, occ := range m.livePIDs(kind, version, port, true) {
 			found := false
 			for _, p := range pids {
 				if p == occ {

@@ -253,15 +253,50 @@ func IsProcessRunning(pid int) bool {
 	return code == 259 // STILL_ACTIVE
 }
 
-// FindPIDByPort 返回当前监听指定端口的进程 ID；无人监听时返回 0。
+// FindPIDsByPort 返回当前监听指定端口的全部进程 PID（可能为空切片）。
 //
 // 必须精确匹配端口号（复用 FindAllPIDsByPort 的解析），
 // 不能用 Contains(":80") 之类的子串匹配——那会把 :8001/:8080 误判为 :80。
+//
+// 为什么需要集合而不是单值：Windows 上 nginx/mysql/redis 这类服务是
+// master/worker 结构，master 与每个 worker 都会出现在 netstat 的 LISTENING
+// 行里（worker 继承监听套接字）。任何"一个端口只有一个进程"的假设都会导致
+// 只杀掉其中一个 worker，master 立刻重生 worker 抢回端口——停止动作因此
+// 从未真正生效。判活与判停必须以"该实例的全部 PID"为单位。
+func FindPIDsByPort(port int) []int {
+	return append([]int(nil), FindAllPIDsByPort()[port]...)
+}
+
+// FindPIDByPort 返回监听指定端口的任意一个进程 PID；无人监听时返回 0。
+//
+// 只适用于"端口有没有被占"这类布尔判断。凡是涉及停止、复核、归属认定的
+// 场景，必须改用 FindPIDsByPort / FindPIDsByPortOwned，否则会漏杀同端口的
+// 其余进程。
 func FindPIDByPort(port int) int {
-	if pid, ok := FindAllPIDsByPort()[port]; ok {
-		return pid
+	pids := FindAllPIDsByPort()[port]
+	if len(pids) == 0 {
+		return 0
 	}
-	return 0
+	return pids[0]
+}
+
+// FindPIDsByPortOwned 返回监听在 port 上、且可执行文件路径位于 exeDir 目录内的全部 PID。
+//
+// 这是"本实例到底有哪些进程在跑"的唯一判据：同端口的 master + 全部 worker 都会
+// 被收集，端口被其它程序或其它版本占用时返回空，避免把外部进程误认/误杀为本实例。
+func FindPIDsByPortOwned(port int, exeDir string) []int {
+	if port <= 0 || exeDir == "" {
+		return nil
+	}
+	dir := strings.ToLower(exeDir)
+	var out []int
+	for _, pid := range FindPIDsByPort(port) {
+		exe := strings.ToLower(GetExecutablePath(pid))
+		if exe != "" && strings.Contains(exe, dir) {
+			out = append(out, pid)
+		}
+	}
+	return out
 }
 
 // executablePathCache 缓存 wmic 查询结果，避免 syncServiceState 为每个服务重复调用 wmic。
@@ -319,25 +354,46 @@ func queryFullProcessImageName(pid int) string {
 
 // portPIDCache 缓存 netstat 扫描结果，避免短时间内重复执行 netstat -ano
 // 一次 Dashboard.load() 中 GetServices 和 GetEnvironment 都会调用 svcMgr.List()，
-// 进而调用 FindAllPIDsByPort()，缓存可以避免重复的 netstat 调用
+// 进而调用 FindAllPIDsByPort()，缓存可以避免重复的 netstat 调用。
+//
+// 值是切片而不是单值：同端口的 master 与全部 worker 都要保留（见 FindPIDsByPort）。
 var (
-	portPIDCache     map[int]int
+	portPIDCache     map[int][]int
 	portPIDCacheTime time.Time
 	portPIDCacheMu   sync.Mutex
 )
 
-// portPIDCacheTTL 是端口 PID 缓存的有效期
+// portPIDCacheTTL 是端口 PID 缓存的有效期。
+// 仅限"展示型"判活使用；停止后的复核必须先 InvalidatePortCache()，
+// 否则 200ms 一轮的轮询全程读到停止前的陈旧快照，会把已停成功误报成停止失败。
 const portPIDCacheTTL = 2 * time.Second
+
+// InvalidatePortCache 强制下一次端口查询走真实扫描，并作废 exe 路径缓存。
+// 强杀/优雅停止之后、复核进程是否退出之前必须调用，否则 2s TTL 内的轮询
+// 会全程读到停止前的陈旧快照，把已经停成功的动作误报成停止失败。
+//
+// 注意只清时间戳不清内容：netstat 偶发失败时仍可降级到上一次成功结果，
+// 保持"陈旧好过错误空数据"的策略不变。
+func InvalidatePortCache() {
+	portPIDCacheMu.Lock()
+	portPIDCacheTime = time.Time{}
+	portPIDCacheMu.Unlock()
+
+	executablePathCacheMu.Lock()
+	executablePathCache = nil
+	executablePathCacheTime = time.Time{}
+	executablePathCacheMu.Unlock()
+}
 
 // stalePortPIDCache netstat 扫描失败时的降级策略：返回上一次成功扫描的缓存（无论多旧）。
 // 之前失败直接返回空 map，调用方把"扫描失败"当"没有进程监听"产生假阴性——
 // 判活误报已停止、端口冲突误判空闲。陈旧数据远好于错误的空数据；完全没有历史数据时才返回空。
 // 必须在持有 portPIDCacheMu 时调用。
-func stalePortPIDCache(reason string) map[int]int {
+func stalePortPIDCache(reason string) map[int][]int {
 	if portPIDCache != nil {
-		result := make(map[int]int, len(portPIDCache))
+		result := make(map[int][]int, len(portPIDCache))
 		for k, v := range portPIDCache {
-			result[k] = v
+			result[k] = append([]int(nil), v...)
 		}
 		return result
 	}
@@ -345,15 +401,15 @@ func stalePortPIDCache(reason string) map[int]int {
 	return nil
 }
 
-func FindAllPIDsByPort() map[int]int {
+func FindAllPIDsByPort() map[int][]int {
 	portPIDCacheMu.Lock()
 	defer portPIDCacheMu.Unlock()
 
 	// 缓存命中：在 TTL 内直接复用
 	if portPIDCache != nil && time.Since(portPIDCacheTime) < portPIDCacheTTL {
-		result := make(map[int]int, len(portPIDCache))
+		result := make(map[int][]int, len(portPIDCache))
 		for k, v := range portPIDCache {
-			result[k] = v
+			result[k] = append([]int(nil), v...)
 		}
 		return result
 	}
@@ -382,7 +438,8 @@ func FindAllPIDsByPort() map[int]int {
 	if err != nil {
 		return stalePortPIDCache(err.Error())
 	}
-	result := make(map[int]int)
+	result := make(map[int][]int)
+	seen := make(map[int]map[int]bool)
 	for _, line := range strings.Split(string(out), "\n") {
 		if !strings.Contains(line, "LISTEN") {
 			continue
@@ -397,7 +454,15 @@ func FindAllPIDsByPort() map[int]int {
 			if port, err := strconv.Atoi(portStr); err == nil {
 				pid, _ := strconv.Atoi(fields[len(fields)-1])
 				if pid > 0 {
-					result[port] = pid
+					// 同端口多 PID（master + 多个 worker 都继承监听套接字）全部保留，
+					// IPv4/IPv6 双行会重复报告同一 PID，用 seen 去重。
+					if seen[port] == nil {
+						seen[port] = make(map[int]bool)
+					}
+					if !seen[port][pid] {
+						seen[port][pid] = true
+						result[port] = append(result[port], pid)
+					}
 				}
 			}
 		}

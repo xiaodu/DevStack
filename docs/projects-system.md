@@ -16,13 +16,13 @@ Project 层 (internal/project/)    — 用户应用项目（新增）
 
 ### Project vs Site 对比
 
-| 维度 | Site | Project |
-|------|------|---------|
-| 本质 | Nginx 虚拟主机配置 | 应用进程管理 |
-| 依赖 | 必须 Nginx 运行 | Node/Python 独立；PHP/Static 可选 Nginx |
-| 进程管理 | 无 | Start/Stop/Restart |
-| 端口 | Nginx 监听端口 | 应用直接监听端口 |
-| 类型 | static, php, proxy | node, python, php, static |
+| 维度   | Site               | Project                            |
+| ---- | ------------------ | ---------------------------------- |
+| 本质   | Nginx 虚拟主机配置       | 应用进程管理                             |
+| 依赖   | 必须 Nginx 运行        | Node/Python 独立；PHP/Static 可选 Nginx |
+| 进程管理 | 无                  | Start/Stop/Restart                 |
+| 端口   | Nginx 监听端口         | 应用直接监听端口                           |
+| 类型   | static, php, proxy | node, python, php, static          |
 
 ---
 
@@ -81,7 +81,7 @@ running → stopping → stopped
 工作目录：/path/project
 ```
 
-启动命令：`node "<entry>"`（entry 为完整路径）
+启动命令：`node "<entry>"`（entry 为完整路径）  
 进程管理：`process.Manager.Start(id, "node", [entry], env, path)`
 
 ### 3.2 Python 项目
@@ -94,7 +94,7 @@ running → stopping → stopped
 工作目录：/path/project
 ```
 
-启动命令：`python "<entry>"`
+启动命令：`python "<entry>"`  
 如果入口为 `manage.py` 自动追加 `runserver 0.0.0.0:PORT`
 
 ### 3.3 PHP 项目
@@ -118,7 +118,7 @@ running → stopping → stopped
 端口：Nginx 监听端口
 ```
 
-仅生成 Nginx 虚拟主机配置。若 Nginx 未运行则标记但可手动启用。
+仅生成 Nginx 虚拟主机配置。若 Nginx 未运行则标记但可手动启用。  
 是否需要 Nginx 前端代理该目录。
 
 ---
@@ -152,6 +152,7 @@ func (m *Manager) Restart(id string) error
 存储路径：`dataDir/projects.json`
 
 格式：
+
 ```json
 [
   {
@@ -211,6 +212,7 @@ func (m *Manager) startNode(p *Project) error {
 ### 5.2 Stop 逻辑
 
 所有类型统一的停止方式：
+
 1. 设置 `Status = "stopping"`
 2. 调用 `m.procMgr.Stop(pid)`
 3. 轮询 `IsRunning` 最多 3 秒
@@ -219,6 +221,7 @@ func (m *Manager) startNode(p *Project) error {
 ### 5.3 进程意外退出检测
 
 启动时启动 goroutine watch：
+
 ```go
 go func() {
     <-m.procMgr.WaitChan(pid)
@@ -266,6 +269,7 @@ func NewApp() *App {
 `frontend/src/components/Projects.svelte` — 项目管理页面
 
 布局参考 Sites.svelte（左右分栏）：
+
 - 左侧：项目列表（搜索 + 过滤）
 - 右侧：编辑表单 / 详情
 
@@ -303,16 +307,16 @@ Sidebar 新增项目菜单项。
 
 ### 7.4 项目表单字段
 
-| 字段 | 控件 | 说明 |
-|------|------|------|
-| 名称 | input text | |
-| 类型 | select | node / python / php / static |
-| 项目目录 | input + browse button | 目录选择器 |
-| 入口文件 | input text | server.js, app.py |
-| 端口 | input number | 应用监听端口 |
-| 域名 | input text | 可选，Nginx 反代用 |
-| 版本 | select | 已安装的运行时版本 |
-| 自动启动 | checkbox | 随服务自启 |
+| 字段   | 控件                    | 说明                           |
+| ---- | --------------------- | ---------------------------- |
+| 名称   | input text            |                              |
+| 类型   | select                | node / python / php / static |
+| 项目目录 | input + browse button | 目录选择器                        |
+| 入口文件 | input text            | server.js, app.py            |
+| 端口   | input number          | 应用监听端口                       |
+| 域名   | input text            | 可选，Nginx 反代用                 |
+| 版本   | select                | 已安装的运行时版本                    |
+| 自动启动 | checkbox              | 随服务自启                        |
 
 ---
 
@@ -362,6 +366,7 @@ server {
 ### 9.1 保留 Sites 不动
 
 Sites 系统完全是 Nginx 虚拟主机配置，和 Projects 是平行关系。用户可以选择：
+
 - 用 Sites 管理纯 Nginx 虚拟主机（已有方式）
 - 用 Projects 管理应用项目（新方式）
 - 两边同时使用
@@ -369,6 +374,7 @@ Sites 系统完全是 Nginx 虚拟主机配置，和 Projects 是平行关系。
 ### 9.2 可能的未来合并方向
 
 如果 Sites 和 Projects 功能重叠过多，可以将来合并：
+
 - Site 的 `php` 类型 → 对应 `ProjectPHP` + Nginx vhost
 - Site 的 `static` 类型 → 对应 `ProjectStatic` + Nginx vhost
 - Site 的 `proxy` 类型 → 对应 `ProjectNode`/`ProjectPython` + Nginx vhost

@@ -278,16 +278,9 @@ func (i *PHPInstance) Stop(ctx context.Context) error {
 
 	i.status = core.StatusStopping
 
-	// 收集属于本实例的进程（只收集不杀）。
-	targets := make(map[int]struct{})
-	if i.pid > 0 {
-		targets[i.pid] = struct{}{}
-	}
-	if i.pid <= 0 {
-		if pid := ownedPIDByPort(i.port, i.phpDir); pid > 0 {
-			targets[pid] = struct{}{}
-		}
-	}
+	// 收集属于本实例的进程（只收集不杀）：自管 PID ∪ 端口上属于本版本目录的全部 PID。
+	// php-cgi 常被手工/脚本多起几个实例，只按自管 PID 停止会在端口上留下同目录孤儿。
+	targets := collectOwnedTargets(i.port, i.phpDir, i.pid)
 
 	if len(targets) == 0 {
 		// 本实例未运行，视为已停止
@@ -305,9 +298,13 @@ func (i *PHPInstance) Stop(ctx context.Context) error {
 		}
 	}
 
-	// 等待本实例进程退出（5s）。判据=进程退出，不用端口是否释放。
+	// 等待本实例进程退出（5s）。判据=进程退出 + 端口上不再出现本目录进程，
+	// 只有前者会漏掉"杀掉的进程没了，但端口上还有同目录孤儿"的情况。
 	if remaining := waitProcessesExited(targets, 5*time.Second); len(remaining) > 0 {
 		return fmt.Errorf("PHP 停止失败: 进程 %s 未退出（强制终止仍失败，可能权限不足）: %v", pidList(remaining), lastErr)
+	}
+	if rest := verifyStoppedByPort(i.port, i.phpDir, 3*time.Second); len(rest) > 0 {
+		return fmt.Errorf("PHP 停止失败: 端口 %d 上仍有本实例进程 (PID %s) 未退出: %v", i.port, pidList(pidSet(rest)), lastErr)
 	}
 
 	i.pid = 0

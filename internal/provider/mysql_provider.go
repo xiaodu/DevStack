@@ -334,16 +334,9 @@ func (i *MySQLInstance) Stop(ctx context.Context) error {
 
 	i.status = core.StatusStopping
 
-	// 收集属于本实例的进程：自管 pid，以及端口上属于本版本目录内的进程（只收集不杀）。
-	targets := make(map[int]struct{})
-	if i.pid > 0 {
-		targets[i.pid] = struct{}{}
-	}
-	if i.pid <= 0 {
-		if pid := ownedPIDByPort(i.port, i.mysqlDir); pid > 0 {
-			targets[pid] = struct{}{}
-		}
-	}
+	// 收集属于本实例的进程：自管 pid ∪ 端口上属于本版本目录内的全部进程（只收集不杀）。
+	// 只按自管 pid 停止会漏掉 DevStack 重启前遗留的同目录孤儿 mysqld。
+	targets := collectOwnedTargets(i.port, i.mysqlDir, i.pid)
 
 	if len(targets) == 0 {
 		// 本实例未运行，视为已停止
@@ -385,6 +378,9 @@ func (i *MySQLInstance) Stop(ctx context.Context) error {
 	}
 	if rem2 := waitProcessesExited(remaining, 3*time.Second); len(rem2) > 0 {
 		return fmt.Errorf("MySQL 停止失败: 进程 %s 未退出（优雅停止超时后强制终止仍失败，可能权限不足）: %v", pidList(rem2), lastErr)
+	}
+	if rest := verifyStoppedByPort(i.port, i.mysqlDir, 3*time.Second); len(rest) > 0 {
+		return fmt.Errorf("MySQL 停止失败: 端口 %d 上仍有本实例进程 (PID %s) 未退出: %v", i.port, pidList(pidSet(rest)), lastErr)
 	}
 
 	i.pid = 0

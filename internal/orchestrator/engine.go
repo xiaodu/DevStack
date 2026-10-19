@@ -60,6 +60,12 @@ type Service struct {
 
 	// 依赖关系
 	DependsOn []string // 依赖的服务名列表
+
+	// FromProcfile 标记该条目是否来自 Procfile。
+	// LoadProcfile 重新加载时只替换 Procfile 来源的条目，必须保留程序化注册
+	// （内置服务由 service.Manager 懒注册）的条目及其运行状态，否则正在运行的
+	// 进程会失去编排登记，之后 Stop 查不到条目直接报"服务不存在"却不停进程。
+	FromProcfile bool
 }
 
 // clone 返回服务当前状态的安全副本，避免调用方在锁外持有并修改内部对象。
@@ -189,24 +195,43 @@ func (e *Engine) LoadProcfile(path string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	// 清空现有服务
-	e.services = make(map[string]*Service)
-
-	// 转换为 Service 定义
-	for _, entry := range procfile.Entries {
-		svc := &Service{
-			Name:      entry.Name,
-			Command:   entry.Command,
-			Args:      entry.Args,
-			Env:       entry.Env,
-			WorkDir:   entry.WorkDir,
-			AutoRun:   entry.AutoRun,
-			GraceSec:  entry.GraceSec,
-			State:     StateStopped,
-			DependsOn: e.inferDependencies(entry.Name),
+	// 只重建 Procfile 来源的条目：程序化注册的内置服务（nginx@1.24.0 等）连同其
+	// 运行状态必须保留。之前这里整表清空，导致 reinitManagers（改安装目录、装完组件）
+	// 之后正在运行的进程再无任何编排登记 —— 停止时查不到条目，报"服务不存在"且什么都不杀。
+	merged := make(map[string]*Service, len(procfile.Entries)+len(e.services))
+	for name, svc := range e.services {
+		if !svc.FromProcfile {
+			merged[name] = svc
 		}
-		e.services[svc.Name] = svc
 	}
+
+	for _, entry := range procfile.Entries {
+		if old, ok := merged[entry.Name]; ok {
+			// 同名条目已存在（多为程序化注册）：只更新配置，保留 PID/状态
+			old.Command = entry.Command
+			old.Args = entry.Args
+			old.Env = entry.Env
+			old.WorkDir = entry.WorkDir
+			old.AutoRun = entry.AutoRun
+			old.GraceSec = entry.GraceSec
+			old.FromProcfile = true
+			continue
+		}
+		svc := &Service{
+			Name:         entry.Name,
+			Command:      entry.Command,
+			Args:         entry.Args,
+			Env:          entry.Env,
+			WorkDir:      entry.WorkDir,
+			AutoRun:      entry.AutoRun,
+			GraceSec:     entry.GraceSec,
+			State:        StateStopped,
+			DependsOn:    e.inferDependencies(entry.Name),
+			FromProcfile: true,
+		}
+		merged[svc.Name] = svc
+	}
+	e.services = merged
 
 	e.procfile = procfile
 
@@ -347,6 +372,57 @@ func (e *Engine) ReleasePID(name string, pid int) {
 		s.State = StateStopped
 	}
 	e.mu.Unlock()
+}
+
+// Adopt 把一个"进程已经在跑、但编排表里没有登记"的服务实例接管进来（幂等）。
+//
+// 存在理由：运行态的真相当在端口与进程上，而登记是 Manager.Start 的副作用。
+// DevStack 重启、外部手动启动、reinit 等场景下会出现"进程活着但没登记"，
+// 此时若不允许接管，Stop 就会以记账缺失为由拒绝执行（历史表现：显示运行中，
+// 点停止报"服务 xxx 不存在"）。pids 应传该实例在端口上的全部进程，
+// 首个作为代表 PID（调用方给根进程），其余仅纳入 Job Object。
+func (e *Engine) Adopt(name string, port int, pids []int) error {
+	if name == "" {
+		return fmt.Errorf("Adopt 需要服务名")
+	}
+	if len(pids) == 0 {
+		return fmt.Errorf("服务 %s 没有可接管的进程", name)
+	}
+
+	e.mu.Lock()
+	svc, ok := e.services[name]
+	if !ok {
+		svc = &Service{
+			Name:      name,
+			GraceSec:  5,
+			State:     StateStopped,
+			DependsOn: e.inferDependencies(name),
+		}
+		e.services[name] = svc
+	}
+	if port > 0 {
+		svc.Port = port
+	}
+	e.mu.Unlock()
+
+	for _, pid := range pids {
+		if pid <= 0 {
+			continue
+		}
+		// Job Object 纳入失败不影响登记有效性（进程仍归本工具管理）
+		if err := e.AssignPID(name, pid); err != nil {
+			e.log(fmt.Sprintf("接管 %s (PID=%d) 失败: %v", name, pid, err))
+		}
+	}
+
+	// 代表 PID 固定为调用方给出的首个（根进程），避免最后 assign 的 worker 顶掉它
+	e.mu.Lock()
+	if s, ok := e.services[name]; ok && pids[0] > 0 {
+		s.PID = pids[0]
+		s.State = StateRunning
+	}
+	e.mu.Unlock()
+	return nil
 }
 
 // inferDependencies 推断服务依赖关系
@@ -551,21 +627,55 @@ func (e *Engine) Start(ctx context.Context, name string) error {
 }
 
 // Stop 停止单个服务
+//
+// 停止是"清理动作"，不允许因编排表里没有登记就拒绝执行：
+// 未登记时按需补登记（与 AssignPID 的自愈一致）继续走停止流程。
+// 之前直接 return "服务 %s 不存在"，会让上层既没杀掉进程、又把内部记账
+// 缺失当作用户可见错误抛出，表现为"显示运行中、停止报服务不存在"的死循环。
 func (e *Engine) Stop(ctx context.Context, name string) error {
 	svc := e.getService(name)
 	if svc == nil {
-		return fmt.Errorf("服务 %s 不存在", name)
+		if e.stopFunc == nil {
+			// Procfile 模式下条目确实不存在，无从停止，如实报错
+			return fmt.Errorf("服务 %s 不存在", name)
+		}
+		e.mu.Lock()
+		svc = &Service{
+			Name:      name,
+			GraceSec:  5,
+			State:     StateStopped,
+			DependsOn: e.inferDependencies(name),
+		}
+		e.services[name] = svc
+		e.mu.Unlock()
+		e.log(fmt.Sprintf("服务 %s 未登记，按停止请求补登记（可能是外部启动或状态同步遗漏）", name))
 	}
 
 	e.mu.Lock()
 	if svc.State == StateStopped || svc.State == StateStopping {
+		pidKnown := svc.PID
 		e.mu.Unlock()
-		return nil
+		// 状态说"已停止"不等于进程真的没在跑：以端口为准做一次收尸式复核。
+		// 端口上仍有本服务的监听进程说明记账与现实不一致，必须继续停止，
+		// 否则 UI 会永远停在"已停止但端口被占"的状态。
+		if pidKnown > 0 || (svc.Port > 0 && process.FindPIDByPort(svc.Port) > 0) {
+			e.mu.Lock()
+			svc.State = StateRunning
+			e.mu.Unlock()
+		} else {
+			return nil
+		}
 	}
 	oldState := svc.State
 	svc.State = StateStopping
 	// 在锁内快照 PID，停止/等待全程用这个局部值，避免无锁反复读 svc.PID 的数据竞争。
 	pid := svc.PID
+	if pid <= 0 && svc.Port > 0 {
+		// 记账里没有 PID（冷启动接管的进程、或整表被清过）：
+		// 从端口发现一个真实 PID，否则后面的退出复核会对着 PID=0 秒判"已停止"。
+		pid = process.FindPIDByPort(svc.Port)
+		svc.PID = pid
+	}
 	e.mu.Unlock()
 
 	e.notifyStateChange(name, oldState, StateStopping, nil)
@@ -578,10 +688,16 @@ func (e *Engine) Stop(ctx context.Context, name string) error {
 
 	// 2. 优雅停止（使用 stopFunc 回调，由 provider 实际停止）
 	if e.stopFunc != nil {
+		// provider 的停止已包含"优雅 → 强杀 → 按端口集合复核"，它返回错误就是真没停干净。
+		// 这里绝不能再吞掉错误后靠 PID 存活判断自行宣布"已停止"——那正是
+		// UI 显示已停止、进程却还在监听、下次 Start 被幂等跳过的成因。
 		if err := e.stopFunc(name); err != nil {
 			e.log(fmt.Sprintf("停止 %s 失败: %v", name, err))
-			// 回退到强制停止
-			e.group.ForceStop(pid)
+			if pid > 0 {
+				e.group.ForceStop(pid) // 尽力兜底，同时把进程移出 Job Object
+			}
+			e.setError(name, err)
+			return err
 		}
 	} else {
 		// 回退到直接停止（Procfile 模式）
