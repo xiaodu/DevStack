@@ -7,6 +7,7 @@ const (
 	CatDatabase  Category = "database"
 	CatRuntime   Category = "runtime"
 	CatService   Category = "service"
+	CatTool      Category = "tools"
 )
 
 type PackageType string
@@ -22,8 +23,9 @@ const (
 	PkgMemcached PackageType = "memcached"
 	PkgPHP      PackageType = "php"
 	PkgNode     PackageType = "node"
-	PkgPython   PackageType = "python"
-	PkgComposer PackageType = "composer"
+	PkgPython     PackageType = "python"
+	PkgComposer   PackageType = "composer"
+	PkgPhpMyAdmin PackageType = "phpmyadmin"
 )
 
 type VersionInfo struct {

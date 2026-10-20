@@ -185,6 +185,12 @@ function buildActiveCards(env: any, profileList: any[], svcList: any[], rtList: 
 
 // 响应式：当 activeEnv/profiles/services/runtimes 变化时重新计算卡片
 let activeCards = $derived(buildActiveCards(activeEnv, profiles, services, runtimes))
+let activeProfile = $derived(profiles.find((p) => p.id === activeEnv?.activeProfileID) || null)
+let runningTotal = $derived(envSummary.services.running + envSummary.runtimes.running)
+let totalUnits = $derived(envSummary.services.total + envSummary.runtimes.total)
+let runningPct = $derived(totalUnits > 0 ? Math.round((runningTotal / totalUnits) * 100) : 0)
+let envStateLabel = $derived(!activeEnv?.activeProfileID ? '未激活' : runningTotal > 0 ? '运行中' : '已停止')
+let envStateDot = $derived(!activeEnv?.activeProfileID ? 'bg-base-content/30' : runningTotal > 0 ? 'bg-success' : 'bg-base-content/40')
 
 function statusLabel(s: string) {
   if (s === 'running') return '运行中'
@@ -236,7 +242,7 @@ onMount(() => {
 })
 </script>
 
-<div class="flex flex-col gap-5 h-full overflow-hidden">
+<div class="flex flex-col gap-5">
   <!-- 加载失败横幅：明确指出是取数失败而不是没有数据，并提供重试 -->
   {#if hasLoaded && loadError}
     <div class="alert alert-warning alert-sm flex items-center gap-3 py-2.5">
@@ -251,20 +257,90 @@ onMount(() => {
     </div>
   {/if}
 
+  <!-- 当前环境概览 -->
+  <section class="overflow-hidden rounded-2xl border border-base-300 bg-gradient-to-br from-base-100 via-base-100 to-primary/5 p-5">
+    <div class="flex flex-wrap items-center gap-4">
+      <div class="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-primary to-primary/70 text-primary-content shadow-sm">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="h-6 w-6"><path d="m12 2 9 5-9 5-9-5 9-5Z"/><path d="m3 12 9 5 9-5"/><path d="m3 17 9 5 9-5"/></svg>
+      </div>
+      <div class="min-w-0 flex-1">
+        <div class="flex items-center gap-2">
+          <span class="text-xs text-base-content/50">当前环境</span>
+          <span class="inline-flex items-center gap-1.5 rounded-full bg-base-200/80 px-2 py-0.5 text-[11px] text-base-content/60">
+            <span class="h-1.5 w-1.5 rounded-full {envStateDot}"></span>
+            {hasLoaded ? envStateLabel : '—'}
+          </span>
+        </div>
+        <h2 class="mt-1 truncate text-lg font-bold">{activeProfile?.name || '尚未激活环境'}</h2>
+        <p class="mt-0.5 text-xs text-base-content/55">
+          {#if activeProfile}
+            {(activeProfile.units?.length || 0)} 个组件 · {runningTotal}/{totalUnits} 运行中
+          {:else}
+            前往「环境管理」选择一个环境模板并激活
+          {/if}
+        </p>
+      </div>
+      <div class="flex shrink-0 items-center gap-2">
+        <span class="rounded-full bg-success/10 px-3 py-1.5 text-xs font-medium text-success">{runningTotal} 运行</span>
+        <span class="rounded-full bg-base-200 px-3 py-1.5 text-xs text-base-content/60">{Math.max(totalUnits - runningTotal, 0)} 停止</span>
+      </div>
+    </div>
+    <div class="mt-4 h-1.5 overflow-hidden rounded-full bg-base-200">
+      <div class="h-full rounded-full bg-success/80 transition-all duration-500" style="width:{hasLoaded ? runningPct : 0}%"></div>
+    </div>
+  </section>
+
+  <!-- 指标卡 -->
+  <div class="grid grid-cols-2 gap-4 lg:grid-cols-4">
+    <div class="rounded-2xl border border-base-300 bg-base-100 p-4 shadow-sm">
+      <div class="flex items-center justify-between">
+        <span class="text-xs text-base-content/55">组件运行中</span>
+        <span class="h-7 w-7 rounded-lg bg-success/10 text-success flex items-center justify-center">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="h-3.5 w-3.5"><rect x="3" y="4" width="18" height="6" rx="2"/><rect x="3" y="14" width="18" height="6" rx="2"/></svg>
+        </span>
+      </div>
+      <div class="mt-2 font-mono text-2xl font-bold">{hasLoaded ? envSummary.services.running : '-'}<span class="text-sm font-normal text-base-content/40">/{hasLoaded ? envSummary.services.total : '-'}</span></div>
+    </div>
+    <div class="rounded-2xl border border-base-300 bg-base-100 p-4 shadow-sm">
+      <div class="flex items-center justify-between">
+        <span class="text-xs text-base-content/55">运行时运行中</span>
+        <span class="h-7 w-7 rounded-lg bg-primary/10 text-primary flex items-center justify-center">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="h-3.5 w-3.5"><path d="m8 8-4 4 4 4"/><path d="m16 8 4 4-4 4"/></svg>
+        </span>
+      </div>
+      <div class="mt-2 font-mono text-2xl font-bold">{hasLoaded ? envSummary.runtimes.running : '-'}<span class="text-sm font-normal text-base-content/40">/{hasLoaded ? envSummary.runtimes.total : '-'}</span></div>
+    </div>
+    <div class="rounded-2xl border border-base-300 bg-base-100 p-4 shadow-sm">
+      <div class="flex items-center justify-between">
+        <span class="text-xs text-base-content/55">项目已启用</span>
+        <span class="h-7 w-7 rounded-lg bg-warning/10 text-warning flex items-center justify-center">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="h-3.5 w-3.5"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18 14 14 0 0 1 0-18z"/></svg>
+        </span>
+      </div>
+      <div class="mt-2 font-mono text-2xl font-bold">{hasLoaded ? envSummary.projects.enabled : '-'}<span class="text-sm font-normal text-base-content/40">/{hasLoaded ? envSummary.projects.total : '-'}</span></div>
+    </div>
+    <div class="rounded-2xl border border-base-300 bg-base-100 p-4 shadow-sm">
+      <div class="flex items-center justify-between">
+        <span class="text-xs text-base-content/55">最近快照</span>
+        <span class="h-7 w-7 rounded-lg bg-base-200 text-base-content/60 flex items-center justify-center">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="h-3.5 w-3.5"><path d="M3 8V5a2 2 0 0 1 2-2h3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M21 16v3a2 2 0 0 1-2 2h-3"/><circle cx="12" cy="12" r="3.5"/></svg>
+        </span>
+      </div>
+      <div class="mt-2 truncate text-sm font-semibold" title={lastSnapshot || ''}>{hasLoaded ? (lastSnapshot || '暂无快照') : '-'}</div>
+    </div>
+  </div>
+
   <!-- Cards row -->
   <div class="grid grid-cols-1 gap-5">
     <!-- Service mini cards - 与当前激活环境联动，纯展示 -->
-    <div class="card bg-base-100 border border-base-300 overflow-hidden">
-      <div class="flex justify-between items-center px-4 py-3.5 border-b border-base-300">
+    <div class="overflow-hidden rounded-2xl border border-base-300 bg-base-100 shadow-sm">
+      <div class="flex justify-between items-center border-b border-base-200 px-5 py-4">
         <h3 class="text-sm font-semibold">组件</h3>
-        {#if hasLoaded && activeEnv?.activeProfileID}
-          {@const activeProfile = profiles.find((p) => p.id === activeEnv.activeProfileID)}
-          {#if activeProfile}
-            <span class="badge badge-sm badge-ghost text-base-content/70 border border-base-300">{activeProfile.name}</span>
-          {/if}
+        {#if hasLoaded && activeProfile}
+          <span class="rounded-full border border-base-300 px-2.5 py-0.5 text-xs text-base-content/60">{activeProfile.name}</span>
         {/if}
       </div>
-      <div class="grid grid-cols-3 gap-2 p-3">
+      <div class="grid grid-cols-3 gap-3 p-4">
         {#if !hasLoaded}
           {#each [1, 2, 3] as _}
             <div class="bg-base-200 rounded-lg border border-base-300 border-dashed p-2.5">
@@ -279,10 +355,10 @@ onMount(() => {
           </div>
         {:else}
           {#each activeCards as card}
-            <div class="relative bg-base-200 rounded-lg border border-base-300 overflow-hidden {cardBorderCls(card.status)}" title={card.error || ''}>
+            <div class="relative overflow-hidden rounded-xl border border-base-300/80 bg-base-200/40 {cardBorderCls(card.status)}" title={card.error || ''}>
               <div class="h-0.5 w-full" style="background:{card.color}"></div>
               <div class="flex items-center gap-3 p-3">
-                <div class="w-9 h-9 rounded-full flex items-center justify-center text-white shrink-0" style="background:{card.color}">
+                <div class="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-white" style="background:{card.color}">
                   {#if card.iconCls}
                     <span class="iconfont text-lg {card.iconCls}"></span>
                   {:else}
@@ -315,36 +391,13 @@ onMount(() => {
         {/if}
       </div>
     </div>
-
-    <!-- Environment overview -->
-    <div class="card bg-base-100 border border-base-300 overflow-hidden">
-      <div class="flex justify-between items-center px-4 py-3.5 border-b border-base-300"><h3 class="text-sm font-semibold">环境概览</h3></div>
-      <div class="grid grid-cols-4 gap-0 p-4 stat-grid">
-        <div class="flex flex-col items-center gap-1 px-3 py-3 border-base-300">
-          <div class="text-2xl font-bold font-mono">{hasLoaded ? envSummary.services.running : '-'}/{hasLoaded ? envSummary.services.total : '-'}</div>
-          <div class="text-xs text-base-content/60">组件运行中</div>
-        </div>
-        <div class="flex flex-col items-center gap-1 px-3 py-3 border-base-300">
-          <div class="text-2xl font-bold font-mono">{hasLoaded ? envSummary.runtimes.running : '-'}/{hasLoaded ? envSummary.runtimes.total : '-'}</div>
-          <div class="text-xs text-base-content/60">运行时运行中</div>
-        </div>
-        <div class="flex flex-col items-center gap-1 px-3 py-3 border-base-300">
-          <div class="text-2xl font-bold font-mono">{hasLoaded ? envSummary.projects.enabled : '-'}/{hasLoaded ? envSummary.projects.total : '-'}</div>
-          <div class="text-xs text-base-content/60">项目已启用</div>
-        </div>
-        <div class="flex flex-col items-center gap-1 px-3 py-3">
-          <div class="text-base font-bold">{hasLoaded ? (lastSnapshot ? '有' : '无') : '-'}</div>
-          <div class="text-xs text-base-content/60">最近快照</div>
-        </div>
-      </div>
-    </div>
   </div>
 
   <!-- Sites table card -->
-  <div class="card bg-base-100 border border-base-300 overflow-hidden">
-    <div class="flex justify-between items-center px-4 py-3.5 border-b border-base-300">
+  <div class="overflow-hidden rounded-2xl border border-base-300 bg-base-100 shadow-sm">
+    <div class="flex justify-between items-center border-b border-base-200 px-5 py-4">
       <h3 class="text-sm font-semibold">项目列表</h3>
-      <span class="badge badge-sm">{sites.length} 个</span>
+      <span class="rounded-full bg-base-200 px-2.5 py-0.5 text-xs text-base-content/60">{sites.length} 个</span>
     </div>
     {#if !hasLoaded}
       <div class="flex items-center justify-center py-8 text-base-content/60 text-sm">加载项目中...</div>
@@ -359,19 +412,29 @@ onMount(() => {
         <p class="text-xs mt-1">前往「项目」页面添加您的第一个站点</p>
       </div>
     {:else}
-      <table class="table">
+      <table class="table table-sm">
         <thead>
-          <tr><th>名称</th><th>域名</th><th>类型</th><th>根目录</th><th>状态</th></tr>
+          <tr class="border-base-200 text-xs text-base-content/50">
+            <th class="font-medium">名称</th><th class="font-medium">域名</th><th class="font-medium">类型</th><th class="font-medium">根目录</th><th class="font-medium">状态</th>
+          </tr>
         </thead>
         <tbody>
           {#each sites as site}
-            <tr>
-              <td class="font-medium">{site.name}</td>
-              <td><code class="bg-base-200 px-1.5 py-0.5 rounded text-xs font-mono">{site.domain}</code></td>
-              <td><span class="text-xs px-1.5 py-0.5 rounded bg-base-200 text-base-content/70 font-mono">{site.type}</span></td>
-              <td class="text-xs text-base-content/60 font-mono">{site.root || '-'}</td>
+            <tr class="border-base-200 hover:bg-base-200/40">
               <td>
-                <span class="badge badge-sm {site.enabled ? 'badge-success' : 'badge-error'}">{site.enabled ? '已启用' : '已禁用'}</span>
+                <div class="flex items-center gap-2">
+                  <span class="flex h-7 w-7 items-center justify-center rounded-lg bg-base-200 text-xs font-semibold text-base-content/70">{site.name?.charAt(0).toUpperCase() || '?'}</span>
+                  <span class="font-medium">{site.name}</span>
+                </div>
+              </td>
+              <td><code class="rounded-md bg-base-200 px-2 py-0.5 text-xs font-mono">{site.domain}</code></td>
+              <td><span class="rounded-md bg-base-200 px-2 py-0.5 text-xs font-mono text-base-content/70">{site.type}</span></td>
+              <td class="max-w-[260px] truncate text-xs font-mono text-base-content/55" title={site.root || ''}>{site.root || '-'}</td>
+              <td>
+                <span class="inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs {site.enabled ? 'bg-success/10 text-success' : 'bg-base-200 text-base-content/50'}">
+                  <span class="h-1.5 w-1.5 rounded-full {site.enabled ? 'bg-success' : 'bg-base-content/30'}"></span>
+                  {site.enabled ? '已启用' : '已禁用'}
+                </span>
               </td>
             </tr>
           {/each}
@@ -381,30 +444,30 @@ onMount(() => {
   </div>
 
   <!-- Bottom panel: Ops（占满整行） -->
-  <div class="card bg-base-100 border border-base-300 overflow-hidden flex flex-col flex-1 min-h-0">
-    <div class="flex justify-between items-center px-4 py-3.5 border-b border-base-300 shrink-0">
+  <div class="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-base-300 bg-base-100 shadow-sm">
+    <div class="flex shrink-0 items-center justify-between border-b border-base-200 px-5 py-4">
       <h3 class="text-sm font-semibold">操作日志</h3>
-      <span class="badge badge-sm">{ops.length} 条</span>
+      <span class="rounded-full bg-base-200 px-2.5 py-0.5 text-xs text-base-content/60">{ops.length} 条</span>
     </div>
-    <div class="flex-1 overflow-y-auto py-2 min-h-0">
+    <div class="min-h-0 flex-1 overflow-y-auto py-2">
       {#if !hasLoaded}
-        <div class="flex items-center justify-center py-5 text-base-content/60 text-sm">加载操作日志中...</div>
+        <div class="flex items-center justify-center py-5 text-sm text-base-content/60">加载操作日志中...</div>
       {:else if ops.length === 0}
-        <div class="flex items-center justify-center py-5 text-base-content/60 text-sm">暂无操作记录</div>
+        <div class="flex items-center justify-center py-5 text-sm text-base-content/60">暂无操作记录</div>
       {:else}
         {#each ops as op}
-          <div class="grid grid-cols-[80px_140px_1fr_52px] items-center gap-1.5 px-4 py-1.5 text-xs border-b border-base-200 last:border-none {op.status === '失败' ? 'bg-error/5' : ''} hover:bg-base-200">
-            <span class="font-mono text-base-content/60">{op.time}</span>
-            <span class="font-semibold">{op.action} {op.service}</span>
-            <span class="text-base-content/70 truncate">{op.detail}</span>
+          <div class="grid grid-cols-[80px_140px_1fr_52px] items-center gap-1.5 border-b border-base-200 px-5 py-1.5 text-xs last:border-none {op.status === '失败' ? 'bg-error/5' : ''} hover:bg-base-200/50">
+            <span class="font-mono text-base-content/55">{op.time}</span>
+            <span class="truncate font-semibold">{op.action} {op.service}</span>
+            <span class="truncate text-base-content/70">{op.detail}</span>
             {#if op.status === '成功'}
-              <span class="text-right px-1.5 py-0.5 rounded bg-base-200 text-success">成功</span>
+              <span class="rounded-md bg-success/10 px-1.5 py-0.5 text-right text-success">成功</span>
             {:else if op.status === '失败'}
-              <span class="text-right px-1.5 py-0.5 rounded bg-base-200 text-error">失败</span>
+              <span class="rounded-md bg-error/10 px-1.5 py-0.5 text-right text-error">失败</span>
             {:else if op.status === '警告'}
-              <span class="text-right px-1.5 py-0.5 rounded bg-base-200 text-warning">警告</span>
+              <span class="rounded-md bg-warning/10 px-1.5 py-0.5 text-right text-warning">警告</span>
             {:else}
-              <span class="text-right px-1.5 py-0.5 rounded bg-base-200 text-base-content/60">{op.status}</span>
+              <span class="rounded-md bg-base-200 px-1.5 py-0.5 text-right text-base-content/60">{op.status}</span>
             {/if}
           </div>
         {/each}
@@ -412,9 +475,3 @@ onMount(() => {
     </div>
   </div>
 </div>
-
-<style>
-  .stat-grid > :not(:last-child) {
-    border-right: 1px solid var(--fallback-bc, oklch(0.5 0 0) / 0.2);
-  }
-</style>

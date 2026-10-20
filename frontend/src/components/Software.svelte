@@ -154,10 +154,13 @@ onDestroy(() => {
 })
 </script>
 
-<div class="grid grid-cols-[280px_1fr] bg-base-100">
-  <div class="border-r border-base-300 flex flex-col sticky top-0 h-screen">
-    <div class="p-4 border-b border-base-300"><h3 class="text-base font-semibold">软件管理</h3></div>
-    <div class="flex-1 p-2.5 flex flex-col gap-2 overflow-y-auto">
+<div class="grid items-start gap-5 lg:grid-cols-[280px_minmax(0,1fr)]">
+  <aside class="flex flex-col overflow-hidden rounded-2xl border border-base-300 bg-base-100 shadow-sm">
+    <div class="border-b border-base-200 px-4 py-3.5">
+      <h3 class="text-sm font-semibold">已安装软件</h3>
+      <p class="mt-0.5 text-xs text-base-content/50">按分类查看并管理组件</p>
+    </div>
+    <div class="flex flex-col gap-2 p-2.5">
       {#each grouped as cat}
         {@const isOpen = expandedCat === cat.id}
         <div class="rounded-xl border border-base-200 overflow-hidden">
@@ -203,18 +206,18 @@ onDestroy(() => {
         </div>
       {/each}
     </div>
-  </div>
+  </aside>
 
-  <div class="overflow-y-auto min-w-0">
+  <section class="min-w-0 overflow-hidden rounded-2xl border border-base-300 bg-base-100 shadow-sm">
     <!-- 取数失败横幅：避免把「加载失败」当成「没装软件」 -->
     {#if !loading && loadError}
-      <div class="alert alert-warning alert-sm flex items-center gap-3 mx-6 mt-6 py-2.5">
+      <div class="alert alert-warning alert-sm mx-5 mt-5 flex items-center gap-3 py-2.5">
         <span class="text-sm">{loadError}，列表可能不完整</span>
         <button class="btn btn-sm btn-ghost ml-auto shrink-0" onclick={() => load()}>重试</button>
       </div>
     {/if}
     {#if loading}
-      <div class="flex items-center justify-center h-full text-base-content/60">加载中...</div>
+      <div class="flex min-h-[420px] items-center justify-center text-base-content/60">加载中...</div>
     {:else if selected}
       {#key selected.id}
         {#if selected.category === 'webserver'}
@@ -226,7 +229,7 @@ onDestroy(() => {
         {/if}
       {/key}
     {:else}
-      <div class="flex flex-col items-center justify-center h-full text-base-content/60 gap-2">
+      <div class="flex min-h-[420px] flex-col items-center justify-center gap-2 text-base-content/60">
         <div class="text-4xl opacity-50"><span class="iconfont icon-OSruanjianbao"></span></div>
         <p>{loadError ? '未能获取已安装软件' : '未找到已安装的软件'}</p>
         <p class="text-xs text-base-content/50">
@@ -234,5 +237,5 @@ onDestroy(() => {
         </p>
       </div>
     {/if}
-  </div>
+  </section>
 </div>

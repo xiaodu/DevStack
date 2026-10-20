@@ -25,12 +25,14 @@ const (
 	TypeNode     ServiceType = "node"
 	TypePython   ServiceType = "python"
 	TypeComposer ServiceType = "composer"
+	TypePhpMyAdmin ServiceType = "phpmyadmin"
 )
 
 const (
 	CategoryWebServer = "webserver"
 	CategoryDatabase  = "database"
 	CategoryService   = "service"
+	CategoryTool      = "tools"
 )
 
 type ServiceInfo struct {

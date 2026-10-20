@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -82,17 +83,50 @@ func (m *Manager) Cancel(key string) {
 	}
 }
 
+// 下载源偶发中途断连（大文件尤其明显），单个 URL 内允许重试；重试会基于
+// package.zip.tmp 的已有大小走 Range 续传，避免每次从零开始。
+const downloadAttempts = 3
+
+// permanentError 标记重试也无法恢复的失败（如 404、4xx），避免无意义重复请求。
+type permanentError struct{ err error }
+
+func (e permanentError) Error() string { return e.err.Error() }
+func (e permanentError) Unwrap() error { return e.err }
+
+func permanent(err error) error { return permanentError{err: err} }
+
 func (m *Manager) tryDownload(ctx context.Context, urls []string, destPath string, callback ProgressCallback) error {
 	var lastErr error
 	for _, u := range urls {
 		if u == "" {
 			continue
 		}
-		err := m.download(ctx, u, destPath, callback)
-		if err == nil {
-			return nil
+		for attempt := 0; attempt < downloadAttempts; attempt++ {
+			if attempt > 0 {
+				select {
+				case <-ctx.Done():
+					return fmt.Errorf("下载已取消: %w", ctx.Err())
+				case <-time.After(time.Duration(attempt) * time.Second):
+				}
+			}
+			err := m.download(ctx, u, destPath, callback)
+			if err == nil {
+				return nil
+			}
+			lastErr = err
+			if ctx.Err() != nil {
+				os.Remove(destPath + ".tmp")
+				return fmt.Errorf("下载已取消: %w", ctx.Err())
+			}
+			if _, ok := err.(permanentError); ok {
+				break
+			}
 		}
-		lastErr = err
+		// 换源前丢弃上一条源的半成品，避免不同镜像的文件被拼接。
+		os.Remove(destPath + ".tmp")
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("没有可用的下载地址")
 	}
 	return fmt.Errorf("所有下载源均失败: %w", lastErr)
 }
@@ -100,7 +134,13 @@ func (m *Manager) tryDownload(ctx context.Context, urls []string, destPath strin
 func (m *Manager) download(ctx context.Context, u, destPath string, callback ProgressCallback) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
-		return fmt.Errorf("构造请求失败: %w", err)
+		return permanent(fmt.Errorf("构造请求失败: %w", err))
+	}
+
+	var offset int64
+	if st, statErr := os.Stat(destPath + ".tmp"); statErr == nil && st.Size() > 0 {
+		offset = st.Size()
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
 	}
 
 	resp, err := m.client.Do(req)
@@ -109,36 +149,81 @@ func (m *Manager) download(ctx context.Context, u, destPath string, callback Pro
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == http.StatusNotFound {
-		return fmt.Errorf("文件不存在 (404)")
-	}
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("服务器返回状态码: %d", resp.StatusCode)
+	switch resp.StatusCode {
+	case http.StatusPartialContent:
+		if !contentRangeStartsAt(resp.Header.Get("Content-Range"), offset) {
+			// 服务器的续传范围与本地文件不匹配，删除半成品后整包重下。
+			os.Remove(destPath + ".tmp")
+			return fmt.Errorf("服务器返回的续传范围无效: %s", resp.Header.Get("Content-Range"))
+		}
+	case http.StatusOK:
+		// 服务器忽略 Range，整包重下：writeResponse 会截断旧内容。
+		offset = 0
+	case http.StatusRequestedRangeNotSatisfiable:
+		os.Remove(destPath + ".tmp")
+		return permanent(fmt.Errorf("续传文件已失效，请重新安装"))
+	case http.StatusNotFound:
+		return permanent(fmt.Errorf("文件不存在 (404)"))
+	default:
+		err := fmt.Errorf("服务器返回状态码: %d", resp.StatusCode)
+		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+			return permanent(err)
+		}
+		return err
 	}
 
-	return m.writeResponse(resp, destPath, callback)
+	return m.writeResponse(resp, destPath, callback, offset)
 }
 
-func (m *Manager) writeResponse(resp *http.Response, destPath string, callback ProgressCallback) error {
+// contentRangeStartsAt 校验 Content-Range 的起始偏移是否与续传位置一致。
+func contentRangeStartsAt(header string, offset int64) bool {
+	// 形如 "bytes 1024-2047/4096"
+	const prefix = "bytes "
+	if !strings.HasPrefix(header, prefix) {
+		return false
+	}
+	rest := header[len(prefix):]
+	dash := strings.IndexByte(rest, '-')
+	if dash <= 0 {
+		return false
+	}
+	start, err := strconv.ParseInt(rest[:dash], 10, 64)
+	return err == nil && start == offset
+}
+
+func (m *Manager) writeResponse(resp *http.Response, destPath string, callback ProgressCallback, offset int64) error {
 	os.MkdirAll(filepath.Dir(destPath), 0755)
 
-	out, err := os.Create(destPath + ".tmp")
+	flags := os.O_WRONLY | os.O_CREATE
+	if offset > 0 {
+		flags |= os.O_APPEND
+	} else {
+		flags |= os.O_TRUNC
+	}
+	out, err := os.OpenFile(destPath+".tmp", flags, 0644)
 	if err != nil {
 		return fmt.Errorf("创建临时文件失败: %w", err)
 	}
 
 	total := resp.ContentLength
-	var downloaded int64
+	if total > 0 {
+		total += offset
+	}
+	downloaded := offset
 	buf := make([]byte, 32*1024)
 	lastCallback := time.Now()
+
+	fail := func(err error) error {
+		out.Close()
+		// 保留 .tmp 供同一来源的下一次重试续传；换源/取消时由 tryDownload 清理。
+		return err
+	}
 
 	for {
 		n, err := resp.Body.Read(buf)
 		if n > 0 {
 			if _, werr := out.Write(buf[:n]); werr != nil {
-				out.Close()
-				os.Remove(destPath + ".tmp")
-				return fmt.Errorf("写入文件失败: %w", werr)
+				return fail(fmt.Errorf("写入文件失败: %w", werr))
 			}
 			downloaded += int64(n)
 			if callback != nil && time.Since(lastCallback) > 200*time.Millisecond {
@@ -150,9 +235,7 @@ func (m *Manager) writeResponse(resp *http.Response, destPath string, callback P
 			break
 		}
 		if err != nil {
-			out.Close()
-			os.Remove(destPath + ".tmp")
-			return fmt.Errorf("读取响应失败: %w", err)
+			return fail(fmt.Errorf("读取响应失败: %w", err))
 		}
 	}
 
@@ -346,6 +429,19 @@ func (m *Manager) DownloadAndExtract(url, destDir string, callback ProgressCallb
 // 仅在 destDir 本次新建时才在失败回滚中删除它，避免误删既有安装目录。
 // expectedChecksum 为 SHA256 hex；若为空则跳过 SHA256 校验（仍会做 zip CRC32 完整性测试）。
 func (m *Manager) TryDownloadAndExtract(key string, urls []string, destDir string, callback ProgressCallback, expectedChecksum ...string) error {
+	return m.tryDownloadAndInstall(key, urls, destDir, "", callback, expectedChecksum...)
+}
+
+// TryDownloadFile 下载单文件包（如 composer.phar）并落到 destDir/fileName，不做解压。
+// 非 zip 无法用 CRC 兜底，必须登记 SHA256 校验和。
+func (m *Manager) TryDownloadFile(key string, urls []string, destDir, fileName string, callback ProgressCallback, expectedChecksum ...string) error {
+	if fileName == "" || filepath.Base(fileName) != fileName {
+		return fmt.Errorf("非法的安装文件名: %q", fileName)
+	}
+	return m.tryDownloadAndInstall(key, urls, destDir, fileName, callback, expectedChecksum...)
+}
+
+func (m *Manager) tryDownloadAndInstall(key string, urls []string, destDir, singleFileName string, callback ProgressCallback, expectedChecksum ...string) error {
 	// per-dir 互斥锁：确保同一 destDir 不会被两个 goroutine 同时写。
 	// key 可能不同（"download:xxx" vs "setup-download:xxx"），但 destDir 相同，锁绑定在 destDir 上。
 	dirLock := m.perDirLock(destDir)
@@ -370,9 +466,15 @@ func (m *Manager) TryDownloadAndExtract(key string, urls []string, destDir strin
 	}()
 
 	compensator := tx.NewCompensator()
-	txn := tx.NewTransaction("download-extract-" + filepath.Base(destDir))
+	txnName := "download-extract-"
+	if singleFileName != "" {
+		txnName = "download-file-"
+	}
+	txn := tx.NewTransaction(txnName + filepath.Base(destDir))
 
-	var zipPath string
+	// 单文件包也复用 package.zip(.tmp) 作为临时名：isInstallationComplete 已把它视为残留文件，
+	// 下载失败后重试或短路判断不会被半成品误导。
+	packagePath := filepath.Join(destDir, "package.zip")
 
 	removeDestDir := compensator.Noop()
 	if created {
@@ -384,25 +486,30 @@ func (m *Manager) TryDownloadAndExtract(key string, urls []string, destDir strin
 			return os.MkdirAll(destDir, 0755)
 		}, removeDestDir).
 		Step("download-package", func(_ context.Context) error {
-			zipPath = filepath.Join(destDir, "package.zip")
-			return m.tryDownload(dlCtx, urls, zipPath, callback)
-		}, compensator.DeleteFile(zipPath)).
+			return m.tryDownload(dlCtx, urls, packagePath, callback)
+		}, compensator.DeleteFile(packagePath)).
 		Step("verify-checksum", func(_ context.Context) error {
 			if len(expectedChecksum) > 0 && expectedChecksum[0] != "" {
-				return verifySHA256(zipPath, expectedChecksum[0])
+				return verifySHA256(packagePath, expectedChecksum[0])
+			}
+			if singleFileName != "" {
+				return fmt.Errorf("包 %s 不是 zip，无法做完整性校验：请在注册表为其登记 SHA256 校验和", singleFileName)
 			}
 			// 无校验和时至少做 zip 完整性测试（逐条目读取校验 CRC32），捕获损坏/篡改的包
-			return verifyZipIntegrity(zipPath)
-		}, compensator.DeleteFile(zipPath)).
-		Step("extract-package", func(ctx context.Context) error {
-			return m.ExtractZip(zipPath, destDir)
+			return verifyZipIntegrity(packagePath)
+		}, compensator.DeleteFile(packagePath)).
+		Step("install-package", func(_ context.Context) error {
+			if singleFileName == "" {
+				return m.ExtractZip(packagePath, destDir)
+			}
+			return os.Rename(packagePath, filepath.Join(destDir, singleFileName))
 		}, removeDestDir)
 
 	if err := txn.Commit(); err != nil {
 		return fmt.Errorf("事务失败: %w", err)
 	}
 
-	os.Remove(zipPath)
+	os.Remove(packagePath)
 	return nil
 }
 

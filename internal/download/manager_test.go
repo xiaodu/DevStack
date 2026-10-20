@@ -3,12 +3,16 @@ package download
 import (
 	"archive/zip"
 	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -116,6 +120,136 @@ func TestTryDownloadAndExtract_DifferentDirsIndependent(t *testing.T) {
 	wg.Wait()
 	if got := hits.Load(); got != int32(len(dirs)) {
 		t.Errorf("下载请求次数 = %d, want %d", got, len(dirs))
+	}
+}
+
+// TestTryDownload_RetriesAndResumesAfterDrop 模拟 CDN 传一半后断开：
+// 第二次请求应带 Range 续传，最终文件完整且只重试一次。
+func TestTryDownload_RetriesAndResumesAfterDrop(t *testing.T) {
+	payload := bytes.Repeat([]byte("0123456789abcdef"), 16*1024) // 256KB
+	half := len(payload) / 2
+	var mu sync.Mutex
+	requests := 0
+	var secondRange string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests++
+		attempt := requests
+		mu.Unlock()
+
+		if attempt == 1 {
+			w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(payload[:half])
+			w.(http.Flusher).Flush()
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err == nil {
+				_ = conn.Close()
+			}
+			return
+		}
+
+		mu.Lock()
+		secondRange = r.Header.Get("Range")
+		mu.Unlock()
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", half, len(payload)-1, len(payload)))
+		w.Header().Set("Content-Length", strconv.Itoa(len(payload)-half))
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(payload[half:])
+	}))
+	defer srv.Close()
+
+	destPath := filepath.Join(t.TempDir(), "package.zip")
+	mgr := NewManager(t.TempDir())
+	if err := mgr.tryDownload(context.Background(), []string{srv.URL + "/pkg.zip"}, destPath, nil); err != nil {
+		t.Fatalf("download should recover from dropped connection: %v", err)
+	}
+	if requests != 2 {
+		t.Errorf("请求次数 = %d, want 2（首包断开后重试一次）", requests)
+	}
+	if secondRange != fmt.Sprintf("bytes=%d-", half) {
+		t.Errorf("续传 Range = %q, want bytes=%d-", secondRange, half)
+	}
+	got, err := os.ReadFile(destPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Errorf("续传后的文件内容不一致: got %d bytes, want %d", len(got), len(payload))
+	}
+}
+
+// TestTryDownloadFile_NonZipLandsAsFile 覆盖 composer.phar 这类非 zip 包：
+// 校验 SHA256 后应直接落盘为指定文件名，不应尝试解压。
+func TestTryDownloadFile_NonZipLandsAsFile(t *testing.T) {
+	payload := []byte("<?php // fake composer.phar")
+	sum := sha256.Sum256(payload)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
+		_, _ = w.Write(payload)
+	}))
+	defer srv.Close()
+
+	destDir := filepath.Join(t.TempDir(), "programs", "composer", "2.8.5")
+	mgr := NewManager(t.TempDir())
+	if err := mgr.TryDownloadFile("dl:composer", []string{srv.URL}, destDir, "composer.phar", nil, hex.EncodeToString(sum[:])); err != nil {
+		t.Fatalf("TryDownloadFile: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(destDir, "composer.phar"))
+	if err != nil {
+		t.Fatalf("composer.phar 未落盘: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Errorf("落盘内容不一致")
+	}
+	if _, err := os.Stat(filepath.Join(destDir, "package.zip")); !os.IsNotExist(err) {
+		t.Errorf("临时 package.zip 未清理")
+	}
+}
+
+// TestTryDownload_ServerIgnoresRange：服务器不支持续传而返回 200 时，应整包重下并截断旧内容。
+func TestTryDownload_ServerIgnoresRange(t *testing.T) {
+	payload := []byte("fresh-payload")
+	destPath := filepath.Join(t.TempDir(), "package.zip")
+	if err := os.WriteFile(destPath+".tmp", []byte("stale-partial"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(payload)
+	}))
+	defer srv.Close()
+
+	mgr := NewManager(t.TempDir())
+	if err := mgr.tryDownload(context.Background(), []string{srv.URL}, destPath, nil); err != nil {
+		t.Fatalf("download: %v", err)
+	}
+	got, err := os.ReadFile(destPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Errorf("服务器忽略 Range 时应整包重下，实际内容为 %q", got)
+	}
+}
+
+// TestTryDownload_NotFoundNotRetried：404 属于永久失败，不应重试不同 URL 之外的同源请求。
+func TestTryDownload_NotFoundNotRetried(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	mgr := NewManager(t.TempDir())
+	err := mgr.tryDownload(context.Background(), []string{srv.URL}, filepath.Join(t.TempDir(), "package.zip"), nil)
+	if err == nil {
+		t.Fatal("expected error for 404")
+	}
+	if got := hits.Load(); got != 1 {
+		t.Errorf("404 请求次数 = %d, want 1（不应重试）", got)
 	}
 }
 

@@ -95,7 +95,7 @@ func Builtin() *Manifest {
 				},
 			},
 			{
-				ID: "composer", Name: "Composer", Type: PkgComposer, Category: CatRuntime,
+				ID: "composer", Name: "Composer", Type: PkgComposer, Category: CatTool,
 				DefaultVersion: "2.8.5", DefaultPort: 0,
 				Versions: []VersionInfo{
 					{Version: "2.5.8", URL: "https://getcomposer.org/download/2.5.8/composer.phar", Mirror: "https://mirrors.aliyun.com/composer/composer-2.5.8.phar", FileName: "composer.phar", Checksum: "f07934fad44f9048c0dc875a506cca31cc2794d6aebfc1867f3b1fbf48dce2c5"},
@@ -103,6 +103,14 @@ func Builtin() *Manifest {
 					{Version: "2.7.7", URL: "https://getcomposer.org/download/2.7.7/composer.phar", Mirror: "https://mirrors.aliyun.com/composer/composer-2.7.7.phar", FileName: "composer.phar", Checksum: "aab940cd53d285a54c50465820a2080fcb7182a4ba1e5f795abfb10414a4b4be"},
 					{Version: "2.8.0", URL: "https://getcomposer.org/download/2.8.0/composer.phar", Mirror: "https://mirrors.aliyun.com/composer/composer-2.8.0.phar", FileName: "composer.phar", Checksum: "1b23f2a31cb05f0e8ae29b5723fc5edf37e565106d6fae2cf23f298efa9c8981"},
 					{Version: "2.8.5", URL: "https://getcomposer.org/download/2.8.5/composer.phar", Mirror: "https://mirrors.aliyun.com/composer/composer-2.8.5.phar", FileName: "composer.phar", Checksum: "9cef18212e222351aeb476b81de7b2a5383f775336474467bf5c7ccfe84ab0cc"},
+				},
+			},
+			{
+				ID: "phpmyadmin", Name: "phpMyAdmin", Type: PkgPhpMyAdmin, Category: CatTool,
+				DefaultVersion: "5.2.2", DefaultPort: 0,
+				Versions: []VersionInfo{
+					{Version: "5.2.1", URL: "https://files.phpmyadmin.net/phpMyAdmin/5.2.1/phpMyAdmin-5.2.1-all-languages.zip", FileName: "phpMyAdmin-5.2.1-all-languages.zip"},
+					{Version: "5.2.2", URL: "https://files.phpmyadmin.net/phpMyAdmin/5.2.2/phpMyAdmin-5.2.2-all-languages.zip", FileName: "phpMyAdmin-5.2.2-all-languages.zip"},
 				},
 			},
 			{

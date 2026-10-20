@@ -429,7 +429,7 @@ function sortVersions(list: any[]) {
 function allVersions(kind: string) {
   const v = versionCache[kind] || { installed: [], available: [] }
   const installed = v.installed || []
-  const avail = (v.available || []).filter((x) => !installed.includes(x))
+  const avail = (v.available || []).filter((x: string) => !installed.includes(x))
   return [...sortVersions(installed), ...sortVersions(avail)]
 }
 
@@ -452,7 +452,7 @@ async function ensureVersions(kind: string) {
   // 已选中但尚未选择版本的类型，自动补上第一个可用版本
   if (editingEnv) {
     let changed = false
-    const units = (editingEnv.units || []).map((u) => {
+    const units = (editingEnv.units || []).map((u: any) => {
       if (u.kind === kind && !u.version) {
         changed = true
         return { ...u, version: allVersions(kind)[0] || '' }
@@ -469,7 +469,7 @@ function preloadVersions() {
 
 // 切换组件类型：已添加则移除，未加入则加入并默认选中第一个版本
 function toggleKind(kind: string) {
-  const idx = (editingEnv.units || []).findIndex((u) => u.kind === kind)
+  const idx = (editingEnv.units || []).findIndex((u: any) => u.kind === kind)
   if (idx >= 0) {
     const a = [...editingEnv.units]
     a.splice(idx, 1)
@@ -483,11 +483,11 @@ function toggleKind(kind: string) {
 }
 
 function selectVersion(kind: string, ver: string) {
-  editingEnv.units = (editingEnv.units || []).map((u) => (u.kind === kind ? { ...u, version: ver } : u))
+  editingEnv.units = (editingEnv.units || []).map((u: any) => (u.kind === kind ? { ...u, version: ver } : u))
 }
 
 // 展开/收起某类组件的版本列表
-function toggleMore(kind) {
+function toggleMore(kind: string) {
   expandedVersions = { ...expandedVersions, [kind]: !expandedVersions[kind] }
 }
 
@@ -819,7 +819,7 @@ onMount(() => {
         <!-- 组件类型卡片网格 -->
         <div class="grid grid-cols-4 gap-2">
           {#each catalog as c (c.kind)}
-            {@const selected = (editingEnv.units || []).some((u) => u.kind === c.kind)}
+            {@const selected = (editingEnv.units || []).some((u: any) => u.kind === c.kind)}
             <button
               type="button"
               class="flex items-center gap-1.5 rounded-xl border px-2.5 py-2 transition-all select-none

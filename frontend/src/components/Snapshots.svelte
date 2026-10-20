@@ -97,54 +97,65 @@ onMount(load)
 </script>
 
 <div class="flex flex-col gap-5">
-  <div class="flex justify-between items-center">
+  <div class="flex flex-wrap items-end justify-between gap-4">
     <div>
-      <h1 class="text-xl font-bold">快照管理</h1>
-      <p class="text-sm text-base-content/60 mt-1">保存和恢复环境状态</p>
+      <h1 class="text-xl font-bold">所有快照</h1>
+      <p class="mt-1 text-sm text-base-content/60">保存当前组件与配置状态，随时回滚到历史节点</p>
     </div>
-    <button class="btn btn-primary" onclick={createSnapshot} disabled={busy}>
-      {busy ? '处理中...' : '创建快照'}
-    </button>
+    <div class="flex items-center gap-2">
+      {#if snapshots.length > 0}
+        <span class="badge badge-sm border border-base-300 bg-base-100 text-base-content/60">{snapshots.length} 个快照</span>
+      {/if}
+      <button class="btn btn-primary btn-sm" onclick={createSnapshot} disabled={busy}>
+        {#if busy}<span class="loading loading-spinner loading-xs"></span>{/if}
+        创建快照
+      </button>
+    </div>
   </div>
 
   {#if loading}
-    <div class="card bg-base-100 border border-base-300">
-      <div class="card-body items-center justify-center py-16 gap-3 text-base-content/60">
-        <span class="loading loading-spinner loading-lg text-primary"></span>
-        <p class="text-sm">正在加载快照...</p>
-      </div>
+    <div class="flex flex-col gap-2.5">
+      {#each [1, 2, 3] as _}
+        <div class="flex items-center gap-3 rounded-xl border border-base-300 bg-base-100 p-4">
+          <div class="h-9 w-9 rounded-xl bg-base-200"></div>
+          <div class="flex-1 space-y-2">
+            <div class="h-3 w-1/3 rounded bg-base-200"></div>
+            <div class="h-2.5 w-1/5 rounded bg-base-200"></div>
+          </div>
+        </div>
+      {/each}
     </div>
   {:else if loadError}
-    <div class="card bg-base-100 border border-error/40">
-      <div class="card-body items-center justify-center py-16 gap-2">
-        <p class="text-base font-semibold text-error">快照列表加载失败</p>
-        <p class="text-xs text-base-content/60">请查看日志后重试，失败详情已通过提示栏显示</p>
-        <button class="btn btn-sm btn-outline mt-3" onclick={load}>重新加载</button>
-      </div>
+    <div class="rounded-2xl border border-error/30 bg-base-100 p-12 text-center">
+      <p class="text-sm font-semibold text-error">快照列表加载失败</p>
+      <p class="mt-1 text-xs text-base-content/60">请查看日志后重试，失败详情已通过提示栏显示</p>
+      <button class="btn btn-sm btn-outline mt-4" onclick={load}>重新加载</button>
     </div>
   {:else if snapshots.length === 0}
-    <div class="card bg-base-100 border border-base-300">
-      <div class="card-body items-center justify-center py-16 gap-2 text-base-content/60">
-        <div class="text-4xl opacity-50">📸</div>
-        <p class="text-base font-semibold text-base-content">暂无快照</p>
-        <p class="text-xs">快照可以保存当前所有组件的运行状态和配置</p>
-        <p class="text-xs">创建快照后，您可以随时回滚到该状态</p>
-        <div class="mt-4"><button class="btn btn-primary" onclick={createSnapshot} disabled={busy}>{busy ? '创建中...' : '创建第一个快照'}</button></div>
+    <div class="flex flex-col items-center justify-center rounded-2xl border border-dashed border-base-300 bg-base-100/60 py-16">
+      <div class="flex h-12 w-12 items-center justify-center rounded-2xl bg-base-200 text-base-content/40">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="h-6 w-6"><path d="M3 8V5a2 2 0 0 1 2-2h3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M21 16v3a2 2 0 0 1-2 2h-3"/><circle cx="12" cy="12" r="3.5"/></svg>
       </div>
+      <p class="mt-3 text-sm font-semibold">暂无快照</p>
+      <p class="mt-1 max-w-xs text-center text-xs text-base-content/55">快照会记录当前所有组件的运行状态与配置，创建后可随时回滚</p>
+      <button class="btn btn-primary btn-sm mt-4" onclick={createSnapshot} disabled={busy}>创建第一个快照</button>
     </div>
   {:else}
     <div class="flex flex-col gap-2.5">
       {#each [...snapshots].reverse() as snap}
-        <div class="card bg-base-100 border border-base-300">
-          <div class="card-body p-3.5 flex-row items-center justify-between">
-            <div>
-              <div class="font-mono text-sm">{snap}</div>
-              <div class="text-xs text-base-content/60 mt-0.5">{formatTime(snap)}</div>
-            </div>
-            <button class="btn btn-sm btn-outline" onclick={() => confirmRollbackId = snap} disabled={busy}>回滚</button>
-            <button class="btn btn-sm btn-ghost btn-error" onclick={() => confirmDeleteId = snap} disabled={busy}>删除</button>
+        <article class="flex items-center gap-3 rounded-xl border border-base-300 bg-base-100 px-4 py-3 shadow-sm transition-colors hover:border-primary/40">
+          <div class="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="h-4.5 w-4.5"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
           </div>
-        </div>
+          <div class="min-w-0 flex-1">
+            <div class="truncate font-mono text-sm">{snap}</div>
+            <div class="mt-0.5 text-xs text-base-content/50">{formatTime(snap)}</div>
+          </div>
+          <div class="flex shrink-0 items-center gap-1.5">
+            <button class="btn btn-sm btn-outline" onclick={() => (confirmRollbackId = snap)} disabled={busy}>回滚</button>
+            <button class="btn btn-sm btn-ghost btn-error" onclick={() => (confirmDeleteId = snap)} disabled={busy}>删除</button>
+          </div>
+        </article>
       {/each}
     </div>
   {/if}

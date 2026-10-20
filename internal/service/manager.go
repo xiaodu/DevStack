@@ -131,7 +131,8 @@ func (m *Manager) registerDefaults() {
 
 	for _, pkg := range manifest.List("") {
 		svcType := serviceTypeFromPkg(pkg.Type)
-		if svcType == "" || svcType == core.TypePHP {
+		// 工具类（Composer 等）没有可启停的进程，不注册为 service
+		if svcType == "" || svcType == core.TypePHP || svcType == core.TypeComposer {
 			continue
 		}
 		cat := serviceCategoryFromPkg(pkg.Category)
@@ -1781,6 +1782,8 @@ func serviceTypeFromPkg(pt registry.PackageType) core.ServiceType {
 		return core.TypePython
 	case registry.PkgComposer:
 		return core.TypeComposer
+	case registry.PkgPhpMyAdmin:
+		return core.TypePhpMyAdmin
 	default:
 		return ""
 	}
@@ -1794,6 +1797,8 @@ func serviceCategoryFromPkg(c registry.Category) string {
 		return core.CategoryDatabase
 	case registry.CatRuntime:
 		return "runtime"
+	case registry.CatTool:
+		return core.CategoryTool
 	default:
 		return core.CategoryService
 	}

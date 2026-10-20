@@ -141,6 +141,13 @@ function handleScroll() {
   autoScroll = scrollHeight - scrollTop - clientHeight < 30
 }
 
+function lineClass(content: string) {
+  if (/level=(ERROR|FATAL)/.test(content)) return 'text-red-300'
+  if (/level=WARN/.test(content)) return 'text-amber-300'
+  if (/level=DEBUG/.test(content)) return 'text-slate-500'
+  return 'text-slate-300'
+}
+
 onMount(async () => {
   await loadAppLogs()
   refreshInterval = setInterval(() => {
@@ -151,51 +158,63 @@ onMount(async () => {
 onDestroy(() => clearInterval(refreshInterval))
 </script>
 
-<div class="flex flex-col h-full">
-  <div class="flex justify-between items-center mb-3 shrink-0">
+<div class="flex h-full min-h-[520px] flex-col gap-4">
+  <div class="flex flex-wrap items-end justify-between gap-3">
     <div>
-      <h1 class="text-xl font-bold">日志查看</h1>
-      <p class="text-sm text-base-content/60">实时监控组件与应用日志</p>
+      <h1 class="text-xl font-bold">实时日志</h1>
+      <p class="mt-1 text-sm text-base-content/60">应用与组件输出，每 3 秒自动刷新</p>
     </div>
-    <div class="flex gap-2 items-center">
-      <div class="join">
-        <button class="join-item btn btn-sm" class:btn-active={activeTab === 'app'} onclick={() => switchTab('app')}>应用日志</button>
-        <button class="join-item btn btn-sm" class:btn-active={activeTab === 'service'} onclick={() => switchTab('service')}>组件日志</button>
+    <div class="flex flex-wrap items-center gap-2">
+      <div class="flex rounded-lg bg-base-200 p-1">
+        <button class="rounded-md px-3 py-1.5 text-xs font-medium transition-colors {activeTab === 'app' ? 'bg-base-100 text-base-content shadow-sm' : 'text-base-content/60 hover:text-base-content'}" onclick={() => switchTab('app')}>应用日志</button>
+        <button class="rounded-md px-3 py-1.5 text-xs font-medium transition-colors {activeTab === 'service' ? 'bg-base-100 text-base-content shadow-sm' : 'text-base-content/60 hover:text-base-content'}" onclick={() => switchTab('service')}>组件日志</button>
       </div>
       {#if activeTab === 'app'}
-        <select class="select select-bordered select-sm w-auto" bind:value={selectedLogFile} onchange={(e) => { selectedLogFile = e.target.value; loadAppLogs() }}>
+        <select class="select select-bordered select-sm w-auto" bind:value={selectedLogFile} onchange={(e) => { selectedLogFile = (e.currentTarget as HTMLSelectElement).value; loadAppLogs() }}>
           {#each logFiles as file}<option value={file}>{file.split('/').pop()}</option>{/each}
         </select>
         <button class="btn btn-sm btn-ghost text-error" onclick={clearLogs}>清除</button>
       {:else}
-        <select class="select select-bordered select-sm w-auto" bind:value={selectedService} onchange={(e) => { selectedService = e.target.value; loadServiceLogs() }}>
+        <select class="select select-bordered select-sm w-auto" bind:value={selectedService} onchange={(e) => { selectedService = (e.currentTarget as HTMLSelectElement).value; loadServiceLogs() }}>
           {#each services as svc}<option value={svc.id}>{svc.name}</option>{/each}
         </select>
       {/if}
       <button class="btn btn-sm btn-outline" onclick={activeTab === 'app' ? loadAppLogs : loadServiceLogs}>刷新</button>
-      <button class="btn btn-sm btn-outline" onclick={() => autoScroll = !autoScroll}>{autoScroll ? '自动滚动' : '手动滚动'}</button>
+      <button class="btn btn-sm {autoScroll ? 'btn-outline' : 'btn-ghost text-warning'}" onclick={() => autoScroll = !autoScroll}>{autoScroll ? '自动滚动' : '手动滚动'}</button>
     </div>
   </div>
 
-  <div class="flex-1 bg-slate-800 border border-slate-700 rounded-xl p-3.5 font-mono text-xs overflow-y-auto leading-relaxed" bind:this={logContainer} onscroll={handleScroll}>
-    {#if loading}
-      <div class="text-center py-10 text-slate-500">加载日志中...</div>
-    {:else if logEntries.length === 0}
-      <div class="text-center py-10 text-slate-500">暂无日志</div>
-    {:else}
-      {#if hasEarlier}
-        <button class="btn btn-xs btn-outline btn-info w-full mb-2 text-slate-400 border-slate-600 hover:bg-slate-700" onclick={loadEarlier}>
-          ↑ 加载更早（还有 {logEntries.length - visibleEntries.length} 行未显示）
-        </button>
+  <div class="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-slate-700 bg-slate-900 shadow-sm">
+    <div class="flex items-center gap-2 border-b border-slate-700/70 px-4 py-2 text-[11px] text-slate-400">
+      <span class="flex gap-1.5">
+        <span class="h-2.5 w-2.5 rounded-full bg-red-400/80"></span>
+        <span class="h-2.5 w-2.5 rounded-full bg-amber-400/80"></span>
+        <span class="h-2.5 w-2.5 rounded-full bg-emerald-400/80"></span>
+      </span>
+      <span class="ml-2">实时输出</span>
+      <span class="ml-auto">{logEntries.length} 行</span>
+      <span class="text-slate-500">{autoScroll ? '跟随最新' : '已暂停跟随'}</span>
+    </div>
+    <div class="flex-1 overflow-y-auto p-4 font-mono text-xs leading-relaxed" bind:this={logContainer} onscroll={handleScroll}>
+      {#if loading}
+        <div class="py-10 text-center text-slate-500">加载日志中...</div>
+      {:else if logEntries.length === 0}
+        <div class="py-10 text-center text-slate-500">暂无日志</div>
+      {:else}
+        {#if hasEarlier}
+          <button class="btn btn-xs btn-outline btn-info mb-2 w-full border-slate-600 text-slate-400 hover:bg-slate-700" onclick={loadEarlier}>
+            ↑ 加载更早（还有 {logEntries.length - visibleEntries.length} 行未显示）
+          </button>
+        {/if}
+        {#each visibleEntries as entry}
+          <div class="flex gap-2.5 hover:bg-slate-800/60">
+            {#if entry.time}
+              <span class="shrink-0 text-slate-500">[{entry.time}]</span>
+            {/if}
+            <span class="break-all {lineClass(entry.content)}">{entry.content}</span>
+          </div>
+        {/each}
       {/if}
-      {#each visibleEntries as entry}
-        <div class="flex gap-2.5">
-          {#if entry.time}
-            <span class="text-slate-500 shrink-0">[{entry.time}]</span>
-          {/if}
-          <span class="text-slate-300 break-all">{entry.content}</span>
-        </div>
-      {/each}
-    {/if}
+    </div>
   </div>
 </div>

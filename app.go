@@ -71,6 +71,11 @@ var runtimeNames = map[string]string{
 	"php": "PHP", "node": "Node.js", "python": "Python",
 }
 
+// toolNames 是仓库中的工具类软件：只下载解压，不注册服务、不参与启停
+var toolNames = map[string]string{
+	"composer": "Composer", "phpmyadmin": "phpMyAdmin",
+}
+
 // resourceManager 返回当前资源管理器；首跑向导完成前后它会被替换，所以读取必须走这里。
 func (a *App) resourceManager() *resource.Manager {
 	a.resMu.RLock()
@@ -1491,6 +1496,7 @@ func (a *App) DownloadService(serviceType, version, url string) error {
 
 	var urls []string
 	var checksum string
+	var fileName string
 	customURL := url != ""
 	if customURL {
 		urls = append(urls, url)
@@ -1501,6 +1507,7 @@ func (a *App) DownloadService(serviceType, version, url string) error {
 	}
 	for _, r := range releases {
 		if r.Version == version {
+			fileName = r.FileName
 			if !customURL && r.URL != "" {
 				urls = append(urls, r.URL)
 			}
@@ -1537,14 +1544,24 @@ func (a *App) DownloadService(serviceType, version, url string) error {
 		}
 	}
 
-	if err := a.dlMgr.TryDownloadAndExtract(progressKey, urls, destDir, progressFn, checksum); err != nil {
+	// zip 走解压安装；composer.phar 这类单文件工具直接落盘。
+	var dlErr error
+	if fileName != "" && !strings.HasSuffix(strings.ToLower(fileName), ".zip") {
+		dlErr = a.dlMgr.TryDownloadFile(progressKey, urls, destDir, fileName, progressFn, checksum)
+	} else {
+		dlErr = a.dlMgr.TryDownloadAndExtract(progressKey, urls, destDir, progressFn, checksum)
+	}
+	if dlErr != nil {
 		name := serviceNames[serviceType]
 		if name == "" {
 			name = runtimeNames[serviceType]
 		}
-		a.opStore.Add("下载", name, version, "失败: "+err.Error())
+		if name == "" {
+			name = toolNames[serviceType]
+		}
+		a.opStore.Add("下载", name, version, "失败: "+dlErr.Error())
 		a.emitDownloadPhase(serviceType, version, "error", 0, 0)
-		return err
+		return dlErr
 	}
 
 	// 阶段: extracting（解压已完成）
@@ -1559,6 +1576,12 @@ func (a *App) DownloadService(serviceType, version, url string) error {
 		err := a.svcMgr.Configure(serviceType + "@" + version)
 		a.emitDownloadPhase(serviceType, version, "done", 0, 0)
 		return err
+	}
+
+	if name, ok := toolNames[serviceType]; ok {
+		a.opStore.Add("下载", name, version, "成功")
+		a.emitDownloadPhase(serviceType, version, "done", 0, 0)
+		return nil
 	}
 
 	a.opStore.Add("下载", runtimeNames[serviceType], version, "成功")
