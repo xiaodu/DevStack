@@ -1,6 +1,6 @@
 @import "tailwindcss";
 @plugin "daisyui" {
-  themes: light --default, corporate, dim, night, business, dark;
+  themes: light --default, corporate, emerald, nord, winter, silk, caramellatte, dark, dim, night, business, dracula, coffee;
 }
 
 :root {
@@ -19,10 +19,7 @@
   --font-mono: 'Cascadia Code', 'Fira Code', 'JetBrains Mono', 'Consolas', monospace;
 }
 
-[data-theme="dim"],
-[data-theme="night"],
-[data-theme="business"],
-[data-theme="dark"] {
+[data-theme-mode="dark"] {
   --sidebar-bg: #0f172a;
   --sidebar-text: rgba(255,255,255,0.55);
   --sidebar-text-active: #fff;
@@ -36,41 +33,24 @@
   --sidebar-user-plan: rgba(255,255,255,0.5);
 }
 
-[data-theme="dim"] .border-base-300,
-[data-theme="night"] .border-base-300,
-[data-theme="business"] .border-base-300,
-[data-theme="dark"] .border-base-300 {
+[data-theme-mode="dark"] .border-base-300 {
   border-color: rgba(255,255,255,0.08) !important;
 }
-[data-theme="dim"] .border-base-200,
-[data-theme="night"] .border-base-200,
-[data-theme="business"] .border-base-200,
-[data-theme="dark"] .border-base-200 {
+[data-theme-mode="dark"] .border-base-200 {
   border-color: rgba(255,255,255,0.05) !important;
 }
 
-[data-theme="dim"] .card,
-[data-theme="night"] .card,
-[data-theme="business"] .card,
-[data-theme="dark"] .card {
+[data-theme-mode="dark"] .card {
   border-color: rgba(255,255,255,0.06);
 }
 
-[data-theme="dim"] .table tbody tr,
-[data-theme="night"] .table tbody tr,
-[data-theme="business"] .table tbody tr,
-[data-theme="dark"] .table tbody tr {
+[data-theme-mode="dark"] .table tbody tr {
   border-color: rgba(255,255,255,0.05);
 }
 
-[data-theme="dim"] .input,
-[data-theme="night"] .input,
-[data-theme="business"] .input,
-[data-theme="dark"] .input,
-[data-theme="dim"] .select,
-[data-theme="night"] .select,
-[data-theme="business"] .select,
-[data-theme="dark"] .select {
+[data-theme-mode="dark"] .input,
+[data-theme-mode="dark"] .select,
+[data-theme-mode="dark"] .textarea {
   border-color: rgba(255,255,255,0.1);
 }
 

@@ -116,6 +116,16 @@ func (m *Manager) SetResourceManager(rm *resource.Manager) {
 	m.scan()
 }
 
+// Reload 按当前配置的安装目录重新扫描运行时。
+// 仅用于安装目录迁移完成后刷新实例路径，调用前必须确保所有运行时已停止。
+func (m *Manager) Reload() {
+	m.mu.Lock()
+	m.instances = make(map[string]*Instance)
+	m.idByType = make(map[core.RuntimeType][]string)
+	m.mu.Unlock()
+	m.scan()
+}
+
 // resourceMgr 读取当前资源管理器（受同一把锁保护）。
 func (m *Manager) resourceMgr() *resource.Manager {
 	m.mu.RLock()

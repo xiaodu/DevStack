@@ -17,6 +17,7 @@ import GlobalOperation from './lib/GlobalOperation.svelte'
 import GlobalToast from './lib/GlobalToast.svelte'
 import { safeInvoke } from './lib/safeInvoke'
 import { addToast, nanoBusy, nanoOperation, operation, pushToast, refreshSignal, runOperation, syncInfo } from './lib/stores'
+import { applyTheme } from './lib/themes'
 
 let currentView = $state('dashboard')
 let showWizard = $state(false)
@@ -84,11 +85,6 @@ function navigate(view) {
   currentView = view
   // 只挂载当前视图（{#if} 切换，切走即卸载），切到「已安装软件」时再补一次全局刷新，确保计数为最新
   if (view === 'software') refreshSignal.update((n) => n + 1)
-}
-
-function applyTheme(theme) {
-  const validThemes = ['light', 'corporate', 'dim', 'night', 'business', 'dark']
-  document.documentElement.setAttribute('data-theme', validThemes.includes(theme) ? theme : 'light')
 }
 
 function hideSplash() {

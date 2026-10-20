@@ -154,6 +154,27 @@ type AppSettings struct {
 	MySQLConfig  MySQLSettings  `json:"mysqlConfig"`
 }
 
+// InstallDirCheck 描述一次安装目录迁移预检结果。
+type InstallDirCheck struct {
+	CurrentDir   string   `json:"currentDir"`
+	TargetDir    string   `json:"targetDir"`
+	Valid        bool     `json:"valid"`
+	Errors       []string `json:"errors"`
+	Warnings     []string `json:"warnings"`
+	TargetExists bool     `json:"targetExists"`
+	TargetEmpty  bool     `json:"targetEmpty"`
+	SourceSize   int64    `json:"sourceSize"`
+	FileCount    int64    `json:"fileCount"`
+	Running      []string `json:"running"`
+	Downloads    []string `json:"downloads"`
+}
+
+// InstallDirMigrationResult 是安装目录迁移完成后的结果。
+type InstallDirMigrationResult struct {
+	InstallDir string   `json:"installDir"`
+	Warnings   []string `json:"warnings"`
+}
+
 type NginxSettings struct {
 	WorkerConnections   int    `json:"workerConnections"`
 	ClientMaxBodySize   string `json:"clientMaxBodySize"`

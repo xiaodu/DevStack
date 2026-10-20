@@ -114,3 +114,12 @@ func MustRegister(name string, p Provider, capabilities ...Capability) {
 		capabilityMap[cap] = append(capabilityMap[cap], name)
 	}
 }
+
+// ResetAll 清空 provider 注册表，供安装目录迁移后按新路径重建实例使用。
+// 调用前必须确保所有服务与运行时均已停止，否则会丢失实例上的进程句柄。
+func ResetAll() {
+	registryMu.Lock()
+	defer registryMu.Unlock()
+	providerMap = make(map[string]Provider)
+	capabilityMap = make(map[Capability][]string)
+}

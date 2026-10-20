@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	goruntime "runtime"
 	"strings"
@@ -20,6 +21,7 @@ import (
 	"github.com/xiaodu/DevStack/internal/download"
 	"github.com/xiaodu/DevStack/internal/engine"
 	"github.com/xiaodu/DevStack/internal/environment"
+	"github.com/xiaodu/DevStack/internal/installdir"
 	"github.com/xiaodu/DevStack/internal/log"
 	"github.com/xiaodu/DevStack/internal/process"
 	"github.com/xiaodu/DevStack/internal/project"
@@ -1403,6 +1405,12 @@ func (a *App) DebugLog(msg string) {
 
 func (a *App) SaveSettings(s core.AppSettings) error {
 	old := a.cfg.Get()
+	// 安装目录与已安装组件、配置文件、数据库和站点数据强绑定，直接改路径会让应用指向空目录。
+	// 必须走 MigrateInstallDir 完成停机、复制、路径重写与配置切换。
+	if old.InstallDir != "" && !strings.EqualFold(filepath.Clean(s.InstallDir), filepath.Clean(old.InstallDir)) {
+		return fmt.Errorf("安装目录不能直接修改，请使用「迁移安装目录」")
+	}
+	s.InstallDir = old.InstallDir
 	if old.StartOnBoot != s.StartOnBoot {
 		if s.StartOnBoot {
 			if err := autostart.Enable(); err != nil {
@@ -1444,6 +1452,144 @@ func (a *App) syncTray(enable bool) {
 // GetConfigPath 返回配置文件的绝对路径，便于排查保存问题
 func (a *App) GetConfigPath() string {
 	return a.cfg.FilePath()
+}
+
+// OpenFolder 在系统文件管理器中打开目录（文件则打开其所在目录）。
+func (a *App) OpenFolder(path string) error {
+	if strings.TrimSpace(path) == "" {
+		return fmt.Errorf("路径为空")
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("解析路径失败: %w", err)
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		return fmt.Errorf("路径不存在: %w", err)
+	}
+	if !info.IsDir() {
+		abs = filepath.Dir(abs)
+	}
+	if err := exec.Command("explorer", abs).Start(); err != nil {
+		return fmt.Errorf("打开文件夹失败: %w", err)
+	}
+	return nil
+}
+
+// runningComponentLabels 返回当前处于运行/过渡态的组件名称，用于迁移前置检查。
+func (a *App) runningComponentLabels() []string {
+	var running []string
+	if a.svcMgr != nil {
+		for _, s := range a.svcMgr.List() {
+			if s.Status == core.StatusRunning || s.Status == core.StatusStarting || s.Status == core.StatusStopping {
+				name := strings.TrimSpace(s.Name + " " + s.Version)
+				running = append(running, name)
+			}
+		}
+	}
+	if a.rtMgr != nil {
+		for _, rt := range a.rtMgr.List() {
+			if rt.Running || rt.Status == core.StatusRunning || rt.Status == core.StatusStarting || rt.Status == core.StatusStopping {
+				running = append(running, rt.Name)
+			}
+		}
+	}
+	return running
+}
+
+// activeDownloadLabels 返回进行中的下载任务，迁移期间它们仍在往旧目录写文件。
+func (a *App) activeDownloadLabels() []string {
+	a.downloadMu.Lock()
+	defer a.downloadMu.Unlock()
+	if len(a.downloads) == 0 {
+		return nil
+	}
+	labels := make([]string, 0, len(a.downloads))
+	for key := range a.downloads {
+		labels = append(labels, key)
+	}
+	return labels
+}
+
+// CheckInstallDirChange 预检安装目录迁移目标（不执行任何写入）。
+func (a *App) CheckInstallDirChange(target string) core.InstallDirCheck {
+	check := installdir.Check(a.cfg.Get().InstallDir, target)
+	check.Running = a.runningComponentLabels()
+	check.Downloads = a.activeDownloadLabels()
+	return check
+}
+
+// MigrateInstallDir 将安装目录迁移到 target：
+// 校验 → 复制文件并重写配置中的绝对路径 → 切换配置 → 重建依赖安装目录的管理器。
+// removeOld 为 true 时在迁移成功后删除旧目录。
+func (a *App) MigrateInstallDir(target string, removeOld bool) (core.InstallDirMigrationResult, error) {
+	var result core.InstallDirMigrationResult
+	current := a.cfg.Get().InstallDir
+
+	if running := a.runningComponentLabels(); len(running) > 0 {
+		return result, fmt.Errorf("以下组件正在运行，请先全部停止后再迁移：%s", strings.Join(running, "、"))
+	}
+	if downloads := a.activeDownloadLabels(); len(downloads) > 0 {
+		return result, fmt.Errorf("以下下载任务正在进行，请等待完成或先取消后再迁移：%s", strings.Join(downloads, "、"))
+	}
+	check := installdir.Check(current, target)
+	if !check.Valid {
+		return result, fmt.Errorf("安装目录预检未通过：%s", strings.Join(check.Errors, "；"))
+	}
+	if a.opStore != nil {
+		a.opStore.LogInfo("[MIGRATE] 开始迁移安装目录: %s -> %s", current, check.TargetDir)
+	}
+
+	progress := func(phase, message string, copied, total int64) {
+		percent := 0
+		if total > 0 {
+			percent = int(copied * 100 / total)
+			if percent > 100 {
+				percent = 100
+			}
+		}
+		a.emitInstallDirProgress(phase, message, percent)
+	}
+	warnings, err := installdir.Migrate(current, check.TargetDir, progress)
+	if err != nil {
+		return result, err
+	}
+	result.InstallDir = check.TargetDir
+	result.Warnings = warnings
+
+	settings := a.cfg.Get()
+	settings.InstallDir = result.InstallDir
+	if err := a.cfg.Update(settings); err != nil {
+		return result, fmt.Errorf("文件已复制到 %s，但保存配置失败: %w", result.InstallDir, err)
+	}
+	config.EnsureDirs(result.InstallDir)
+
+	if err := a.reinitManagers(result.InstallDir); err != nil {
+		return result, fmt.Errorf("文件已复制并切换配置，但重新初始化管理器失败: %w", err)
+	}
+	if removeOld {
+		if err := os.RemoveAll(current); err != nil {
+			result.Warnings = append(result.Warnings, "旧目录删除失败（可能有文件被占用），可稍后手动删除: "+err.Error())
+		}
+	}
+	result.Warnings = append(result.Warnings, "建议重启 DevStack，使日志文件等仍持有旧路径的资源完全切换到新目录")
+
+	if a.opStore != nil {
+		a.opStore.LogInfo("[MIGRATE] 安装目录迁移完成: %s", result.InstallDir)
+	}
+	a.emitInstallDirProgress("done", "迁移完成", 100)
+	return result, nil
+}
+
+func (a *App) emitInstallDirProgress(phase, message string, percent int) {
+	if a.ctx == nil {
+		return
+	}
+	wailsruntime.EventsEmit(a.ctx, "settings:migrate-progress", map[string]interface{}{
+		"phase":   phase,
+		"message": message,
+		"percent": percent,
+	})
 }
 
 // ==================== MySQL APIs ====================
@@ -2071,6 +2217,10 @@ func (a *App) runSetup(args CompleteSetupArgs) {
 // 因此这里只做"补齐缺失的依赖"：换上真实资源管理器、把它注入两个管理器、
 // 补注册构造期跳过的 providers。
 func (a *App) reinitManagers(installDir string) error {
+	// provider 会缓存实例的安装路径；安装目录变化后必须清空注册表并按新路径重建。
+	// 调用方保证此时没有运行中的组件（首跑向导 / 迁移前置检查）。
+	provider.ResetAll()
+
 	// 重新初始化资源管理器（端口池等）
 	resMgr := resource.NewManager(filepath.Join(installDir, "config"))
 	a.setResourceManager(resMgr)
@@ -2082,6 +2232,7 @@ func (a *App) reinitManagers(installDir string) error {
 	}
 	if a.rtMgr != nil {
 		a.rtMgr.SetResourceManager(resMgr)
+		a.rtMgr.Reload()
 	}
 
 	// 安装目录为空时跳过了 provider 注册，这里补上（幂等，不会覆盖已注册实例）
