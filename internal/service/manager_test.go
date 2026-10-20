@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/xiaodu/DevStack/internal/config"
 	"github.com/xiaodu/DevStack/internal/core"
@@ -22,6 +23,9 @@ type testFakeProvider struct {
 	failStart  bool
 	startCalls int32
 	stopCalls  int32
+	// stopDelay 模拟真实关闭耗时（等进程退出/端口复核），用于验证
+	// Stop 不在持有 Manager.mu 的情况下跨过慢操作。
+	stopDelay time.Duration
 }
 
 func newTestFakeProvider(name string, failStart bool) *testFakeProvider {
@@ -61,6 +65,9 @@ func (e *testFakeEntity) Start(ctx context.Context) error {
 
 func (e *testFakeEntity) Stop(ctx context.Context) error {
 	atomic.AddInt32(&e.p.stopCalls, 1)
+	if e.p.stopDelay > 0 {
+		time.Sleep(e.p.stopDelay)
+	}
 	e.status = core.StatusStopped
 	return nil
 }
@@ -83,8 +90,12 @@ func newTestManager(t *testing.T, failStart bool) (*Manager, *testFakeProvider) 
 	dir := t.TempDir()
 	config.EnsureDirs(dir)
 	cfg := config.NewConfigForDir(dir)
-	if err := os.MkdirAll(filepath.Join(dir, "programs", "memcached", "1.6.0"), 0755); err != nil {
+	installDir := filepath.Join(dir, "programs", "memcached", "1.6.0")
+	if err := os.MkdirAll(installDir, 0755); err != nil {
 		t.Fatalf("创建安装目录失败: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(installDir, "memcached.exe"), []byte("x"), 0755); err != nil {
+		t.Fatalf("创建测试可执行文件失败: %v", err)
 	}
 
 	fp := newTestFakeProvider("memcached", failStart)

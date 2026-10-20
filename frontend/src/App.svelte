@@ -8,6 +8,7 @@ import Settings from './components/Settings.svelte'
 import SetupWizard from './components/SetupWizard.svelte'
 import Sidebar from './components/Sidebar.svelte'
 import Sites from './components/Sites.svelte'
+import Snapshots from './components/Snapshots.svelte'
 import Software from './components/Software.svelte'
 import { api } from './lib/api'
 import { subscribeOperationEvents, subscribeReactiveEvents } from './lib/events'
@@ -70,6 +71,13 @@ let nginxRunning = $derived.by(() => {
   if (!envState?.services) return false
   const entry = Object.entries(envState.services).find(([id]) => id.startsWith('nginx@'))
   return entry?.[1]?.state === 'running'
+})
+
+// 是否有任意组件在运行（停止按钮禁用依据，与点击后的提示判定保持一致）
+let anyRunning = $derived.by(() => {
+  if (!envState) return false
+  const running = (m: any) => Object.values(m || {}).some((s: any) => s?.state === 'running')
+  return running(envState.services) || running(envState.runtimes)
 })
 
 function navigate(view) {
@@ -267,6 +275,7 @@ let pageTitle = $derived(
     environment: '环境管理',
     packages: '软件仓库',
     logs: '日志监控',
+    snapshots: '快照备份',
     settings: '系统设置',
   }[currentView] || '',
 )
@@ -280,17 +289,17 @@ let pageTitle = $derived(
       <div class="text-base font-semibold">{pageTitle}</div>
       {#if currentView === 'dashboard'}
         <div class="flex gap-2">
-          <button class="btn btn-circle btn-sm bg-success text-white border-none hover:brightness-110" title="启动当前环境的组件" onclick={startAll} disabled={$operation.active}>
+          <button class="btn btn-circle btn-sm bg-success text-white border-none hover:brightness-110 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:brightness-100" title="启动当前环境的组件" onclick={startAll} disabled={$operation.active}>
             <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16"><path d="M8 5v14l11-7z"/></svg>
           </button>
-          <button class="btn btn-circle btn-sm bg-warning text-white border-none hover:brightness-110" title={nginxRunning ? '重启 Nginx' : 'Nginx 未运行'} onclick={restartNginx} disabled={$operation.active || restartingNginx || !nginxRunning}>
+          <button class="btn btn-circle btn-sm bg-warning text-white border-none hover:brightness-110 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:brightness-100" title={nginxRunning ? '重启 Nginx' : 'Nginx 未运行，无需重启'} onclick={restartNginx} disabled={$operation.active || restartingNginx || !nginxRunning}>
             {#if restartingNginx}
               <span class="loading loading-spinner loading-xs"></span>
             {:else}
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
             {/if}
           </button>
-          <button class="btn btn-circle btn-sm bg-error text-white border-none hover:brightness-110" title="停止当前环境的组件" onclick={stopAll} disabled={$operation.active}>
+          <button class="btn btn-circle btn-sm bg-error text-white border-none hover:brightness-110 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:brightness-100" title={anyRunning ? '停止当前环境的组件' : '当前没有正在运行的组件'} onclick={stopAll} disabled={$operation.active || !anyRunning}>
             <svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>
           </button>
         </div>
@@ -305,6 +314,7 @@ let pageTitle = $derived(
       {#if currentView === 'environment'}<Environment />{/if}
       {#if currentView === 'packages'}<Packages />{/if}
       {#if currentView === 'logs'}<Logs />{/if}
+      {#if currentView === 'snapshots'}<Snapshots />{/if}
       {#if currentView === 'settings'}<Settings />{/if}
     </main>
 

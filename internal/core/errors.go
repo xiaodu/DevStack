@@ -12,6 +12,8 @@ func (e *AppError) Error() string {
 var (
 	ErrServiceNotFound = &AppError{Code: "SERVICE_NOT_FOUND", Message: "服务未找到"}
 	ErrServiceRunning  = &AppError{Code: "SERVICE_RUNNING", Message: "服务正在运行"}
+	ErrStartInProgress = &AppError{Code: "START_IN_PROGRESS", Message: "服务正在启动中，请等待本次启动完成"}
+	ErrStopBlocked     = &AppError{Code: "STOP_BLOCKED", Message: "服务正在启动中，暂时无法停止"}
 	ErrServiceStopped  = &AppError{Code: "SERVICE_STOPPED", Message: "服务已停止"}
 	ErrPortInUse       = &AppError{Code: "PORT_IN_USE", Message: "端口被占用"}
 	ErrNotInstalled    = &AppError{Code: "NOT_INSTALLED", Message: "服务未安装"}

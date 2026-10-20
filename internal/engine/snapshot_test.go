@@ -53,6 +53,22 @@ func TestTakeSnapshotDoesNotDeadlockAndPrunes(t *testing.T) {
 	}
 }
 
+// 回归：空快照列表曾返回 nil，经 encoding/json 序列化成 null，
+// 前端按数组访问 length 抛错后页面永远停在“加载中”。
+func TestListSnapshotsEmptyReturnsNonNilSlice(t *testing.T) {
+	sm := NewSnapshotManager(t.TempDir())
+	got, err := sm.ListSnapshots(context.Background())
+	if err != nil {
+		t.Fatalf("ListSnapshots 失败: %v", err)
+	}
+	if got == nil {
+		t.Fatal("空列表必须返回空切片而不是 nil")
+	}
+	if len(got) != 0 {
+		t.Fatalf("预期空列表，实际 %d 项", len(got))
+	}
+}
+
 const (
 	maxSnapshotProbe = 12
 	keepSnapshots    = 10

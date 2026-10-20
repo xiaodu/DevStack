@@ -79,6 +79,26 @@ func TestCreateRejectsEmptyUnit(t *testing.T) {
 	}
 }
 
+// 回归：环境编辑器里能选 Memcached，校验却只认旧的六种，导致保存直接失败。
+func TestCreateAcceptsMemcachedUnit(t *testing.T) {
+	m, _ := newTestManager(t)
+	env, err := m.Create(Environment{
+		Name: "带缓存的 LNMP",
+		Units: []UnitSpec{
+			{Kind: "nginx", Version: "1.24.0"},
+			{Kind: "mysql", Version: "5.7.44"},
+			{Kind: "php", Version: "7.4.33"},
+			{Kind: "memcached", Version: "1.6.27"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("memcached 组件应被接受: %v", err)
+	}
+	if len(env.Units) != 4 {
+		t.Fatalf("组件数量不符: %+v", env.Units)
+	}
+}
+
 // probe: 重复 ID 创建必须报错
 func TestCreateDuplicateIDRejected(t *testing.T) {
 	m, _ := newTestManager(t)

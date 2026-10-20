@@ -17,11 +17,9 @@ export const nanoLoading = atom(0)
 export const nanoStatusMsg = atom('')
 export const nanoToasts = atom<Toast[]>([])
 export const nanoRefresh = atom(0)
-export const nanoServices = atom<any[]>([])
-export const nanoRuntimes = atom<any[]>([])
-export const nanoSites = atom<any[]>([])
-export const nanoSettings = atom<any>({})
-export const nanoSysInfo = atom<any>({})
+// 注：曾有 nanoServices/nanoRuntimes/nanoSites/nanoSettings/nanoSysInfo 五个 atom，
+// 但全 src 无任何写入方与订阅方（数据实际来自 api.getEnvironment() 的局部 $state），
+// 属于未接完的"第二真相源"，已连同其 bridge 一并删除。
 export const nanoLastError = atom<any>(null)
 
 // beginLoading/endLoading 成对使用；endLoading 由调用方保证每次 begin 恰好调用一次。
@@ -136,11 +134,6 @@ export const globalLoading = bridge(nanoLoading)
 export const statusMessage = bridge(nanoStatusMsg)
 export const toasts = bridge(nanoToasts)
 export const refreshSignal = bridge(nanoRefresh)
-export const services = bridge(nanoServices)
-export const runtimes = bridge(nanoRuntimes)
-export const sites = bridge(nanoSites)
-export const settings = bridge(nanoSettings)
-export const systemInfo = bridge(nanoSysInfo)
 export const operation = bridge(nanoOperation)
 export const syncInfo = bridge(nanoSyncInfo)
 

@@ -288,10 +288,12 @@ func detectSingleRootDir(entries []*zip.File) string {
 }
 
 // verifyZipIntegrity 做 zip 完整性测试：逐条目全量读取，archive/zip 读取时会校验 CRC32。
-// 用于没有登记 SHA256 的包，捕获损坏/被篡改的下载。非 zip 文件跳过（如 composer.phar）。
+// 用于没有登记 SHA256 的包，捕获损坏/被篡改的下载。
+// 非 zip 文件（如 composer.phar）无法用 CRC 兜底，旧实现直接 return nil 等于完全不校验——
+// 现在显式报错，强制要求在注册表里为其登记 Checksum（SHA256）。
 func verifyZipIntegrity(filePath string) error {
 	if !strings.EqualFold(filepath.Ext(filePath), ".zip") {
-		return nil
+		return fmt.Errorf("包 %s 不是 zip，无法做完整性校验：请在注册表为其登记 SHA256 校验和后再安装", filepath.Base(filePath))
 	}
 	reader, err := zip.OpenReader(filePath)
 	if err != nil {

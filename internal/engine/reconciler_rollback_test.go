@@ -119,7 +119,7 @@ func newReconcilerTestEnv(t *testing.T, failKinds map[string]bool) *reconcilerTe
 	reactiveEng := reactive.NewEngine(100)
 	svcMgr := service.NewManager(cfg, procMgr, resMgr, reactiveEng)
 	rtMgr := runtime.NewManager(cfg, procMgr, resMgr)
-	projMgr := project.NewManager(dir, "1.26.0", rtMgr, resMgr)
+	projMgr := project.NewManager(dir, rtMgr, resMgr)
 	stateStore := NewStateStore(filepath.Join(dir, "config"))
 	reconciler := NewReconciler(stateStore, svcMgr, projMgr, rtMgr)
 

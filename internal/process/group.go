@@ -1,6 +1,7 @@
 package process
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -54,7 +55,7 @@ type JOBOBJECT_EXTENDED_LIMIT_INFORMATION struct {
 	IoInfo                windows.IO_COUNTERS
 	ProcessMemoryLimit    uintptr
 	JobMemoryLimit        uintptr
-PeakProcessMemoryUsed uintptr
+	PeakProcessMemoryUsed uintptr
 	PeakJobMemoryUsed     uintptr
 }
 
@@ -68,11 +69,11 @@ PeakProcessMemoryUsed uintptr
 // 2. 父进程崩溃时，子进程自动清理
 // 3. 支持优雅关闭（先发信号，超时再强制终止）
 type Group struct {
-	mu       sync.Mutex
-	handle   windows.Handle       // Windows Job Object 句柄
-	name     string               // Job Object 名称（用于调试）
-	procs    map[int]*GroupProc   // PID -> 进程信息
-	closed   bool                 // 是否已关闭
+	mu     sync.Mutex
+	handle windows.Handle     // Windows Job Object 句柄
+	name   string             // Job Object 名称（用于调试）
+	procs  map[int]*GroupProc // PID -> 进程信息
+	closed bool               // 是否已关闭
 }
 
 // GroupProc 组内进程信息
@@ -81,7 +82,7 @@ type GroupProc struct {
 	Cmd       *exec.Cmd
 	Name      string
 	Started   time.Time
-	GraceSecs int  // 优雅关闭等待秒数，默认 5
+	GraceSecs int // 优雅关闭等待秒数，默认 5
 }
 
 // NewGroup 创建一个新的进程组（Job Object）
@@ -306,12 +307,13 @@ func (g *Group) assignProcess(pid int) error {
 // Stop 优雅停止指定进程
 //
 // 流程：
-//  1. 发送 Ctrl+C 信号（SIGINT）
+//  1. 尝试关闭窗口式优雅退出（taskkill 不带 /F，对有窗口的进程等价 WM_CLOSE）
 //  2. 等待 graceSecs 秒
 //  3. 如果进程仍在运行，强制终止
 //
-// 对于 Windows 服务（如 nginx、mysql），
-// Ctrl+C 是标准的优雅关闭信号。
+// 历史实现用 GenerateConsoleCtrlEvent 发 Ctrl+C，但服务进程由
+// DETACHED/CREATE_NEW_PROCESS_GROUP 方式启动、与本进程无共享控制台，
+// 信号永远送不到目标（或发给自己），是“假优雅关闭”的源头，已删除。
 func (g *Group) Stop(pid int) error {
 	g.mu.Lock()
 	proc, ok := g.procs[pid]
@@ -325,9 +327,9 @@ func (g *Group) Stop(pid int) error {
 		return nil
 	}
 
-	// 1. 发送 Ctrl+C 信号
-	if err := sendCtrlC(pid); err != nil {
-		// Ctrl+C 失败，直接强制终止
+	// 1. 尝试优雅关闭：无窗口/无响应时直接失败，下一步强制终止
+	if err := fallbackSendClose(pid); err != nil {
+		// 优雅关闭请求发不出去，直接强制终止
 		return g.ForceStop(pid)
 	}
 
@@ -487,36 +489,38 @@ func (g *Group) HasPID(pid int) bool {
 
 // ---------- Windows API 辅助函数 ----------
 
-// sendCtrlC 向指定进程发送 Ctrl+C 信号
-//
-// 原理：
-//  1. 调用 GenerateConsoleCtrlEvent(CTRL_C_EVENT) 发送 Ctrl+C
-//  2. Ctrl+C 会发送给共享控制台的所有进程
-//
-// 注意：此方法只对控制台进程有效，对 GUI 进程无效。
-// 对于 GUI 进程，需要使用 PostMessage(WM_CLOSE)。
-func sendCtrlC(pid int) error {
-	kernel32 := windows.NewLazySystemDLL("kernel32.dll")
-	proc := kernel32.NewProc("GenerateConsoleCtrlEvent")
-
-	// CTRL_C_EVENT = 0
-	// 生成一个新的控制台来接收事件
-	ret, _, _ := proc.Call(
-		0,          // CTRL_C_EVENT
-		uintptr(pid), // 进程组 ID（这里传 PID）
-	)
-
-	if ret == 0 {
-		// GenerateConsoleCtrlEvent 失败，尝试使用 taskkill /PID（不带 /F）
-		return fallbackSendClose(pid)
+// fallbackSendClose 使用 taskkill /PID 发送关闭请求（不带 /F，允许优雅关闭）。
+// 对有窗口的进程等价于 WM_CLOSE；控制台进程无窗口时 taskkill 会报错，
+// 调用方据此立即转 ForceStop——不再假装“发送了 Ctrl+C”。
+func fallbackSendClose(pid int) error {
+	cmd := exec.Command("taskkill", "/PID", strconv.Itoa(pid))
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("taskkill /PID %d 失败: %w, 输出: %s", pid, err, strings.TrimSpace(string(out)))
 	}
-
 	return nil
 }
 
-// fallbackSendClose 使用 taskkill /PID 发送关闭请求（不带 /F，允许优雅关闭）
-func fallbackSendClose(pid int) error {
-	cmd := exec.Command("taskkill", "/PID", strconv.Itoa(pid))
+// RequestClose 向进程发送「优雅关闭」请求（taskkill 不带 /F），供 provider 的
+// 分级停止阶梯中「进程级关闭」一级使用。
+//
+// 语义与限制（与内部 fallbackSendClose 一致，只是导出给上层）：
+//   - 有窗口、可接收 WM_CLOSE 的进程：进入正常关闭流程；
+//   - 控制台/服务进程（mysqld、nginx、redis-server 都属此类，无窗口）：
+//     taskkill 会直接报错，调用方据此**立即降级到强杀**，不能把它当成
+//     “信号已发出”而白等；
+//   - 不再尝试 GenerateConsoleCtrlEvent/Ctrl+C：这些进程与 DevStack 不共享
+//     控制台，信号永远送不到（已删除的 sendCtrlC 就是在假装送得到）。
+//
+// 自带 5s 超时，避免 taskkill 自身挂起把整条停止阶梯拖死。
+func RequestClose(pid int) error {
+	if pid <= 0 {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "taskkill", "/PID", strconv.Itoa(pid))
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	out, err := cmd.CombinedOutput()
 	if err != nil {

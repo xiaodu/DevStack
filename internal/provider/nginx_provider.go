@@ -2,12 +2,14 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -15,15 +17,18 @@ import (
 	"github.com/xiaodu/DevStack/internal/core"
 	"github.com/xiaodu/DevStack/internal/process"
 	"github.com/xiaodu/DevStack/internal/resource"
+	"github.com/xiaodu/DevStack/internal/www"
 )
 
 type NginxProvider struct {
 	*BaseProvider
-	cfg      *config.Config
-	pm       *process.Manager
-	resMgr   *resource.Manager
-	instance *NginxInstance
-	vhosts   []VhostConfig
+	cfg       *config.Config
+	pm        *process.Manager
+	resMgr    *resource.Manager
+	mu        sync.Mutex // 保护 instances 映射
+	instances map[string]*NginxInstance
+	instance  *NginxInstance // 最近一次访问的实例，供 Configure/Reload 等裸 API 使用
+	vhosts    []VhostConfig
 }
 
 type NginxInstance struct {
@@ -48,10 +53,11 @@ func NewNginxProvider(cfg *config.Config, pm *process.Manager, resMgr *resource.
 			"高性能 Web 服务器和反向代理",
 			[]Capability{CapabilityWebServer},
 		),
-		cfg:    cfg,
-		pm:     pm,
-		resMgr: resMgr,
-		vhosts: make([]VhostConfig, 0),
+		cfg:       cfg,
+		pm:        pm,
+		resMgr:    resMgr,
+		vhosts:    make([]VhostConfig, 0),
+		instances: make(map[string]*NginxInstance),
 	}
 	MustRegister("nginx", p, CapabilityWebServer)
 	return p
@@ -70,8 +76,25 @@ func (p *NginxProvider) NewInstance(ctx context.Context, config map[string]inter
 	installDir := p.cfg.Get().InstallDir
 	nginxDir := filepath.Join(installDir, "programs", "nginx", version)
 
-	instance := &NginxInstance{
-		id:       "nginx-" + version,
+	// 按版本复用活实例：旧实现每次 NewInstance 都新建并覆盖 p.instance，
+	// 导致 stopServiceByName 再查时拿到的是无 PID 的新对象，活进程丢失（根因②）。
+	instanceID := "nginx-" + version
+	var instance *NginxInstance
+	p.mu.Lock()
+	if existing, ok := p.instances[instanceID]; ok {
+		instance = existing
+		p.mu.Unlock()
+		// 复用旧实例，但端口配置可能已改，同步到最新值
+		instance.Lock()
+		if instance.port != port {
+			instance.port = port
+		}
+		instance.Unlock()
+		p.instance = instance
+		return instance, nil
+	}
+	instance = &NginxInstance{
+		id:       instanceID,
 		version:  version,
 		status:   core.StatusStopped,
 		port:     port,
@@ -79,7 +102,9 @@ func (p *NginxProvider) NewInstance(ctx context.Context, config map[string]inter
 		nginxExe: filepath.Join(nginxDir, "nginx.exe"),
 		pm:       p.pm,
 	}
+	p.instances[instanceID] = instance
 	p.instance = instance
+	p.mu.Unlock()
 	return instance, nil
 }
 
@@ -131,10 +156,7 @@ func (p *NginxProvider) applyConfig(instance *NginxInstance) error {
 	wwwRoot := filepath.ToSlash(filepath.Join(installDir, "www"))
 	os.MkdirAll(filepath.Join(installDir, "www"), 0755)
 
-	indexPath := filepath.Join(installDir, "www", "index.html")
-	if !fileExists(indexPath) {
-		os.WriteFile(indexPath, []byte(defaultIndexHTML), 0644)
-	}
+	_ = www.EnsureIndex(installDir)
 
 	settings := p.cfg.Get().NginxConfig
 	gzipOn := "on"
@@ -326,59 +348,95 @@ func (i *NginxInstance) Start(ctx context.Context) error {
 		return fmt.Errorf("Nginx executable not found: %s", i.nginxExe)
 	}
 
+	port, pid, _ := i.snapshot()
+	setStatus := func(s core.ServiceStatus) { i.withState(func() { i.status = s }) }
+
 	// 幂等：本实例已在运行则直接返回，避免重复拉起新实例
-	if i.pid > 0 && i.pm.IsRunning(i.pid) {
-		i.status = core.StatusRunning
+	if pid > 0 && i.pm.IsRunning(pid) {
+		setStatus(core.StatusRunning)
 		return nil
 	}
 
 	// 端口已被本实例版本目录内的 nginx 占用（如上次激活残留的实例）：接管而非再起一份
-	if pid := ownedPIDByPort(i.port, i.nginxDir); pid > 0 {
-		i.mpid = pid
-		i.pid = pid
-		i.status = core.StatusRunning
-		i.startedAt = time.Now()
+	if p := ownedPIDByPort(port, i.nginxDir); p > 0 {
+		i.withState(func() {
+			i.mpid = p
+			i.pid = p
+			i.status = core.StatusRunning
+			i.startedAt = time.Now()
+		})
 		return nil
 	}
 
-	i.status = core.StatusStarting
+	setStatus(core.StatusStarting)
 
 	// 端口被同 kind 其它版本的残留实例占用（如环境切换版本后旧版本孤儿仍在跑）：
 	// 自动停掉它再启动；被外部程序占用则报错。否则新起的 nginx 会因绑定失败退出，
 	// 而旧代码在进程存活窗口内误判成功，导致"激活成功但实际未运行"的假状态。
-	if err := ensurePortFree(i.port, kindDirOf(i.nginxDir), 10*time.Second); err != nil {
-		i.status = core.StatusError
+	// graceful 用 `-s stop`（而非 quit）：这里要清理的是上一会话的孤儿，
+	// 目标是尽快拿回端口，不需要等它把手里的请求跑完。
+	graceful := func(ctx context.Context, p int) (stopOutcome, error) {
+		return i.signalShutdown(ctx, "stop")
+	}
+	if err := ensurePortFree(ctx, port, i.nginxDir, GraceNginx+10*time.Second, graceful); err != nil {
+		setStatus(core.StatusError)
 		return err
 	}
 
-	pid, err := i.pm.Start("nginx", i.nginxExe, nil, nil, i.nginxDir)
+	newPID, err := i.pm.Start("nginx", i.nginxExe, nil, nil, i.nginxDir)
 	if err != nil {
-		i.status = core.StatusError
+		setStatus(core.StatusError)
 		return err
 	}
 
-	for j := 0; j < 20; j++ {
-		time.Sleep(500 * time.Millisecond)
-		if p := ownedPIDByPort(i.port, i.nginxDir); p > 0 {
-			i.pid = p
-			break
+	// 最多等 10s 监听就绪，轮询可被 ctx 取消（旧实现 20×500ms time.Sleep，
+	// 关闭应用时只能干等满 10s）。
+	deadline := time.After(10 * time.Second)
+	for {
+		select {
+		case <-ctx.Done():
+			i.pm.Stop(newPID)
+			setStatus(core.StatusError)
+			return fmt.Errorf("Nginx 启动被取消: %w", ctx.Err())
+		case <-deadline:
+			// 只有本版本真正监听端口才算启动成功；其余一律明确失败。
+			i.pm.Stop(newPID)
+			setStatus(core.StatusError)
+			if occ := process.FindPIDByPort(port); occ > 0 {
+				return fmt.Errorf("Nginx 启动失败: 端口 %d 被 %s (PID %d) 占用", port, process.GetExecutablePath(occ), occ)
+			}
+			return fmt.Errorf("Nginx 启动失败: 进程未监听端口 %d，请查看 %s\\logs\\error.log", port, filepath.Join(i.nginxDir, "logs"))
+		case <-time.After(stopPollInterval):
+			if p := ownedPIDByPort(port, i.nginxDir); p > 0 {
+				i.withState(func() {
+					i.pid = p
+					i.mpid = newPID
+					i.status = core.StatusRunning
+					i.startedAt = time.Now()
+				})
+				return nil
+			}
 		}
 	}
+}
 
-	if i.pid <= 0 {
-		// 只有本版本真正监听端口才算启动成功；其余一律明确失败。
-		i.pm.Stop(pid)
-		i.status = core.StatusError
-		if occ := process.FindPIDByPort(i.port); occ > 0 {
-			return fmt.Errorf("Nginx 启动失败: 端口 %d 被 %s (PID %d) 占用", i.port, process.GetExecutablePath(occ), occ)
-		}
-		return fmt.Errorf("Nginx 启动失败: 进程未监听端口 %d，请查看 %s\\logs\\error.log", i.port, filepath.Join(i.nginxDir, "logs"))
+// signalShutdown 用 nginx.exe 自带的信号机制通知 master。
+// level 取 "quit"（优雅：处理完当前请求再退）或 "stop"（立即关闭）。
+//
+// 工作目录必须是 nginxDir：pid 路径来自 conf/nginx.conf 的 `pid` 指令，
+// 相对路径只在正确的前缀目录下才能解析（与 reloadCommand 一致）。
+func (i *NginxInstance) signalShutdown(ctx context.Context, level string) (stopOutcome, error) {
+	if i.nginxExe == "" || !fileExists(i.nginxExe) {
+		return stopPermanent, fmt.Errorf("nginx.exe 不存在: %s", i.nginxExe)
 	}
+	return runStopCommandCtx(ctx, i.nginxExe, []string{"-s", level}, i.nginxDir)
+}
 
-	i.mpid = pid
-	i.status = core.StatusRunning
-	i.startedAt = time.Now()
-	return nil
+// snapshot 在状态锁保护下读取 port/pid/mpid。
+func (i *NginxInstance) snapshot() (port, pid, mpid int) {
+	i.Lock()
+	defer i.Unlock()
+	return i.port, i.pid, i.mpid
 }
 
 func (i *NginxInstance) Stop(ctx context.Context) error {
@@ -387,76 +445,75 @@ func (i *NginxInstance) Stop(ctx context.Context) error {
 	}
 	defer i.end()
 
-	i.status = core.StatusStopping
+	i.clearStopNote()
+	port, pid, mpid := i.snapshot()
+	i.withState(func() { i.status = core.StatusStopping })
 
 	// 收集属于本实例的进程：自管 pid、主进程 mpid，以及端口上属于本版本目录内的**全部**进程。
 	// 必须无条件并入端口归属集合，而不是只在 i.pid<=0 时才查：
 	// nginx 是 master/worker 结构，master 与每个 worker 都监听同一端口；且历史停止失败
 	// 会在同版本目录上累积出多个孤儿 master（logs/nginx.pid 被最后一次启动覆盖，
 	// `nginx -s stop` 只对最新那个 master 生效）。只按自管 pid 停止 = 永远停不干净。
-	targets := collectOwnedTargets(i.port, i.nginxDir, i.pid, i.mpid)
-
+	targets := collectOwnedTargets(port, i.nginxDir, pid, mpid)
 	if len(targets) == 0 {
 		// 本实例未运行：端口可能被其它程序占用，与本实例无关，视为已停止
-		i.pid = 0
-		i.mpid = 0
-		i.status = core.StatusStopped
+		i.withState(func() { i.pid = 0; i.mpid = 0; i.status = core.StatusStopped })
 		return nil
 	}
 
-	// 1. 优雅停止：nginx -s stop（master 读 logs/nginx.pid 后通知 workers 优雅退出）。
-	//    忽略错误：PID 文件丢失/指向旧 master 时会失败，由后续兜底强杀覆盖。
-	//    工作目录设为 nginxDir，与 reloadCommand 一致，依赖 conf/nginx.conf 里的 pid 指令。
-	if i.nginxExe != "" && fileExists(i.nginxExe) {
-		_ = runStopCommand(i.nginxExe, []string{"-s", "stop"}, i.nginxDir)
+	// 阶梯参照 nginx 自身的信号语义：quit（优雅等请求跑完）→ stop（立即）→
+	// 进程级关闭 → 整树强杀。旧实现只有一步 `-s stop`，把"正在处理长请求"
+	// 的 worker 直接打断（nginx 官方文档明确区分 quit/stop 两种语义）。
+	// 预算取 GraceNginx=5s：桌面开发环境下请求秒级能完，超过即视为挂死请求。
+	rungs := []stopRung{
+		commandRung("nginx -s quit", GraceNginx, func(ctx context.Context) (stopOutcome, error) {
+			return i.signalShutdown(ctx, "quit")
+		}),
+		commandRung("nginx -s stop", graceAfterClose, func(ctx context.Context) (stopOutcome, error) {
+			return i.signalShutdown(ctx, "stop")
+		}),
+		closeRung(graceAfterClose),
+		forceKillRung(graceAfterKill),
+	}
+	res := runStopLadder(ctx, targets, rungs, rescanOwned(port, i.nginxDir))
+
+	cause := "已尝试 quit、stop、进程级关闭与整树强杀"
+	if errors.Is(ctx.Err(), context.Canceled) {
+		cause = "停止被取消（可能已退出应用）"
+	}
+	if len(res.Remaining) > 0 {
+		i.withState(func() { i.pid = 0; i.mpid = 0; i.status = core.StatusError })
+		return formatLadderFailure("Nginx", port, res, cause)
 	}
 
-	// 2. 等待本实例进程退出（8s）。判据=进程退出，不用端口是否释放。
-	remaining := waitProcessesExited(targets, 8*time.Second)
-
-	// 2.1 master 存活时会立刻重生 worker：targets 里的 worker 全退出 ≠ 实例已停。
-	//     nginx master 本身常不出现在 netstat 里，只能靠"端口上又出现本目录进程"反查。
-	//     因此必须重新扫一次归属集合并把复活出来的进程并入待杀集，
-	//     否则这里会谎报"已停止"，master 继续存活 —— 正是同端口累积出多个 master 的机制。
-	pending := pidSlice(remaining)
-	pending = append(pending, ownedPIDsByPort(i.port, i.nginxDir)...)
-	if len(pending) == 0 {
-		i.pid = 0
-		i.mpid = 0
-		i.status = core.StatusStopped
-		return nil
+	// 复核：端口上不再出现本版本目录的进程才算停止成功。
+	// 自管 PID 全退出不足以判定停止 —— master 会重生 worker。
+	if rest := verifyStoppedByPort(ctx, port, i.nginxDir, graceAfterKill); len(rest) > 0 {
+		res.Remaining = pidSet(rest)
+		i.withState(func() { i.pid = 0; i.mpid = 0; i.status = core.StatusError })
+		return formatLadderFailure("Nginx", port, res, "端口上重新出现本实例进程（master 重生 worker）")
 	}
 
-	// 3. 兜底强杀：沿父链归并到各自的根 master，整树击杀。
-	//    不能逐个 taskkill 传入的 PID —— 杀掉的是 worker，其父 master 会立刻补一个新的。
-	var lastErr error
-	for _, root := range topLevelAncestors(pending) {
-		if err := killRootTree(root); err != nil {
-			lastErr = err
-		}
+	// 确实停了，但靠的是强杀：状态仍按 Stopped 落账，风险用 stopNote 上浮。
+	if res.FirstErr != nil {
+		i.setStopNote(fmt.Sprintf("Nginx 未能优雅退出（%v），已强制终止收尾；可能有请求被中断", res.FirstErr))
 	}
-
-	// 4. 复核：端口上不再出现本版本目录的进程才算停止成功（最多再等 3s）。
-	//    自管 PID 全退出不足以判定停止 —— master 会重生 worker，必须以端口归属集合为准。
-	if rest := verifyStoppedByPort(i.port, i.nginxDir, 3*time.Second); len(rest) > 0 {
-		return fmt.Errorf("Nginx 停止失败: 端口 %d 上仍有本实例进程 (PID %s) 未退出（优雅停止超时后强制终止仍失败，可能权限不足，请手动结束）: %v", i.port, pidList(pidSet(rest)), lastErr)
-	}
-
-	i.pid = 0
-	i.mpid = 0
-	i.status = core.StatusStopped
+	i.withState(func() { i.pid = 0; i.mpid = 0; i.status = core.StatusStopped })
 	return nil
 }
 
 func (i *NginxInstance) Status() (string, error) {
+	i.Lock()
+	defer i.Unlock()
 	return string(i.status), nil
 }
 
 func (i *NginxInstance) HealthCheck(ctx context.Context) error {
-	if i.pid <= 0 {
+	_, pid, _ := i.snapshot()
+	if pid <= 0 {
 		return fmt.Errorf("not running")
 	}
-	if !i.pm.IsRunning(i.pid) {
+	if !i.pm.IsRunning(pid) {
 		return fmt.Errorf("process not running")
 	}
 	return nil
@@ -537,57 +594,3 @@ func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
 }
-
-const defaultIndexHTML = `<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>DevStack</title>
-<style>
-* { margin: 0; padding: 0; box-sizing: border-box; }
-body { font-family: -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif; background: #f0f2f5; color: #333; min-height: 100vh; display: flex; flex-direction: column; }
-.header { background: linear-gradient(135deg,#6366f1,#8b5cf6); color: #fff; padding: 40px 24px; text-align: center; }
-.header h1 { font-size: 32px; font-weight: 700; letter-spacing: -0.5px; }
-.header p { margin-top: 8px; opacity: .85; font-size: 15px; }
-.container { max-width: 800px; margin: 0 auto; padding: 32px 24px; flex: 1; }
-.card { background: #fff; border-radius: 10px; padding: 24px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
-.card h2 { font-size: 18px; font-weight: 600; margin-bottom: 12px; color: #111; }
-.info-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #f0f0f0; font-size: 14px; }
-.info-row:last-child { border-bottom: none; }
-.info-label { color: #666; }
-.info-value { font-family: monospace; color: #333; }
-.actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 4px; }
-.actions a { display: inline-flex; align-items: center; gap: 6px; padding: 10px 20px; border-radius: 8px; text-decoration: none; font-size: 14px; font-weight: 500; transition: all .15s; }
-.actions a.primary { background: #6366f1; color: #fff; }
-.actions a.primary:hover { background: #4f46e5; }
-.actions a.secondary { background: #f0f0f0; color: #333; }
-.actions a.secondary:hover { background: #e5e5e5; }
-.footer { text-align: center; padding: 24px; font-size: 13px; color: #999; }
-</style>
-</head>
-<body>
-<div class="header">
-<h1>DevStack</h1>
-<p>本地 Web 开发环境管理器</p>
-</div>
-<div class="container">
-<div class="card">
-<h2>站点信息</h2>
-<div class="info-row"><span class="info-label">服务器</span><span class="info-value">DevStack</span></div>
-<div class="info-row"><span class="info-label">根目录</span><span class="info-value">www/</span></div>
-<div class="info-row"><span class="info-label">主机</span><span class="info-value">localhost</span></div>
-<div class="info-row"><span class="info-label">状态</span><span class="info-value" style="color:#22c55e">运行中</span></div>
-</div>
-<div class="card">
-<h2>快速开始</h2>
-<p style="font-size:14px;color:#666;margin-bottom:16px">将你的项目文件放入此目录，或通过 DevStack 面板创建站点。</p>
-<div class="actions">
-<a href="/" class="primary">打开站点</a>
-<a href="/index.html" class="secondary">此页面</a>
-</div>
-</div>
-</div>
-<div class="footer">DevStack &mdash; 默认站点根目录</div>
-</body>
-</html>`

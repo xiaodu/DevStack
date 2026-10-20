@@ -266,14 +266,17 @@ func (m *Manager) Delete(id string) error {
 	return nil
 }
 
-var validKinds = map[string]bool{
-	"nginx":  true,
-	"mysql":  true,
-	"php":    true,
-	"redis":  true,
-	"node":   true,
-	"python": true,
-}
+// supportedUnitKinds 是环境模板允许的组件类型，必须与环境编辑器 catalog
+// 以及实际能启动的 provider/runtime 保持一致（memcached 已具备安装与服务能力）。
+var supportedUnitKinds = []string{"nginx", "mysql", "redis", "memcached", "php", "node", "python"}
+
+var validKinds = func() map[string]bool {
+	m := make(map[string]bool, len(supportedUnitKinds))
+	for _, k := range supportedUnitKinds {
+		m[k] = true
+	}
+	return m
+}()
 
 func validateUnits(units []UnitSpec) error {
 	for i, u := range units {
@@ -281,7 +284,7 @@ func validateUnits(units []UnitSpec) error {
 			return fmt.Errorf("第 %d 个组件的 kind 不能为空", i+1)
 		}
 		if !validKinds[u.Kind] {
-			return fmt.Errorf("第 %d 个组件的 kind %q 不合法，支持: nginx, mysql, php, redis, node, python", i+1, u.Kind)
+			return fmt.Errorf("第 %d 个组件的 kind %q 不合法，支持: %s", i+1, u.Kind, strings.Join(supportedUnitKinds, ", "))
 		}
 		if strings.TrimSpace(u.Version) == "" {
 			return fmt.Errorf("第 %d 个组件 %q 的 version 不能为空", i+1, u.Kind)

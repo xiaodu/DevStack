@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -228,46 +229,62 @@ func (i *PHPInstance) Start(ctx context.Context) error {
 		return fmt.Errorf("PHP executable not found: %s", i.phpExe)
 	}
 
-	i.status = core.StatusStarting
+	port, _ := i.snapshot()
+	setStatus := func(s core.ServiceStatus) { i.withState(func() { i.status = s }) }
+	setStatus(core.StatusStarting)
 
-	// 端口被同 kind 其它版本残留实例占用则自动清理；被外部程序占用则报错
-	if err := ensurePortFree(i.port, kindDirOf(i.phpDir), 10*time.Second); err != nil {
-		i.status = core.StatusError
+	// 端口被同 kind 其它版本残留实例占用则自动清理；被外部程序占用则报错。
+	// php-cgi 无自带优雅停止命令（-b 模式下无任何控制接口），不传 graceful。
+	if err := ensurePortFree(ctx, port, i.phpDir, graceAfterKill+graceAfterClose); err != nil {
+		setStatus(core.StatusError)
 		return err
 	}
 
 	args := []string{
-		"-b", fmt.Sprintf("127.0.0.1:%d", i.port),
+		"-b", fmt.Sprintf("127.0.0.1:%d", port),
 		"-c", filepath.Join(i.phpDir, "php.ini"),
 	}
 
 	pid, err := i.pm.Start(i.id, i.phpExe, args, nil, i.phpDir)
 	if err != nil {
-		i.status = core.StatusError
+		setStatus(core.StatusError)
 		return err
 	}
 
-	for j := 0; j < 6; j++ {
-		time.Sleep(500 * time.Millisecond)
-		if p := ownedPIDByPort(i.port, i.phpDir); p > 0 {
-			i.pid = p
-			break
+	// 最多等 3s 监听就绪，轮询可被 ctx 取消（旧实现 6×500ms time.Sleep）。
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case <-ctx.Done():
+			i.pm.Stop(pid)
+			setStatus(core.StatusError)
+			return fmt.Errorf("PHP 启动被取消: %w", ctx.Err())
+		case <-deadline:
+			// 只有本版本真正监听端口才算启动成功。
+			i.pm.Stop(pid)
+			setStatus(core.StatusError)
+			if occ := process.FindPIDByPort(port); occ > 0 {
+				return fmt.Errorf("PHP 启动失败: 端口 %d 被 %s (PID %d) 占用", port, process.GetExecutablePath(occ), occ)
+			}
+			return fmt.Errorf("PHP 启动失败: 进程未监听端口 %d，请检查 %s\\php.ini", port, i.phpDir)
+		case <-time.After(stopPollInterval):
+			if p := ownedPIDByPort(port, i.phpDir); p > 0 {
+				i.withState(func() {
+					i.pid = p
+					i.status = core.StatusRunning
+					i.startedAt = time.Now()
+				})
+				return nil
+			}
 		}
 	}
+}
 
-	if i.pid <= 0 {
-		// 只有本版本真正监听端口才算启动成功。
-		i.pm.Stop(pid)
-		i.status = core.StatusError
-		if occ := process.FindPIDByPort(i.port); occ > 0 {
-			return fmt.Errorf("PHP 启动失败: 端口 %d 被 %s (PID %d) 占用", i.port, process.GetExecutablePath(occ), occ)
-		}
-		return fmt.Errorf("PHP 启动失败: 进程未监听端口 %d，请检查 %s\\php.ini", i.port, i.phpDir)
-	}
-
-	i.status = core.StatusRunning
-	i.startedAt = time.Now()
-	return nil
+// snapshot 在状态锁保护下读取 port/pid。
+func (i *PHPInstance) snapshot() (port, pid int) {
+	i.Lock()
+	defer i.Unlock()
+	return i.port, i.pid
 }
 
 func (i *PHPInstance) Stop(ctx context.Context) error {
@@ -276,51 +293,56 @@ func (i *PHPInstance) Stop(ctx context.Context) error {
 	}
 	defer i.end()
 
-	i.status = core.StatusStopping
+	i.clearStopNote()
+	port, selfPID := i.snapshot()
+	i.withState(func() { i.status = core.StatusStopping })
 
 	// 收集属于本实例的进程（只收集不杀）：自管 PID ∪ 端口上属于本版本目录的全部 PID。
 	// php-cgi 常被手工/脚本多起几个实例，只按自管 PID 停止会在端口上留下同目录孤儿。
-	targets := collectOwnedTargets(i.port, i.phpDir, i.pid)
-
+	targets := collectOwnedTargets(port, i.phpDir, selfPID)
 	if len(targets) == 0 {
-		// 本实例未运行，视为已停止
-		i.pid = 0
-		i.status = core.StatusStopped
+		i.withState(func() { i.pid = 0; i.status = core.StatusStopped })
 		return nil
 	}
 
-	// php-cgi（-b FastCGI 模式）无自带优雅停止命令，直接终止进程。
-	// pm.Stop 已是 taskkill /F /T，递归杀子进程（php-cgi -b 模式通常单进程，/T 无害）。
-	var lastErr error
-	for pid := range targets {
-		if err := i.pm.Stop(pid); err != nil {
-			lastErr = err
-		}
+	// php-cgi 没有应用层停止命令，阶梯从进程级关闭起：
+	// taskkill 不带 /F 先试（php-cgi 会收到 WM_CLOSE 并走正常退出），
+	// 不行再整树强杀。旧实现只有一步 taskkill /F /T，请求处理中直接被打断。
+	res := runStopLadder(ctx, targets, []stopRung{
+		closeRung(graceAfterClose),
+		forceKillRung(graceAfterKill),
+	}, rescanOwned(port, i.phpDir))
+
+	cause := "已尝试进程级关闭与整树强杀"
+	if errors.Is(ctx.Err(), context.Canceled) {
+		cause = "停止被取消（可能已退出应用）"
+	}
+	if len(res.Remaining) > 0 {
+		i.withState(func() { i.pid = 0; i.status = core.StatusError })
+		return formatLadderFailure("PHP", port, res, cause)
+	}
+	if rest := verifyStoppedByPort(ctx, port, i.phpDir, graceAfterKill); len(rest) > 0 {
+		res.Remaining = pidSet(rest)
+		i.withState(func() { i.pid = 0; i.status = core.StatusError })
+		return formatLadderFailure("PHP", port, res, "端口上重新出现本实例进程")
 	}
 
-	// 等待本实例进程退出（5s）。判据=进程退出 + 端口上不再出现本目录进程，
-	// 只有前者会漏掉"杀掉的进程没了，但端口上还有同目录孤儿"的情况。
-	if remaining := waitProcessesExited(targets, 5*time.Second); len(remaining) > 0 {
-		return fmt.Errorf("PHP 停止失败: 进程 %s 未退出（强制终止仍失败，可能权限不足）: %v", pidList(remaining), lastErr)
-	}
-	if rest := verifyStoppedByPort(i.port, i.phpDir, 3*time.Second); len(rest) > 0 {
-		return fmt.Errorf("PHP 停止失败: 端口 %d 上仍有本实例进程 (PID %s) 未退出: %v", i.port, pidList(pidSet(rest)), lastErr)
-	}
-
-	i.pid = 0
-	i.status = core.StatusStopped
+	i.withState(func() { i.pid = 0; i.status = core.StatusStopped })
 	return nil
 }
 
 func (i *PHPInstance) Status() (string, error) {
+	i.Lock()
+	defer i.Unlock()
 	return string(i.status), nil
 }
 
 func (i *PHPInstance) HealthCheck(ctx context.Context) error {
-	if i.pid <= 0 {
+	_, pid := i.snapshot()
+	if pid <= 0 {
 		return fmt.Errorf("not running")
 	}
-	if !i.pm.IsRunning(i.pid) {
+	if !i.pm.IsRunning(pid) {
 		return fmt.Errorf("process not running")
 	}
 	return nil

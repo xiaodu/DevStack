@@ -301,8 +301,12 @@ onMount(() => {
                       <span class="{statusTextCls(card.status)}">{statusLabel(card.status)}</span>
                     {/if}
                   </div>
-                  {#if card.status === 'error' && card.error}
+                  {#if card.error && card.status === 'error'}
                     <div class="text-xs text-error/80 mt-1 truncate" title={card.error}>{card.error}</div>
+                  {:else if card.error}
+                    <!-- “确实停了、但停止过程有异常”（如优雅关闭被拒、实际靠强杀收尾）：
+                         状态仍是诚实的 stopped，但风险必须看得见，不能只藏在 title 提示里 -->
+                    <div class="text-xs text-warning/80 mt-1 truncate" title={card.error}>⚠ {card.error}</div>
                   {/if}
                 </div>
               </div>

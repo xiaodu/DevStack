@@ -299,7 +299,8 @@ func FindPIDsByPortOwned(port int, exeDir string) []int {
 	return out
 }
 
-// executablePathCache 缓存 wmic 查询结果，避免 syncServiceState 为每个服务重复调用 wmic。
+// executablePathCache 缓存 GetExecutablePath（Win32 API）的查询结果，
+// 避免 syncServiceState 为每个服务重复打开进程查路径。
 var (
 	executablePathCache     map[int]string
 	executablePathCacheTime time.Time
@@ -414,6 +415,19 @@ func FindAllPIDsByPort() map[int][]int {
 		return result
 	}
 
+	// 优先读内核 TCP 表（iphlpapi GetExtendedTcpTable），不起外部进程；
+	// API 失败才回退 netstat（保底可用）。
+	if apiResult, apiErr := listeningPortsViaAPI(); apiErr == nil {
+		portPIDCache = apiResult
+		portPIDCacheTime = time.Now()
+		result := make(map[int][]int, len(apiResult))
+		for k, v := range apiResult {
+			result[k] = append([]int(nil), v...)
+		}
+		return result
+	}
+
+	// 回退路径：netstat -ano 文本解析（无 GetExtendedTcpTable 可用时）
 	cmd := exec.Command("netstat", "-ano")
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 

@@ -36,6 +36,15 @@ type Manager struct {
 
 	syncStop chan struct{} // 周期状态同步的停止信号（nil 表示未启动）
 	syncOnce sync.Once
+
+	// stopNotes 暂存 provider 停止过程中的告警（键为服务 ID）。
+	//
+	// 为何需要中转：阶梯式停止里"最终确实停了、但过程有异常"（优雅关闭被
+	// 认证拒收、实际靠强杀收尾）不能当成 error 返回 —— 上层会把任何非 nil
+	// 停止错误写成 StatusError，把"已停"误报成"没停"。而编排路径的
+	// stopServiceByName 返回值签名由 orchestrator.StopFunc 固定，无法携带备注，
+	// 故在此暂存，由 Stop 取出后以 warning 上浮到 UI。
+	stopNotes map[string]string
 }
 
 type ServiceInstance struct {
@@ -75,6 +84,7 @@ func NewManager(cfg *config.Config, procMgr *process.Manager, resMgr *resource.M
 		resMgr:     resMgr,
 		services:   make(map[string]*ServiceInstance),
 		dependents: make(map[string][]string),
+		stopNotes:  make(map[string]string),
 		reactive:   reactiveEng,
 		orch:       orch,
 	}
@@ -162,7 +172,7 @@ func (m *Manager) registerDefaults() {
 		// 端口被其它程序占用时也不应把本服务误标为运行中。
 		s.Info.Status = core.StatusRunning
 		s.Info.PID = pids[0]
-		s.process = &process.ProcessHandle{PID: pids[0], Started: time.Now()}
+		s.process = processHandleFromPIDs(pids)
 		// 冷启动接管：进程在跑就必须同步登记到编排引擎，否则停止时引擎查不到条目
 		// （历史表现：界面显示运行中，点停止报"服务 xxx 不存在"且进程一个都没杀）。
 		m.adoptOrchestrator(s.Info.ID, s.Info.Port, pids)
@@ -195,6 +205,17 @@ func (m *Manager) livePIDs(kind, version string, port int, fresh bool) []int {
 		process.InvalidatePortCache()
 	}
 	return process.FindPIDsByPortOwned(port, instanceDir(m.cfg.Get().InstallDir, kind, version))
+}
+
+// processHandleFromPIDs 把本实例当前占端口的全部进程（master + workers）收进句柄。
+// 只记 pids[0] 不够：nginx reload 会整批更换 worker，单 PID 很快指向已退出进程。
+func processHandleFromPIDs(pids []int) *process.ProcessHandle {
+	if len(pids) == 0 {
+		return nil
+	}
+	extra := make([]int, len(pids)-1)
+	copy(extra, pids[1:])
+	return &process.ProcessHandle{PID: pids[0], ExtraPIDs: extra, Started: time.Now()}
 }
 
 // LoadProcfile 加载 Procfile 到编排引擎
@@ -313,7 +334,27 @@ func (m *Manager) stopServiceByName(name string) error {
 		return err
 	}
 
-	return entity.Stop(context.Background())
+	if err := entity.Stop(context.Background()); err != nil {
+		return err
+	}
+	// 已停但过程有异常：暂存告警，由 Stop 的编排分支取出后上浮（见 Manager.stopNotes）。
+	if tn, ok := entity.(interface{ StopNote() string }); ok {
+		if note := tn.StopNote(); note != "" {
+			m.mu.Lock()
+			m.stopNotes[s.Info.ID] = note
+			m.mu.Unlock()
+		}
+	}
+	return nil
+}
+
+// takeStopNote 取出并清除某服务上次停止留下的告警（无则空串）。
+func (m *Manager) takeStopNote(id string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	note := m.stopNotes[id]
+	delete(m.stopNotes, id)
+	return note
 }
 
 var serviceOrder = []string{"nginx", "apache", "mysql", "postgresql", "mongodb", "redis", "memcached", "node", "python", "composer"}
@@ -370,7 +411,7 @@ func (m *Manager) syncServiceState(s *ServiceInstance, portPIDMap map[int][]int)
 			info.PID = pids[0]
 			info.Error = ""
 			if s.process == nil || s.process.PID <= 0 {
-				s.process = &process.ProcessHandle{PID: pids[0], Started: time.Now()}
+				s.process = processHandleFromPIDs(pids)
 			}
 		} else {
 			info.Status = core.StatusStopped
@@ -498,9 +539,14 @@ func (m *Manager) Start(id string) error {
 		m.mu.Unlock()
 		return core.ErrServiceNotFound
 	}
-	if s.Info.Status == core.StatusRunning || s.Info.Status == core.StatusStarting {
+	switch s.Info.Status {
+	case core.StatusRunning:
 		m.mu.Unlock()
 		return nil
+	case core.StatusStarting:
+		// 上一次启动还在进行中：不能回"成功"（进程其实没起来），也不能再拉起一份
+		m.mu.Unlock()
+		return core.ErrStartInProgress
 	}
 
 	kind := kindFromID(id)
@@ -511,6 +557,17 @@ func (m *Manager) Start(id string) error {
 	m.mu.Unlock()
 
 	m.publishServiceEvent(reactive.EventServiceStarting, id, nil)
+
+	// 端口被同 kind 的其它版本占着时，先显式停掉那个版本再启动：
+	// provider 侧已不再跨版本静默强杀（那会让被杀版本在 UI 上继续显示运行中），
+	// 这里走正常 Stop 流程，会广播停止事件，界面状态与真实进程保持同步。
+	if port > 0 {
+		if holder := m.instanceOnPort(kind, port, id); holder != "" {
+			if err := m.Stop(holder); err != nil {
+				return fmt.Errorf("启动 %s 需要先停止占用端口 %d 的 %s：%w", id, port, holder, err)
+			}
+		}
+	}
 
 	// 使用编排引擎启动（如果可用）
 	if m.orch != nil {
@@ -545,14 +602,7 @@ func (m *Manager) Start(id string) error {
 		// 获取启动后的 PID 集合（master + 全部 worker），并同步登记到编排引擎。
 		// 只记一个 PID 会让后续停止/复核漏掉其余进程，Job Object 也管不全。
 		pids := m.livePIDs(kind, version, port, false)
-		pid := 0
-		if len(pids) > 0 {
-			pid = pids[0]
-		}
-		proc := &process.ProcessHandle{PID: pid, Started: time.Now()}
-		if pid <= 0 {
-			proc = nil
-		}
+		proc := processHandleFromPIDs(pids)
 		m.adoptOrchestrator(id, port, pids)
 
 		m.mu.Lock()
@@ -567,9 +617,11 @@ func (m *Manager) Start(id string) error {
 		if proc != nil && proc.PID > 0 {
 			s.Info.PID = proc.PID
 		}
+		oldProc := s.process
 		s.process = proc
 		s.stopped = make(chan struct{})
-		s.restartCount = 0
+		// 崩溃计数只在上一轮真的稳定运行过之后才清零，见 decayRestartCount
+		s.restartCount = decayRestartCount(s.restartCount, oldProc)
 
 		stoppedChan := s.stopped
 		m.mu.Unlock()
@@ -626,14 +678,7 @@ func (m *Manager) Start(id string) error {
 		return err
 	}
 	pids := m.livePIDs(kind, version, port, false)
-	pid := 0
-	if len(pids) > 0 {
-		pid = pids[0]
-	}
-	proc := &process.ProcessHandle{PID: pid, Started: time.Now()}
-	if pid <= 0 {
-		proc = nil
-	}
+	proc := processHandleFromPIDs(pids)
 
 	// 将本实例的全部进程纳入 Job Object 管理。
 	// 键必须是完整 ID（kind@version）：之前用裸 kind 登记成 "nginx"，
@@ -652,9 +697,10 @@ func (m *Manager) Start(id string) error {
 	if proc != nil && proc.PID > 0 {
 		s.Info.PID = proc.PID
 	}
+	oldProc := s.process
 	s.process = proc
 	s.stopped = make(chan struct{})
-	s.restartCount = 0
+	s.restartCount = decayRestartCount(s.restartCount, oldProc)
 
 	stoppedChan := s.stopped
 	m.mu.Unlock()
@@ -674,6 +720,13 @@ func (m *Manager) Stop(id string) error {
 	if !ok {
 		m.mu.Unlock()
 		return core.ErrServiceNotFound
+	}
+
+	if s.Info.Status == core.StatusStarting {
+		// 启动进行中不允许穿插停止：两条流程会互相覆盖状态（Start 尾段会把状态写回
+		// Running，Stop 的复核又可能误判），此前无防护。
+		m.mu.Unlock()
+		return core.ErrStopBlocked
 	}
 
 	if dependents := m.dependents[id]; len(dependents) > 0 {
@@ -745,24 +798,47 @@ func (m *Manager) Stop(id string) error {
 			})
 			return fmt.Errorf("%s", msg)
 		}
-		// stopErr != nil 但进程确实全部退出了：按已停止处理（优雅停止超时后强杀成功等场景）
+		// stopErr != nil 但进程确实全部退出了：端口/进程状态按"已停止"落账是诚实的，
+		// 但优雅关闭没成功这件事不能默默吞掉——记在 Error 上并回给调用方，
+		// 让界面既显示"已停止"又显示"停止过程有异常"。
+		if stopErr != nil {
+			warn := "已停止，但优雅关闭未完成：" + stopErr.Error()
+			m.mu.Lock()
+			if si, ok := m.services[id]; ok {
+				si.process = nil
+				si.Info.Status = core.StatusStopped
+				si.Info.PID = 0
+				si.Info.Error = warn
+			}
+			m.mu.Unlock()
+			m.publishServiceEvent(reactive.EventServiceStopped, id, map[string]interface{}{"warning": warn})
+			return fmt.Errorf("%s", warn)
+		}
 
 		// 更新状态
+		// stopNote：进程确实停了，但停止过程有异常（如靠强杀收尾）。它不是 error，
+		// 状态按 Stopped 诚实落账，同时写进 Error 并用事件的 warning 载荷推给 UI。
+		note := m.takeStopNote(id)
 		m.mu.Lock()
 		if si, ok := m.services[id]; ok {
 			si.process = nil
 			si.Info.Status = core.StatusStopped
 			si.Info.PID = 0
-			si.Info.Error = ""
+			si.Info.Error = note
 		}
 		m.mu.Unlock()
 
-		m.publishServiceEvent(reactive.EventServiceStopped, id, nil)
+		if note != "" {
+			m.publishServiceEvent(reactive.EventServiceStopped, id, map[string]interface{}{"warning": note})
+		} else {
+			m.publishServiceEvent(reactive.EventServiceStopped, id, nil)
+		}
 		return nil
 	}
 
 	// 回退到 provider 模式（编排引擎不可用时）
 	var stopErr error
+	var stopNote string
 	p := provider.Get(kind)
 	if p != nil {
 		config := map[string]interface{}{
@@ -783,6 +859,14 @@ func (m *Manager) Stop(id string) error {
 			return err
 		}
 		stopErr = entity.Stop(context.Background())
+		// 阶梯式停止里"最终确实停了、但过程有异常"（如优雅关闭被认证拒收、
+		// 实际靠强杀收尾）的 provider **不返回 error** —— 下面任何一个非 nil
+		// stopErr 都会被写成 StatusError，把"已停"误报成"没停"。
+		// 异常改由 StopNote 上浮，语义与上面编排路径的 warn 分支完全一致：
+		// 状态诚实（Stopped）、风险可见（Error 字段 + 事件 warning 载荷）。
+		if tn, ok := entity.(interface{ StopNote() string }); ok {
+			stopNote = tn.StopNote()
+		}
 	} else {
 		// 无 provider 注册的服务：按端口 + 安装目录归属找出本实例的全部进程并终止。
 		// 只杀一个 PID 对 master/worker 结构无效（master 会重生 worker）。
@@ -817,7 +901,7 @@ func (m *Manager) Stop(id string) error {
 			si.process = nil
 			si.Info.Status = core.StatusStopped
 			si.Info.PID = 0
-			si.Info.Error = ""
+			si.Info.Error = stopNote
 		}
 	}
 	m.mu.Unlock()
@@ -827,6 +911,11 @@ func (m *Manager) Stop(id string) error {
 			"error": stopErr.Error(),
 		})
 		return stopErr
+	}
+
+	if stopNote != "" {
+		m.publishServiceEvent(reactive.EventServiceStopped, id, map[string]interface{}{"warning": stopNote})
+		return nil
 	}
 
 	m.publishServiceEvent(reactive.EventServiceStopped, id, nil)
@@ -939,9 +1028,13 @@ func (m *Manager) reconcileStates() {
 			}{reactive.EventServiceStopped, map[string]interface{}{"reason": "process-exited"}})
 			changes = append(changes, c)
 		case info.Status == core.StatusRunning && (old == core.StatusStopped || old == core.StatusError):
-			// 端口上发现本实例进程（外部手动启动、历史孤儿进程等）：认领
+			// 端口上发现本实例进程（外部手动启动、历史孤儿进程等）：认领全部 PID，
+			// 只记代表 PID 会让后续判活/停止漏掉同实例的其余进程。
 			if s.process == nil || s.process.PID != info.PID {
-				s.process = &process.ProcessHandle{PID: info.PID, Started: time.Now()}
+				pids := ownedPIDsFromMap(portPIDMap, info.Port, m.cfg.Get().InstallDir, info.Kind, info.Version)
+				if s.process = processHandleFromPIDs(pids); s.process == nil {
+					s.process = &process.ProcessHandle{PID: info.PID, Started: time.Now()}
+				}
 			}
 			c := change{id: id, info: info}
 			c.events = append(c.events, struct {
@@ -968,6 +1061,37 @@ func (m *Manager) reconcileStates() {
 }
 
 const maxRestartCount = 3
+
+// stableRunWindow 是"这一轮算正常运行过"的最低在线时长。
+const stableRunWindow = 60 * time.Second
+
+// decayRestartCount 决定重启计数是否清零：只有上一轮确实稳定运行过一段时间才清零。
+// 原先每次 Start 成功就无条件置 0，于是"起得来但几秒就死"的服务每轮计数都是 1，
+// 永远够不到 maxRestartCount 的熔断阈值 —— 表现为无限重启、无退避。
+func decayRestartCount(count int, prev *process.ProcessHandle) int {
+	if count == 0 {
+		return 0
+	}
+	if prev != nil && !prev.Started.IsZero() && time.Since(prev.Started) >= stableRunWindow {
+		return 0
+	}
+	return count
+}
+
+// instanceOnPort 找出同 kind、正占用同一端口、且不是本次要启动的那个实例 ID（用于先停兄弟版本）。
+func (m *Manager) instanceOnPort(kind string, port int, exceptID string) string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for id, s := range m.services {
+		if id == exceptID || s.Info.Kind != kind || s.Info.Port != port {
+			continue
+		}
+		if s.Info.Status == core.StatusRunning || s.Info.Status == core.StatusStarting {
+			return id
+		}
+	}
+	return ""
+}
 
 func (m *Manager) watchProcess(id string, stopped <-chan struct{}) {
 	for {
@@ -1036,18 +1160,26 @@ func (m *Manager) watchProcess(id string, stopped <-chan struct{}) {
 	}
 }
 
+// checkServiceHealth 判断服务是否仍在提供服务。
+//
+// 不能只认启动时记录的那批 PID：nginx 的监听 socket 由 worker 持有，而
+// `nginx -s reload` 会整批更换 worker（master 不变），旧 PID 全部退出。
+// 按旧 PID 判活会在每次 reload 后误报故障并触发自动重启——表现为 nginx
+// 明明在正常服务，日志却持续出现 service.health_failed。
+// 这里以"当前端口上仍在监听、且属于本实例安装目录的进程"为准，
+// 再叠加一次 TCP 连接确认端口真的可连。
 func (m *Manager) checkServiceHealth(id string, port int) bool {
 	if port <= 0 {
 		return true
 	}
 
-	if s := m.GetService(id); s != nil && s.process != nil {
-		pids := append([]int{s.process.PID}, s.process.ExtraPIDs...)
-		for _, pid := range pids {
-			if pid > 0 && !m.procMgr.IsRunning(pid) {
-				return false
-			}
-		}
+	s := m.GetService(id)
+	if s == nil {
+		return false
+	}
+	pids := m.livePIDs(s.Info.Kind, s.Info.Version, port, false)
+	if len(pids) == 0 {
+		return false
 	}
 
 	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 500*time.Millisecond)
@@ -1055,6 +1187,17 @@ func (m *Manager) checkServiceHealth(id string, port int) bool {
 		return false
 	}
 	conn.Close()
+
+	// 把句柄刷新为当前这一代 PID，避免 UI/停止流程继续使用已退出的 worker。
+	m.mu.Lock()
+	if cur := m.services[id]; cur != nil {
+		cur.Info.PID = pids[0]
+		if cur.process != nil {
+			cur.process.PID = pids[0]
+			cur.process.ExtraPIDs = append(cur.process.ExtraPIDs[:0], pids[1:]...)
+		}
+	}
+	m.mu.Unlock()
 	return true
 }
 
@@ -1562,9 +1705,10 @@ func dirExists(path string) bool {
 // 路径与各 provider.IsInstalled 保持一致；未列入的类型（apache/pgsql/mongo 等）
 // 退化为目录存在性判断，避免用错 exe 名误伤。php 由 runtime 侧管理，不走此表。
 var versionExeRel = map[core.ServiceType]string{
-	core.TypeNginx: "nginx.exe",
-	core.TypeMySQL: filepath.Join("bin", "mysqld.exe"),
-	core.TypeRedis: "redis-server.exe",
+	core.TypeNginx:     "nginx.exe",
+	core.TypeMySQL:     filepath.Join("bin", "mysqld.exe"),
+	core.TypeRedis:     "redis-server.exe",
+	core.TypeMemcached: "memcached.exe",
 }
 
 // versionInstalled 判定 programs/<kind>/<version> 是否为完整安装：

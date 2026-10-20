@@ -64,6 +64,10 @@ func e2eAppDir(t *testing.T, name string) string {
 // newE2EApp 装配一个完整 App（复用真实 manager 构造），组件由假 provider 接管。
 func newE2EApp(t *testing.T, dir string) *App {
 	t.Helper()
+	// 假服务 helper exe 的安装目录由 fakeEntity.Start 通过 DEVSTACK_E2E_DIR 读取。
+	// 必须在装配时显式指向本用例的 .e2e 专用目录：此前全仓无人 Setenv，
+	// helper exe 落进了仓内真实 programs\ 目录，测试退出后端口残留污染环境。
+	t.Setenv("DEVSTACK_E2E_DIR", dir)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		t.Fatalf("创建安装目录失败: %v", err)
 	}
@@ -76,7 +80,7 @@ func newE2EApp(t *testing.T, dir string) *App {
 	reactiveEng := reactive.NewEngine(100)
 	svcMgr := service.NewManager(cfg, procMgr, resMgr, reactiveEng)
 	rtMgr := runtime.NewManager(cfg, procMgr, resMgr)
-	projMgr := project.NewManager(dir, "1.26.0", rtMgr, resMgr)
+	projMgr := project.NewManager(dir, rtMgr, resMgr)
 	projMgr.SetServiceManager(svcMgr)
 	projMgr.SetRuntimeManager(rtMgr)
 	envMgr := environment.NewManager(dir)

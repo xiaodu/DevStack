@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -14,12 +15,37 @@ import (
 	"github.com/xiaodu/DevStack/internal/process"
 )
 
-// kindDirOf 返回服务安装根目录（如 <install>\programs\nginx），用于识别"本工具管理的任意版本残留进程"。
+// kindDirOf 返回服务安装根目录（如 <install>\programs\nginx），即版本目录的父目录。
 func kindDirOf(instanceDir string) string {
 	if instanceDir == "" {
 		return ""
 	}
 	return filepath.Dir(instanceDir)
+}
+
+// siblingVersionOf 判断某个可执行文件是否属于同 kind 的**其它版本目录**，是则返回该版本目录名。
+// 用于把"端口被自己另一个版本占着"和"端口被外部程序占着"分清楚，前者该提示先停那个版本。
+func siblingVersionOf(exe, instanceDir string) string {
+	if exe == "" || instanceDir == "" {
+		return ""
+	}
+	kindDir := kindDirOf(instanceDir)
+	if kindDir == "" || !pathWithinDir(exe, kindDir) {
+		return ""
+	}
+	rel, err := filepath.Rel(kindDir, exe)
+	if err != nil {
+		return ""
+	}
+	version := strings.SplitN(filepath.ToSlash(rel), "/", 2)[0]
+	if version == "" || version == "." {
+		return ""
+	}
+	// 与本实例同目录的不算兄弟版本
+	if pathWithinDir(exe, instanceDir) {
+		return ""
+	}
+	return version
 }
 
 // portDebug 环境变量 DEVSTACK_PORT_DEBUG=1 时输出端口接管过程的诊断日志。
@@ -39,19 +65,24 @@ func scanPortPids(port int) []int {
 	return process.FindPIDsByPort(port)
 }
 
-// ensurePortFree 确保端口可被本实例使用，返回 nil 时保证端口当前未被任何进程监听。
+// ensurePortFree 确保端口可被本实例（instanceDir = <install>\programs\<kind>\<version>）使用，
+// 返回 nil 时保证端口当前未被任何进程监听。
 //
 //   - 端口未被占用 → 直接返回；
-//   - 占用者位于 kindDir（如 <install>\programs\nginx）内 → 属于本工具管理的其它版本残留
-//     实例（环境切换版本后旧版本孤儿仍占着端口、或历史停止失败累积出的多个 master）：
-//     先尝试优雅关闭，再按版本目录把端口上属于本工具的全部进程树一次性清干净。
-//     与 Laragon 切换版本时"自动接管旧实例"的行为一致；
-//   - 端口上只剩外部程序 → 返回含 PID 与可执行路径的错误，绝不误杀。
+//   - 占用者的可执行文件落在**本版本目录**内 → 是本实例自己的残留进程
+//     （上次停止失败留下的孤儿 master/worker）：先尝试优雅关闭，再一次性清掉全部根进程。
+//     关键约束：同一端口上 master 与每个 worker 都会出现在 netstat 里，
+//     逐个杀"随机一个 worker"永远清不干净（master 会重生 worker 抢回端口），
+//     因此每一轮都必须把本目录名下的全部根进程一起击杀。
+//   - 占用者属于同 kind 的**其它版本目录**（兄弟版本）或外部程序 → 一律不杀，返回可执行的错误。
+//     旧实现按 kind 目录（所有版本的父目录）判归属，于是"启动 nginx 1.26"会静默强杀掉
+//     正在运行的 1.24，而界面上 1.24 仍显示运行中（要等 5s 周期同步才改判）——
+//     跨版本接管改由上层 service.Manager.Start 显式先停兄弟版本并广播状态后再启动。
 //
-// 关键约束：同一端口上 master 与每个 worker 都会出现在 netstat 里，
-// 逐个杀"随机一个 worker"永远清不干净（master 会重生 worker 抢回端口），
-// 因此每一轮都必须把本工具名下的全部根进程一起击杀。
-func ensurePortFree(port int, kindDir string, timeout time.Duration, graceful ...func(port int) error) error {
+// ctx 贯穿全流程：旧实现忽略调用方的取消信号（应用退出时只能死等），
+// 且优雅关闭后的等待写死 8s，对需要刷脏页的 mysqld 不够（会被当成失败后强杀）。
+// 现在等待预算由调用方的 timeout 派生，MySQL 侧传 GraceMySQL+缓冲即可等完正常关闭。
+func ensurePortFree(ctx context.Context, port int, instanceDir string, timeout time.Duration, graceful ...func(ctx context.Context, port int) (stopOutcome, error)) error {
 	deadline := time.Now().Add(timeout)
 	gracefulTried := false
 	for {
@@ -59,11 +90,14 @@ func ensurePortFree(port int, kindDir string, timeout time.Duration, graceful ..
 		if len(pids) == 0 {
 			return nil
 		}
-		owned, foreign := splitPidsByDir(pids, kindDir)
-		dlogf("端口 %d 监听者: 本工具 %v / 外部 %v", port, owned, foreign)
+		owned, foreign := splitPidsByDir(pids, instanceDir)
+		dlogf("端口 %d 监听者: 本实例 %v / 非本实例 %v", port, owned, foreign)
 		if len(owned) == 0 {
 			pid := foreign[0]
 			exe := process.GetExecutablePath(pid)
+			if sib := siblingVersionOf(exe, instanceDir); sib != "" {
+				return fmt.Errorf("端口 %d 被本工具已安装的其它版本 %s 占用（%s），请先停止该版本再启动", port, sib, exe)
+			}
 			return fmt.Errorf("端口 %d 被外部程序占用: %s (PID %d)，请手动处理后再启动", port, exe, pid)
 		}
 
@@ -71,11 +105,27 @@ func ensurePortFree(port int, kindDir string, timeout time.Duration, graceful ..
 		if !gracefulTried && len(graceful) > 0 && graceful[0] != nil {
 			gracefulTried = true
 			dlogf("尝试优雅关闭端口 %d 的残留实例", port)
-			if err := graceful[0](port); err != nil {
-				dlogf("优雅关闭失败: %v，回退强制清除", err)
-			} else if alive := waitProcessesExited(pidSet(owned), 8*time.Second); len(alive) == 0 {
-				dlogf("残留实例已优雅退出")
-				continue
+			outcome, err := graceful[0](ctx, port)
+			if err != nil {
+				dlogf("优雅关闭未成功(%s): %v", outcome, err)
+			}
+			// 认证/可执行缺失类「永久失败」白等没有意义，直接降级强杀；
+			// 其余情形（含命令自身超时）必须给足退出预算 —— mysqladmin 超时
+			// 往往意味着 mysqld 还在 flush，而不是没受理。
+			if outcome != stopPermanent {
+				budget := time.Until(deadline)
+				if budget < 2*time.Second {
+					budget = 2 * time.Second
+				}
+				if alive := waitExit(ctx, pidSet(owned), budget); len(alive) == 0 {
+					dlogf("残留实例已优雅退出")
+					continue
+				}
+				// 优雅关闭比预期慢不等于失败：把 deadline 往后推一个预算，
+				// 避免因调用方传的短 timeout 而在正常关闭中途误判超时。
+				if !time.Now().Before(deadline) {
+					deadline = time.Now().Add(timeout)
+				}
 			}
 		}
 
@@ -84,7 +134,7 @@ func ensurePortFree(port int, kindDir string, timeout time.Duration, graceful ..
 		// 避免"杀一个 worker → master 重生 → 下一轮又看到新 worker"的死循环。
 		var killErr error
 		for _, root := range topLevelAncestors(owned) {
-			if err := killRootTree(root); err != nil {
+			if err := killRootTree(ctx, root); err != nil {
 				killErr = err
 			}
 		}
@@ -95,16 +145,34 @@ func ensurePortFree(port int, kindDir string, timeout time.Duration, graceful ..
 		if !time.Now().Before(deadline) {
 			return fmt.Errorf("等待端口 %d 释放超时", port)
 		}
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("等待端口 %d 释放被取消: %w", port, err)
+		}
 		time.Sleep(200 * time.Millisecond)
 	}
 }
 
+// pathWithinDir 判断路径是否落在某个目录之内（大小写不敏感、按路径分隔符取边界）。
+// 旧实现用 strings.Contains，任何包含该片段的路径都会被误判为"自家"，
+// 进而被当成自己的进程强杀掉。
+func pathWithinDir(path, dir string) bool {
+	if path == "" || dir == "" {
+		return false
+	}
+	cleanDir := filepath.Clean(dir)
+	sep := string(filepath.Separator)
+	if !strings.HasSuffix(cleanDir, sep) {
+		cleanDir += sep
+	}
+	return len(path) >= len(cleanDir) &&
+		strings.EqualFold(path[:len(cleanDir)], cleanDir)
+}
+
 // splitPidsByDir 按可执行文件路径是否落在 dir 内，把监听 PID 分成自家与外部两组。
 func splitPidsByDir(pids []int, dir string) (owned, foreign []int) {
-	lower := strings.ToLower(dir)
 	for _, pid := range pids {
-		exe := strings.ToLower(process.GetExecutablePath(pid))
-		if dir != "" && exe != "" && strings.Contains(exe, lower) {
+		exe := process.GetExecutablePath(pid)
+		if pathWithinDir(exe, dir) {
 			owned = append(owned, pid)
 			continue
 		}
@@ -177,53 +245,18 @@ func topLevelAncestors(pids []int) []int {
 	return roots
 }
 
-// killOwnedInstance 清除端口占用者所属实例的整组进程。
-//
-// nginx 等服务是 master/worker 结构：占端口的 worker 被 /T 杀掉后，
-// master 会立即重生新 worker 抢回端口。因此必须沿父链向上找到
-// 同名根进程（master），从根整树击杀。全程只做一次进程快照，
-// 不逐 PID 查询路径（对受保护进程开销极大）。
-func killOwnedInstance(pid int) error {
-	procs, err := process.ListProcesses()
-	if err != nil {
-		return err
-	}
-	byPID := make(map[int]process.ProcInfo, len(procs))
-	for _, p := range procs {
-		byPID[p.PID] = p
-	}
-
-	self, ok := byPID[pid]
-	if !ok {
-		return fmt.Errorf("进程 %d 已退出", pid)
-	}
-
-	// 沿父链上爬到最顶层同名祖先（master）
-	root := pid
-	seen := map[int]struct{}{pid: {}}
-	for {
-		parent, ok := byPID[self.PPID]
-		if !ok || parent.Name != self.Name {
-			break
-		}
-		if _, dup := seen[parent.PID]; dup {
-			break
-		}
-		seen[parent.PID] = struct{}{}
-		root, self = parent.PID, parent
-	}
-
-	return killRootTree(root)
-}
-
 // killRootTree 从根进程整树强制终止，并确认整棵子树真的退出。
-func killRootTree(root int) error {
+//
+// nginx 等服务是 master/worker 结构：占端口的 worker 被杀后 master 会重生
+// 新 worker 抢回端口，因此调用方需先用 topLevelAncestors 沿父链找到同名根
+// 进程（master），再从根整树击杀。
+func killRootTree(ctx context.Context, root int) error {
 	cmd := exec.Command("taskkill", "/F", "/T", "/PID", strconv.Itoa(root))
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	_ = cmd.Run()
 
 	set := map[int]struct{}{root: {}}
-	if alive := waitProcessesExited(set, 5*time.Second); len(alive) > 0 {
+	if alive := waitExit(ctx, set, 5*time.Second); len(alive) > 0 {
 		return fmt.Errorf("残留进程 (PID %d) 未能终止", root)
 	}
 	return nil
@@ -277,47 +310,22 @@ func collectOwnedTargets(port int, ownDir string, selfPIDs ...int) map[int]struc
 //
 // 每轮都走真实扫描（scanPortPids 内已作废缓存）：刚执行过强杀，
 // 读到 2s TTL 内的陈旧快照会把已停成功的动作误判成仍在监听。
-func verifyStoppedByPort(port int, ownDir string, timeout time.Duration) []int {
+func verifyStoppedByPort(ctx context.Context, port int, ownDir string, timeout time.Duration) []int {
 	deadline := time.Now().Add(timeout)
 	for {
 		owned, _ := splitPidsByDir(scanPortPids(port), ownDir)
 		if len(owned) == 0 || time.Now().After(deadline) {
 			return owned
 		}
-		time.Sleep(200 * time.Millisecond)
-	}
-}
-
-// runStopCommand 执行服务自带的优雅停止命令（如 nginx -s stop / mysqladmin shutdown / redis-cli shutdown）。
-// 工作目录设为 workdir（为空则不设置），隐藏窗口，捕获 stderr/stdout 合并输出。
-// 失败时返回含输出的错误，便于上层决定是否走兜底强杀。调用方通常忽略此错误，
-// 因为优雅停止失败属正常情况（PID 文件丢失、端口被占、密码不符等），由后续 taskkill /F /T 兜底。
-func runStopCommand(exe string, args []string, workdir string) error {
-	if exe == "" {
-		return fmt.Errorf("可执行文件路径为空")
-	}
-	cmd := exec.Command(exe, args...)
-	if workdir != "" {
-		cmd.Dir = workdir
-	}
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("%s 优雅停止失败: %w, 输出: %s", filepath.Base(exe), err, strings.TrimSpace(string(out)))
-	}
-	return nil
-}
-
-// waitProcessesExited 等待 pids 全部退出，全部退出返回 nil，超时返回仍未退出的 PID 集合。
-func waitProcessesExited(pids map[int]struct{}, timeout time.Duration) map[int]struct{} {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if alive := alivePIDs(pids); len(alive) == 0 {
-			return nil
+		if err := ctx.Err(); err != nil {
+			return owned
 		}
-		time.Sleep(300 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return owned
+		case <-time.After(stopPollInterval):
+		}
 	}
-	return alivePIDs(pids)
 }
 
 func alivePIDs(pids map[int]struct{}) map[int]struct{} {
@@ -332,6 +340,11 @@ func alivePIDs(pids map[int]struct{}) map[int]struct{} {
 	}
 	return alive
 }
+
+// runStopCommand 与 waitProcessesExited 已下线：
+// 前者无 deadline 也无法分类失败原因（mysqladmin 阻塞即 Stop 永久挂起），
+// 后者忽略 ctx 且轮询粒度偏粗。替代实现见 stop_ladder.go 的
+// runStopCommandCtx / waitExit / runStopLadder。
 
 func pidList(pids map[int]struct{}) string {
 	parts := make([]string, 0, len(pids))

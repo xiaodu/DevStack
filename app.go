@@ -29,6 +29,7 @@ import (
 	"github.com/xiaodu/DevStack/internal/runtime"
 	"github.com/xiaodu/DevStack/internal/service"
 	"github.com/xiaodu/DevStack/internal/tray"
+	"github.com/xiaodu/DevStack/internal/www"
 )
 
 type App struct {
@@ -98,6 +99,9 @@ func registerProviders(cfg *config.Config, procMgr *process.Manager, resMgr *res
 	}
 	if provider.Get("php") == nil {
 		provider.NewPHPProvider(cfg, procMgr, resMgr)
+	}
+	if provider.Get("memcached") == nil {
+		provider.NewMemcachedProvider(cfg, procMgr)
 	}
 }
 
@@ -222,9 +226,11 @@ func NewApp() *App {
 		opStore.LogInfo("[INIT] 运行时管理器初始化完成, 已注册运行时数: %d", len(runtimes))
 
 		opStore.LogInfo("[INIT] 初始化项目管理器...")
-		projMgr = project.NewManager(installDir, "1.26.0", rtMgr, resMgr)
+		projMgr = project.NewManager(installDir, rtMgr, resMgr)
 		projMgr.SetServiceManager(svcMgr)
 		projMgr.SetRuntimeManager(rtMgr)
+		// 启动时把已有项目配置同步到全部已安装 nginx 版本，迁移历史上写错版本目录的站点
+		projMgr.SyncNginx()
 		projects := projMgr.List()
 		opStore.LogInfo("[INIT] 项目管理器初始化完成, 项目数: %d", len(projects))
 
@@ -254,7 +260,7 @@ func NewApp() *App {
 		// reinitManagers 补齐（见 SetResourceManager / registerProviders）。
 		svcMgr = service.NewManager(cfg, procMgr, nil, reactiveEng)
 		rtMgr = runtime.NewManager(cfg, procMgr, nil)
-		projMgr = project.NewManager("", "1.26.0", rtMgr, nil)
+		projMgr = project.NewManager("", rtMgr, nil)
 		envMgr = environment.NewManager("")
 		dlMgr = download.NewManager("")
 		stateStore = engine.NewStateStore("")
@@ -340,6 +346,26 @@ func (a *App) startup(ctx context.Context) {
 	if a.opStore != nil {
 		a.opStore.LogInfo("[STARTUP] Wails 应用启动完成, context 已设置")
 		a.opStore.LogDebug("[STARTUP] 当前安装目录: %s", a.cfg.Get().InstallDir)
+	}
+
+	// ── 默认站点：生成首页，并周期写入真实运行状态供页面展示 ──
+	if installDir := a.cfg.Get().InstallDir; installDir != "" {
+		if err := www.EnsureIndex(installDir); err != nil && a.opStore != nil {
+			a.opStore.LogWarn("[STARTUP] 生成默认站点首页失败: %v", err)
+		}
+		a.writeWWWStatus()
+		go func() {
+			ticker := time.NewTicker(10 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					a.writeWWWStatus()
+				}
+			}
+		}()
 	}
 
 	// ── 周期状态同步：外部杀进程 5s 内自动纠正 UI 状态，兼作事件丢失兜底 ──
@@ -505,6 +531,7 @@ func (a *App) OnOperationEnd(action string, ok bool, message string) {
 // ActivateEnvironment 激活指定环境：停旧的全部，启新的全部。
 // 全程在 envOpMu 内串行，配合 reconciler 的互斥锁，杜绝并发激活导致进程堆积。
 func (a *App) ActivateEnvironment(envID string) error {
+	defer a.writeWWWStatus()
 	a.envOpMu.Lock()
 	defer a.envOpMu.Unlock()
 
@@ -542,11 +569,17 @@ func (a *App) ActivateEnvironment(envID string) error {
 	if a.opStore != nil {
 		a.opStore.LogInfo("[API] 启动新环境 %q, 包含 %d 个组件", envID, len(target.Units))
 	}
-	return a.reconciler.Activate(oldEnv, target)
+	err = a.reconciler.Activate(oldEnv, target)
+	// 环境可能刚切换到另一个 nginx 版本：把站点配置同步到新版本目录并 reload
+	if err == nil && a.projMgr != nil {
+		a.projMgr.SyncNginx()
+	}
+	return err
 }
 
 // ActivateEnvironmentOnly 仅激活环境：切换 activeEnvironmentId 标记，不启动任何组件。
 func (a *App) ActivateEnvironmentOnly(envID string) error {
+	defer a.writeWWWStatus()
 	a.envOpMu.Lock()
 	defer a.envOpMu.Unlock()
 
@@ -564,6 +597,7 @@ func (a *App) ActivateEnvironmentOnly(envID string) error {
 
 // RunEnvironment 运行环境：启动环境内所有组件，不修改激活标记。
 func (a *App) RunEnvironment(envID string) error {
+	defer a.writeWWWStatus()
 	a.envOpMu.Lock()
 	defer a.envOpMu.Unlock()
 
@@ -577,11 +611,18 @@ func (a *App) RunEnvironment(envID string) error {
 	if err != nil {
 		return fmt.Errorf("环境 %q 未找到: %w", envID, err)
 	}
-	return a.reconciler.Run(target)
+	if err := a.reconciler.Run(target); err != nil {
+		return err
+	}
+	if a.projMgr != nil {
+		a.projMgr.SyncNginx()
+	}
+	return nil
 }
 
 // DeactivateEnvironment 停止当前激活的环境。
 func (a *App) DeactivateEnvironment() error {
+	defer a.writeWWWStatus()
 	a.envOpMu.Lock()
 	defer a.envOpMu.Unlock()
 
@@ -737,6 +778,103 @@ func (a *App) GetEnvironmentState() engine.EnvironmentState {
 	return state
 }
 
+// writeWWWStatus 把当前真实运行状态写入 www/devstack-status.json，
+// 默认首页读取它展示组件状态（静态页面无法直接查询后端）。
+func (a *App) writeWWWStatus() {
+	if a == nil || a.cfg == nil {
+		return
+	}
+	installDir := a.cfg.Get().InstallDir
+	if installDir == "" {
+		return
+	}
+
+	st := www.Status{UpdatedAt: time.Now().Format("2006-01-02 15:04:05")}
+
+	if a.envMgr != nil {
+		if id, err := a.getActiveEnvironmentID(); err == nil && id != "" {
+			st.Environment = id
+			if env, err := a.envMgr.Get(id); err == nil {
+				st.Environment = env.Name
+			}
+		}
+	}
+
+	if a.svcMgr != nil {
+		for _, s := range a.svcMgr.List() {
+			st.Services = append(st.Services, www.Component{
+				ID:        s.ID,
+				Name:      s.Name,
+				Version:   s.Version,
+				Status:    string(s.Status),
+				Installed: s.Installed,
+			})
+			if s.Kind == "nginx" && (st.NginxVersion == "" || s.Status == core.StatusRunning) {
+				st.NginxVersion = s.Version
+				st.NginxStatus = string(s.Status)
+			}
+		}
+	}
+
+	if a.rtMgr != nil {
+		for _, rt := range a.rtMgr.List() {
+			name := rt.Name
+			if name == "" {
+				name = strings.ToUpper(string(rt.Kind))
+			}
+			st.Runtimes = append(st.Runtimes, www.Component{
+				ID:        rt.ID,
+				Name:      name,
+				Version:   rt.Version,
+				Status:    string(rt.Status),
+				Installed: rt.Installed,
+			})
+		}
+	}
+
+	if a.projMgr != nil {
+		for _, p := range a.projMgr.List() {
+			st.Projects = append(st.Projects, www.Project{
+				Name:    p.Name,
+				Type:    string(p.Type),
+				Domain:  p.Domain,
+				URL:     projectAccessURL(p),
+				Root:    p.Root,
+				Enabled: p.Enabled,
+			})
+		}
+	}
+
+	if err := www.WriteStatus(installDir, st); err != nil && a.opStore != nil {
+		a.opStore.LogWarn("[WWW] 写入默认站点状态失败: %v", err)
+	}
+}
+
+func projectAccessURL(p core.Project) string {
+	host := strings.TrimSpace(p.Domain)
+	if host == "" {
+		host = "localhost"
+	}
+	if p.SSL {
+		port := p.HTTPSPort
+		if port <= 0 {
+			port = 443
+		}
+		if port == 443 {
+			return "https://" + host
+		}
+		return fmt.Sprintf("https://%s:%d", host, port)
+	}
+	port := p.Port
+	if port <= 0 {
+		port = 80
+	}
+	if port == 80 {
+		return "http://" + host
+	}
+	return fmt.Sprintf("http://%s:%d", host, port)
+}
+
 func (a *App) CreateEnvironment(env environment.Environment) (environment.Environment, error) {
 	if a.envMgr == nil {
 		return environment.Environment{}, fmt.Errorf("环境管理器未初始化")
@@ -851,6 +989,7 @@ func (a *App) GetServices() []core.ServiceInfo {
 }
 
 func (a *App) StartService(id string) error {
+	defer a.writeWWWStatus()
 	err := a.svcMgr.Start(id)
 	name := serviceNames[id]
 	if name == "" {
@@ -865,6 +1004,7 @@ func (a *App) StartService(id string) error {
 }
 
 func (a *App) StopService(id string) error {
+	defer a.writeWWWStatus()
 	err := a.svcMgr.Stop(id)
 	name := serviceNames[id]
 	if name == "" {
@@ -879,6 +1019,7 @@ func (a *App) StopService(id string) error {
 }
 
 func (a *App) RestartService(id string) error {
+	defer a.writeWWWStatus()
 	err := a.svcMgr.Restart(id)
 	name := serviceNames[id]
 	if name == "" {
@@ -1004,6 +1145,7 @@ func (a *App) GetRuntimes() []core.RuntimeInfo {
 }
 
 func (a *App) StartRuntime(id string) error {
+	defer a.writeWWWStatus()
 	if a.opStore != nil {
 		a.opStore.LogInfo("[API] StartRuntime 调用, id: %q", id)
 	}
@@ -1024,6 +1166,7 @@ func (a *App) StartRuntime(id string) error {
 }
 
 func (a *App) StopRuntime(id string) error {
+	defer a.writeWWWStatus()
 	if a.opStore != nil {
 		a.opStore.LogInfo("[API] StopRuntime 调用, id: %q", id)
 	}
@@ -1104,6 +1247,7 @@ func (a *App) GetProjects() []core.Project {
 }
 
 func (a *App) CreateProject(p core.Project) (*core.Project, error) {
+	defer a.writeWWWStatus()
 	a.hydrateProjectVersions(&p)
 	result, err := a.projMgr.Create(p)
 	if err != nil {
@@ -1115,6 +1259,7 @@ func (a *App) CreateProject(p core.Project) (*core.Project, error) {
 }
 
 func (a *App) UpdateProject(p core.Project) error {
+	defer a.writeWWWStatus()
 	a.hydrateProjectVersions(&p)
 	err := a.projMgr.Update(p)
 	if err != nil {
@@ -1126,6 +1271,7 @@ func (a *App) UpdateProject(p core.Project) error {
 }
 
 func (a *App) DeleteProject(id string) error {
+	defer a.writeWWWStatus()
 	projects := a.projMgr.List()
 	var name, domain string
 	for _, p := range projects {
@@ -1144,6 +1290,7 @@ func (a *App) DeleteProject(id string) error {
 }
 
 func (a *App) ToggleProject(id string) error {
+	defer a.writeWWWStatus()
 	projects := a.projMgr.List()
 	var name, domain string
 	var enabled bool
@@ -1918,9 +2065,10 @@ func (a *App) reinitManagers(installDir string) error {
 	registerProviders(a.cfg, a.procMgr, resMgr)
 
 	// 重新初始化项目管理器
-	a.projMgr = project.NewManager(installDir, "1.26.0", a.rtMgr, resMgr)
+	a.projMgr = project.NewManager(installDir, a.rtMgr, resMgr)
 	a.projMgr.SetServiceManager(a.svcMgr)
 	a.projMgr.SetRuntimeManager(a.rtMgr)
+	a.projMgr.SyncNginx()
 
 	// 重新初始化环境管理器
 	a.envMgr = environment.NewManager(installDir)

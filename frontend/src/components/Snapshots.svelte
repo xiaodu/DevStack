@@ -2,24 +2,33 @@
 import { onMount } from 'svelte'
 import { api } from '../lib/api'
 import { safeInvoke } from '../lib/safeInvoke'
-import { addToast, refreshSignal } from '../lib/stores'
+import { refreshSignal } from '../lib/stores'
 
 let snapshots = $state<string[]>([])
 let loading = $state(true)
+let loadError = $state(false)
 let busy = $state(false)
 let confirmRollbackId = $state<string | null>(null)
 let confirmDeleteId = $state<string | null>(null)
 
 async function load() {
   loading = true
-  await safeInvoke(
-    'loadSnapshots',
-    async () => {
-      snapshots = await api.getSnapshots()
-    },
-    { errorPrefix: '加载快照失败' },
-  )
-  loading = false
+  loadError = false
+  try {
+    await safeInvoke(
+      'loadSnapshots',
+      async () => {
+        const result = await api.getSnapshots()
+        // 后端历史版本会把空列表序列化成 null，这里统一兜底成数组
+        snapshots = Array.isArray(result) ? result : []
+      },
+      { errorPrefix: '加载快照失败', rethrow: true },
+    )
+  } catch {
+    loadError = true
+  } finally {
+    loading = false
+  }
 }
 
 async function createSnapshot() {
@@ -99,14 +108,29 @@ onMount(load)
   </div>
 
   {#if loading}
-    <div class="text-center py-16 text-base-content/60">加载快照中...</div>
+    <div class="card bg-base-100 border border-base-300">
+      <div class="card-body items-center justify-center py-16 gap-3 text-base-content/60">
+        <span class="loading loading-spinner loading-lg text-primary"></span>
+        <p class="text-sm">正在加载快照...</p>
+      </div>
+    </div>
+  {:else if loadError}
+    <div class="card bg-base-100 border border-error/40">
+      <div class="card-body items-center justify-center py-16 gap-2">
+        <p class="text-base font-semibold text-error">快照列表加载失败</p>
+        <p class="text-xs text-base-content/60">请查看日志后重试，失败详情已通过提示栏显示</p>
+        <button class="btn btn-sm btn-outline mt-3" onclick={load}>重新加载</button>
+      </div>
+    </div>
   {:else if snapshots.length === 0}
-    <div class="flex flex-col items-center justify-center py-16 text-base-content/60 gap-2">
-      <div class="text-4xl opacity-50">📸</div>
-      <p class="text-base font-semibold text-base-content">暂无快照</p>
-      <p class="text-xs">快照可以保存当前所有服务的运行状态和配置</p>
-      <p class="text-xs">创建快照后，您可以随时回滚到该状态</p>
-      <div class="mt-4"><button class="btn btn-primary" onclick={createSnapshot} disabled={busy}>{busy ? '创建中...' : '创建第一个快照'}</button></div>
+    <div class="card bg-base-100 border border-base-300">
+      <div class="card-body items-center justify-center py-16 gap-2 text-base-content/60">
+        <div class="text-4xl opacity-50">📸</div>
+        <p class="text-base font-semibold text-base-content">暂无快照</p>
+        <p class="text-xs">快照可以保存当前所有组件的运行状态和配置</p>
+        <p class="text-xs">创建快照后，您可以随时回滚到该状态</p>
+        <div class="mt-4"><button class="btn btn-primary" onclick={createSnapshot} disabled={busy}>{busy ? '创建中...' : '创建第一个快照'}</button></div>
+      </div>
     </div>
   {:else}
     <div class="flex flex-col gap-2.5">
@@ -131,7 +155,7 @@ onMount(load)
   <div class="modal-box">
     <h3 class="font-bold text-lg">确认回滚</h3>
     <p class="py-2 text-sm text-base-content/70">确定要回滚到快照 <code class="bg-base-300 px-1.5 py-0.5 rounded text-xs font-mono">{confirmRollbackId}</code> 吗？</p>
-    <p class="text-xs text-warning">当前运行中的服务状态将被覆盖。</p>
+    <p class="text-xs text-warning">当前运行中的组件状态将被覆盖。</p>
     <div class="modal-action">
       <button class="btn btn-ghost" onclick={() => confirmRollbackId = null}>取消</button>
       <button class="btn btn-error" onclick={doRollback} disabled={busy}>确认回滚</button>

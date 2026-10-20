@@ -92,8 +92,11 @@ func (sm *SnapshotManager) ListSnapshots(ctx context.Context) ([]string, error) 
 // Go 的 sync.Mutex 不可重入，持锁路径上一律走这些 *Locked 版本，
 // 否则会自我死锁（TakeSnapshot → cleanupOldSnapshots → ListSnapshots 就是这么卡的）。
 func (sm *SnapshotManager) listLocked() ([]string, error) {
+	// 空列表必须返回非 nil 切片：encoding/json 会把 nil 序列化成 null，
+	// 前端拿到的就不是数组而是 null（曾导致快照页停在“加载中”）。
+	snapshots := make([]string, 0)
 	if !sm.exists(sm.baseDir) {
-		return nil, nil
+		return snapshots, nil
 	}
 
 	entries, err := os.ReadDir(sm.baseDir)
@@ -101,7 +104,6 @@ func (sm *SnapshotManager) listLocked() ([]string, error) {
 		return nil, fmt.Errorf("读取快照目录失败: %w", err)
 	}
 
-	var snapshots []string
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue

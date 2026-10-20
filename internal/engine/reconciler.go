@@ -7,7 +7,6 @@ import (
 	"sync"
 
 	"github.com/xiaodu/DevStack/internal/environment"
-	"github.com/xiaodu/DevStack/internal/graph"
 	"github.com/xiaodu/DevStack/internal/project"
 	"github.com/xiaodu/DevStack/internal/runtime"
 	"github.com/xiaodu/DevStack/internal/service"
@@ -18,7 +17,6 @@ type ReconcilerImpl struct {
 	svcMgr      *service.Manager
 	projMgr     *project.Manager
 	rtMgr       *runtime.Manager
-	resolver    *graph.Resolver
 	snapshotMgr *SnapshotManager
 	reporter    OperationReporter
 	mu          sync.Mutex
@@ -30,7 +28,6 @@ func NewReconciler(stateStore *StateStore, svcMgr *service.Manager, projMgr *pro
 		svcMgr:      svcMgr,
 		projMgr:     projMgr,
 		rtMgr:       rtMgr,
-		resolver:    graph.NewResolver(),
 		snapshotMgr: NewSnapshotManager(stateStore.dataDir),
 	}
 }

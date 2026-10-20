@@ -71,8 +71,17 @@ useDownloadPhase((data) => {
 // 当前激活的环境 ID
 let activeEnvID = $derived(env.activeProfileID || '')
 let hasRunningServices = $derived(
-  Object.values(env.services || {}).some((s) => s.state === 'running') ||
-    Object.values(env.runtimes || {}).some((r) => r.state === 'running'),
+  Object.values(env.services || {}).some((s: any) => s.state === 'running') ||
+    Object.values(env.runtimes || {}).some((r: any) => r.state === 'running'),
+)
+let activeEnv = $derived(environments.find((e) => e.id === activeEnvID) || null)
+let runningCount = $derived(
+  Object.values(env.services || {}).filter((s: any) => s.state === 'running').length +
+    Object.values(env.runtimes || {}).filter((r: any) => r.state === 'running').length,
+)
+let totalComponents = $derived(environments.reduce((sum, e) => sum + unitsOf(e).length, 0))
+let totalMissing = $derived(
+  installStatusReady ? environments.reduce((sum, e) => sum + checkEnvInstalled(e).missing.length, 0) : 0,
 )
 
 async function withTimeout(promise: Promise<any>, timeoutMs = 5000, fallback: any = null) {
@@ -134,17 +143,22 @@ async function load() {
   await refreshInstallStatus()
 }
 
+function unitsOf(env: any) {
+  const units = env?.units
+  return units ? (Array.isArray(units) ? units : Object.values(units)) : []
+}
+
 // 使用后端 installStatus 检查组件安装状态
 function checkEnvInstalled(env: any) {
-  const units = env.units ? (Array.isArray(env.units) ? env.units : Object.values(env.units)) : []
+  const units = unitsOf(env)
 
-  const allInstalled = []
+  const installed = []
   const missing = []
 
   for (const u of units) {
     const key = `${u.kind} ${u.version}`
     if (installStatus[key]) {
-      allInstalled.push(key)
+      installed.push(key)
     } else {
       missing.push(key)
     }
@@ -153,7 +167,8 @@ function checkEnvInstalled(env: any) {
   return {
     allInstalled: missing.length === 0,
     missing,
-    total: allInstalled.length + missing.length,
+    total: installed.length + missing.length,
+    installedCount: installed.length,
   }
 }
 
@@ -311,10 +326,21 @@ function cancelInstall() {
   addToast('已取消安装', 'warning', 3500)
 }
 
+const componentMeta: Record<string, { name: string; icon: string; color: string }> = {
+  nginx: { name: 'Nginx', icon: 'icon-nginx', color: '#009639' },
+  mysql: { name: 'MySQL', icon: 'icon-mysql', color: '#4479A1' },
+  redis: { name: 'Redis', icon: 'icon-redis', color: '#DC382D' },
+  memcached: { name: 'Memcached', icon: '', color: '#5B8C5A' },
+  php: { name: 'PHP', icon: 'icon-php1', color: '#777BB4' },
+  node: { name: 'Node.js', icon: 'icon-Nodejs', color: '#339933' },
+  python: { name: 'Python', icon: 'icon-python', color: '#3776AB' },
+}
+
 const unitNames: Record<string, string> = {
   nginx: 'Nginx',
   mysql: 'MySQL',
   redis: 'Redis',
+  memcached: 'Memcached',
   php: 'PHP',
   node: 'Node.js',
   python: 'Python',
@@ -465,16 +491,6 @@ function toggleMore(kind) {
   expandedVersions = { ...expandedVersions, [kind]: !expandedVersions[kind] }
 }
 
-// 各软件对应的 iconfont 类名
-const iconMap = {
-  nginx: 'icon-nginx',
-  mysql: 'icon-mysql',
-  redis: 'icon-redis',
-  php: 'icon-php1',
-  node: 'icon-Nodejs',
-  python: 'icon-python',
-}
-
 const unsub = refreshSignal.subscribe(() => load())
 onMount(() => {
   load()
@@ -483,13 +499,48 @@ onMount(() => {
 </script>
 
 <div class="flex flex-col gap-5">
-  <div class="flex justify-between items-center">
-    <div>
-      <h1 class="text-xl font-bold">环境管理</h1>
-      <p class="text-sm text-base-content/60 mt-1">管理环境模板与各环境的组件安装状态</p>
-    </div>
-    <div class="flex gap-2">
-      <button class="btn btn-primary btn-sm" onclick={openCreateEnv} disabled={busy}>新建环境</button>
+  <!-- 当前环境概览 -->
+  <div class="relative overflow-hidden rounded-2xl border border-base-300 bg-base-100">
+    <div class="pointer-events-none absolute inset-0 bg-gradient-to-r from-primary/[0.06] via-transparent to-success/[0.06]"></div>
+    <div class="relative flex flex-wrap items-center gap-4 px-5 py-4">
+      <div class="relative flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl {activeEnvID || hasRunningServices ? 'bg-success/10 text-success' : 'bg-base-200 text-base-content/35'}">
+        {#if activeEnvID || hasRunningServices}
+          <span class="absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full border-2 border-base-100 bg-success"></span>
+        {/if}
+        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3 9 5-9 5-9-5 9-5Z"/><path d="m3 13 9 5 9-5"/><path d="m3 17 9 5 9-5"/></svg>
+      </div>
+      <div class="min-w-0 flex-1">
+        <div class="text-[11px] font-medium uppercase tracking-[0.14em] text-base-content/40">当前环境</div>
+        {#if envLoading}
+          <div class="mt-1 flex items-center gap-2 text-sm text-base-content/50">
+            <span class="loading loading-dots loading-xs text-primary"></span>正在读取环境状态
+          </div>
+        {:else if activeEnvID || hasRunningServices}
+          <div class="mt-0.5 flex flex-wrap items-center gap-2">
+            <span class="truncate text-lg font-semibold">{activeEnv?.name || (activeEnvID ? '自定义环境' : '基于项目推导')}</span>
+            {#if hasRunningServices}
+              <span class="inline-flex items-center gap-1.5 rounded-full bg-success/10 px-2 py-0.5 text-[11px] font-medium text-success">
+                <span class="h-1.5 w-1.5 rounded-full bg-success"></span>
+                {runningCount} 个组件运行中
+              </span>
+            {:else}
+              <span class="rounded-full bg-base-200 px-2 py-0.5 text-[11px] text-base-content/50">已停止</span>
+            {/if}
+          </div>
+          <p class="mt-0.5 text-xs text-base-content/45">激活的环境决定面板与状态栏展示的组件集合</p>
+        {:else}
+          <div class="mt-0.5 text-lg font-semibold text-base-content/45">未激活环境</div>
+          <p class="mt-0.5 text-xs text-base-content/45">从下方选择一套模板，点击「激活并运行」即可启动整套环境</p>
+        {/if}
+      </div>
+      <div class="flex items-center gap-2">
+        {#if activeEnvID || hasRunningServices}
+          <button class="btn btn-sm btn-outline gap-1.5" onclick={deactivateCurrent} disabled={$operation.active || busy}>
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>
+            停止环境
+          </button>
+        {/if}
+      </div>
     </div>
   </div>
 
@@ -503,133 +554,183 @@ onMount(() => {
     </div>
   {/if}
 
-  <!-- 当前环境操作栏 -->
-  <div class="flex items-center justify-between px-4 py-3 bg-base-100 border border-base-300 rounded-lg">
-    <div class="flex items-center gap-3">
-      {#if envLoading}
-        <span class="text-sm text-base-content/60">加载中...</span>
-      {:else if activeEnvID}
-        <span class="w-2 h-2 rounded-full bg-success"></span>
-        <span class="text-sm">
-          当前环境：
-          <span class="font-semibold text-primary">
-            {environments.find((e) => e.id === activeEnvID)?.name || '自定义环境'}
-          </span>
-        </span>
-      {:else if hasRunningServices}
-        <span class="w-2 h-2 rounded-full bg-success"></span>
-        <span class="text-sm">当前环境：<span class="font-semibold">基于项目推导</span></span>
-      {:else}
-        <span class="w-2 h-2 rounded-full bg-base-content/30"></span>
-        <span class="text-sm text-base-content/60">未激活环境</span>
-      {/if}
+  <!-- 模板工具栏 -->
+  <div class="flex flex-wrap items-end justify-between gap-3">
+    <div>
+      <h2 class="text-base font-semibold">环境模板</h2>
+      <p class="mt-0.5 text-xs text-base-content/45">组合软件版本并一键激活，多个项目可共享同一套环境</p>
     </div>
-    <div class="flex gap-2">
-      {#if activeEnvID || hasRunningServices}
-        <button class="btn btn-sm btn-outline" onclick={deactivateCurrent} disabled={$operation.active || busy}>
-          停止环境
-        </button>
+    <div class="flex flex-wrap items-center gap-2">
+      <span class="inline-flex items-center gap-1.5 rounded-lg border border-base-300 bg-base-100 px-2.5 py-1 text-[11px] text-base-content/55">
+        {environments.length} 个模板
+      </span>
+      <span class="inline-flex items-center gap-1.5 rounded-lg border border-base-300 bg-base-100 px-2.5 py-1 text-[11px] text-base-content/55">
+        {totalComponents} 个组件
+      </span>
+      {#if installStatusReady && totalMissing > 0}
+        <span class="inline-flex items-center gap-1.5 rounded-lg border border-warning/30 bg-warning/10 px-2.5 py-1 text-[11px] font-medium text-warning">待安装 {totalMissing} 项</span>
+      {:else if installStatusReady && environments.length > 0}
+        <span class="inline-flex items-center gap-1.5 rounded-lg border border-success/30 bg-success/10 px-2.5 py-1 text-[11px] font-medium text-success">全部就绪</span>
       {/if}
+      <button class="btn btn-primary btn-sm gap-1.5" onclick={openCreateEnv} disabled={busy}>
+        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+        新建环境
+      </button>
     </div>
   </div>
 
   {#if envsLoading}
-    <div class="text-center py-16 text-base-content/60">加载环境中...</div>
+    <div class="grid grid-cols-[repeat(auto-fill,minmax(340px,1fr))] gap-4">
+      {#each [1, 2, 3] as _}
+        <div class="rounded-2xl border border-base-300 bg-base-100 p-5">
+          <div class="flex items-start gap-3">
+            <div class="h-10 w-10 animate-pulse rounded-xl bg-base-200"></div>
+            <div class="flex-1 space-y-2">
+              <div class="h-3 w-2/5 animate-pulse rounded bg-base-200"></div>
+              <div class="h-2 w-4/5 animate-pulse rounded bg-base-200"></div>
+            </div>
+          </div>
+          <div class="mt-6 flex gap-2">
+            <div class="h-6 w-24 animate-pulse rounded-lg bg-base-200"></div>
+            <div class="h-6 w-20 animate-pulse rounded-lg bg-base-200"></div>
+            <div class="h-6 w-28 animate-pulse rounded-lg bg-base-200"></div>
+          </div>
+          <div class="mt-8 h-1 w-full animate-pulse rounded bg-base-200"></div>
+        </div>
+      {/each}
+    </div>
   {:else if environments.length === 0 && !envsError}
-    <div class="flex flex-col items-center justify-center py-16 text-base-content/60 gap-2">
-      <p class="text-base font-semibold">暂无环境</p>
-      <p class="text-sm">新建一个环境，组合不同版本的软件和运行时</p>
-      <p class="text-xs text-base-content/50">多个项目可共享同一个环境</p>
-      <div class="mt-4"><button class="btn btn-primary btn-sm" onclick={openCreateEnv} disabled={busy}>新建第一个环境</button></div>
+    <div class="flex flex-col items-center justify-center rounded-2xl border border-dashed border-base-300 bg-base-100/60 px-6 py-16 text-center">
+      <div class="flex h-14 w-14 items-center justify-center rounded-2xl bg-base-200 text-base-content/30">
+        <svg xmlns="http://www.w3.org/2000/svg" class="h-7 w-7" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3 9 5-9 5-9-5 9-5Z"/><path d="m3 13 9 5 9-5"/><path d="m3 17 9 5 9-5"/></svg>
+      </div>
+      <p class="mt-4 text-sm font-semibold">还没有环境模板</p>
+      <p class="mt-1 max-w-sm text-xs leading-relaxed text-base-content/45">把常用的软件版本组合保存为模板，之后即可一键切换整套开发环境</p>
+      <button class="btn btn-primary btn-sm mt-5 gap-1.5" onclick={openCreateEnv} disabled={busy}>
+        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+        新建第一个环境
+      </button>
     </div>
   {:else}
-    <div class="grid grid-cols-[repeat(auto-fill,minmax(320px,1fr))] gap-4">
+    <div class="grid grid-cols-[repeat(auto-fill,minmax(340px,1fr))] gap-4">
       {#each environments as env (env.id)}
         {@const isActive = activeEnvID === env.id}
         {@const installCheck = checkEnvInstalled(env)}
-        {@const envUnits = env.units ? (Array.isArray(env.units) ? env.units : Object.values(env.units)) : []}
-        <div class="card bg-base-100 border border-base-300 overflow-hidden transition-all hover:border-primary hover:-translate-y-0.5 {isActive ? 'border-l-4 border-l-success border-primary shadow-md' : ''} {env.isBuiltin ? 'bg-gradient-to-br from-base-100 to-base-200' : ''}">
+        {@const envUnits = unitsOf(env)}
+        <article class="group relative flex flex-col overflow-hidden rounded-2xl border bg-base-100 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-base-content/5 {isActive ? 'border-primary/40 shadow-md shadow-primary/5' : 'border-base-300 hover:border-primary/30'}">
+          <div class="h-1 w-full {isActive ? 'bg-gradient-to-r from-primary via-primary to-success' : 'bg-transparent'}"></div>
+
           <!-- 卡片头部 -->
-          <div class="px-4 pt-4 pb-3">
-            <div class="min-w-0">
-              <div class="text-[15px] font-semibold flex items-center gap-1.5">
-                {#if env.isBuiltin}<span class="text-xs text-base-content/40 font-normal shrink-0">预设</span>{/if}
-                <span class="truncate">{env.name}</span>
-              </div>
-              {#if env.description}
-                <div class="text-xs text-base-content/60 mt-1 leading-relaxed">{env.description}</div>
-              {/if}
-            </div>
-          </div>
-
-          <!-- 卡片内容：组件摘要 + 安装状态 -->
-          <div class="px-4 pb-3">
-            <div class="text-xs bg-base-200 rounded-lg overflow-hidden min-h-[40px]">
-              {#if envUnits.length === 0}
-                <div class="px-3 py-2.5"><span class="text-base-content/50">空环境</span></div>
+          <div class="flex items-start gap-3 px-5 pb-3 pt-3.5">
+            <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl {isActive ? 'bg-primary text-primary-content' : env.isBuiltin ? 'bg-primary/10 text-primary' : 'bg-base-200 text-base-content/45'}">
+              {#if env.isBuiltin}
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3 2.7 5.5 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.8 1-6.1-4.4-4.3 6.1-.9L12 3Z"/></svg>
               {:else}
-                <div class="px-3 py-2.5 flex flex-wrap gap-x-4 gap-y-1.5">
-                  {#each envUnits as u}
-                    <span class="inline-flex items-center gap-1.5">
-                      {#if iconMap[u.kind]}
-                        <span class="iconfont text-lg {iconMap[u.kind]}"></span>
-                      {:else}
-                        <span class="w-[18px] h-[18px] rounded-full bg-base-content/20 flex items-center justify-center text-[10px] font-bold text-base-content/50">{u.kind ? u.kind.charAt(0).toUpperCase() : '?'}</span>
-                      {/if}
-                      <span class="text-base-content/70">{unitNames[u.kind] || u.kind || '?'}</span>
-                      <span class="text-base-content/40 font-mono">{u.version}</span>
-                    </span>
-                  {/each}
-                </div>
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3 9 5-9 5-9-5 9-5Z"/><path d="m3 13 9 5 9-5"/><path d="m3 17 9 5 9-5"/></svg>
               {/if}
-              {#if installStatusReady && installCheck.total > 0}
-                <div class="px-3 py-1.5 border-t border-base-300/50 flex items-center gap-1.5">
-                  {#if installCheck.allInstalled}
-                    <span class="text-success">✓ 全部已安装</span>
-                  {:else}
-                    <span class="text-warning">⚠ {installCheck.missing.length} 项未安装: {installCheck.missing.slice(0, 3).join('，')}{installCheck.missing.length > 3 ? '...' : ''}</span>
-                  {/if}
-                </div>
-              {:else if !installStatusReady}
-                <div class="px-3 py-1.5 border-t border-base-300/50 flex items-center gap-1.5">
-                  <span class="loading loading-dots loading-xs text-primary"></span>
-                  <span class="text-base-content/40">检查中...</span>
-                </div>
-              {/if}
+            </div>
+            <div class="min-w-0 flex-1">
+              <div class="flex items-center gap-1.5">
+                <h3 class="min-w-0 truncate text-[15px] font-semibold" title={env.name}>{env.name}</h3>
+                {#if isActive}
+                  <span class="shrink-0 rounded-full bg-success/10 px-2 py-0.5 text-[10px] font-medium text-success">使用中</span>
+                {:else if env.isBuiltin}
+                  <span class="shrink-0 rounded-full bg-base-200 px-2 py-0.5 text-[10px] text-base-content/45">预设</span>
+                {/if}
+              </div>
+              <p class="mt-1 line-clamp-2 text-xs leading-relaxed text-base-content/50">{env.description || '自定义环境模板'}</p>
+            </div>
+            <div class="flex shrink-0 items-center gap-0.5 opacity-50 transition-opacity group-hover:opacity-100">
+              <button class="flex h-7 w-7 items-center justify-center rounded-lg text-base-content/45 transition-colors hover:bg-base-200 hover:text-base-content disabled:opacity-40" onclick={() => openEditEnv(env)} disabled={$operation.active || busy} title="编辑环境">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5H6a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-5"/><path d="m18.4 2.6 3 3L11 16H8v-3L18.4 2.6Z"/></svg>
+              </button>
+              <button class="flex h-7 w-7 items-center justify-center rounded-lg text-base-content/45 transition-colors hover:bg-error/10 hover:text-error disabled:opacity-40" onclick={() => confirmDeleteEnvId = env.id} disabled={$operation.active || busy} title="删除环境">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M19 7l-.867 12.142A2 2 0 0 1 16.138 21H7.862a2 2 0 0 1-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v3M4 7h16"/></svg>
+              </button>
             </div>
           </div>
 
-          <!-- 卡片底部：操作按钮 -->
-          <div class="px-4 pb-4 pt-1 flex gap-2 items-center flex-wrap">
-            {#if !installStatusReady}
-              <button class="btn btn-sm btn-disabled" disabled>检查中...</button>
-            {:else if isActive}
-              <span class="text-xs text-success font-medium px-1">当前在用</span>
-              {#if !installCheck.allInstalled}
-                {#if hasRunningServices}
-                  <!-- 运行中的环境不能装组件，给出「先停止」的入口，安装按钮暂不可用 -->
-                  <button class="btn btn-sm btn-outline" onclick={deactivateCurrent} disabled={$operation.active || busy}>停止环境</button>
-                  <button class="btn btn-sm btn-warning" disabled title="组件正在运行，请先停止环境再安装">安装</button>
-                {:else}
-                  <button class="btn btn-sm btn-warning" onclick={() => installEnvComponents(env)} disabled={$operation.active || busy}>安装缺失组件</button>
-                {/if}
-              {/if}
-            {:else if installCheck.allInstalled}
-              <button class="btn btn-sm btn-ghost" onclick={() => activateEnvOnly(env)} disabled={$operation.active || busy} title="仅切换当前环境标记，不启动组件">激活</button>
-              <button class="btn btn-sm btn-primary" onclick={() => activateEnv(env)} disabled={$operation.active || busy} title="切换标记并启动全部组件">激活并运行</button>
+          <!-- 组件清单 -->
+          <div class="flex-1 px-5 pb-4">
+            <div class="mb-2 flex items-center justify-between">
+              <span class="text-[10px] font-medium uppercase tracking-wider text-base-content/35">组件清单</span>
+              <span class="font-mono text-[10px] text-base-content/35">{envUnits.length}</span>
+            </div>
+            {#if envUnits.length === 0}
+              <div class="rounded-xl border border-dashed border-base-300 px-3 py-5 text-center text-xs text-base-content/35">空环境 · 点击编辑添加组件</div>
             {:else}
-              <!-- 组件未齐全时不提供「激活」，避免激活一个跑不起来的环境 -->
-              <button class="btn btn-sm btn-warning" onclick={() => installEnvComponents(env)} disabled={$operation.active || busy}>安装</button>
+              <div class="flex flex-wrap gap-1.5">
+                {#each envUnits as u (u.kind)}
+                  {@const meta = componentMeta[u.kind]}
+                  {@const unitInstalled = installStatus[u.kind + ' ' + u.version]}
+                  <span class="inline-flex items-center gap-1.5 rounded-lg border px-2 py-1 {installStatusReady && !unitInstalled ? 'border-warning/30 bg-warning/5' : 'border-base-300/70 bg-base-200/50'}">
+                    {#if meta?.icon}
+                      <span class="iconfont text-[15px] leading-none" style="color:{meta.color}"></span>
+                    {:else}
+                      <span class="flex h-4 w-4 items-center justify-center rounded-full text-[9px] font-bold text-white" style="background:{meta?.color || '#94a3b8'}">{(meta?.name || u.kind || '?').charAt(0)}</span>
+                    {/if}
+                    <span class="text-[11px] font-medium text-base-content/75">{meta?.name || unitNames[u.kind] || u.kind}</span>
+                    <span class="font-mono text-[10px] text-base-content/40">{u.version}</span>
+                    {#if installStatusReady}
+                      {#if unitInstalled}
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 text-success" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m5 13 4 4L19 7"/></svg>
+                      {:else}
+                        <span class="h-1.5 w-1.5 rounded-full bg-warning"></span>
+                      {/if}
+                    {/if}
+                  </span>
+                {/each}
+              </div>
             {/if}
-            <div class="flex-1"></div>
-            <button class="btn btn-sm btn-ghost btn-square" onclick={() => openEditEnv(env)} disabled={$operation.active || busy} title="编辑环境">
-              <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg>
-            </button>
-            <button class="btn btn-sm btn-ghost btn-square text-base-content/40 hover:text-error" onclick={() => confirmDeleteEnvId = env.id} disabled={$operation.active || busy} title="删除环境">
-              <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
-            </button>
           </div>
-        </div>
+
+          <!-- 底部：安装就绪度 + 操作 -->
+          <div class="mt-auto flex flex-wrap items-center gap-2 border-t border-base-300 bg-base-200/30 px-5 py-3">
+            <div class="flex min-w-0 items-center gap-2">
+              {#if !installStatusReady}
+                <span class="loading loading-spinner loading-xs text-primary"></span>
+                <span class="text-xs text-base-content/40">检查组件</span>
+              {:else if envUnits.length === 0}
+                <span class="text-xs text-base-content/40">尚未配置组件</span>
+              {:else if installCheck.allInstalled}
+                <span class="flex h-5 w-5 items-center justify-center rounded-full bg-success/10 text-success">
+                  <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m5 13 4 4L19 7"/></svg>
+                </span>
+                <span class="text-xs font-medium text-success">全部就绪</span>
+                <span class="font-mono text-[10px] text-base-content/35">{installCheck.installedCount}/{installCheck.total}</span>
+              {:else}
+                <span class="flex h-5 w-5 items-center justify-center rounded-full bg-warning/10 text-warning">
+                  <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4m0 4h.01M10.3 4.3 2.6 18a2 2 0 0 0 1.7 3h15.4a2 2 0 0 0 1.7-3L13.7 4.3a2 2 0 0 0-3.4 0Z"/></svg>
+                </span>
+                <div class="min-w-0">
+                  <div class="text-xs font-medium text-warning">缺 {installCheck.missing.length} 项</div>
+                  <div class="truncate text-[10px] text-base-content/35">{installCheck.missing.slice(0, 2).join(' · ')}{installCheck.missing.length > 2 ? ' …' : ''}</div>
+                </div>
+              {/if}
+            </div>
+            <div class="ml-auto flex flex-wrap items-center justify-end gap-1.5">
+              {#if !installStatusReady}
+                <button class="btn btn-sm btn-disabled" disabled>检查中…</button>
+              {:else if isActive}
+                {#if !installCheck.allInstalled}
+                  {#if hasRunningServices}
+                    <button class="btn btn-xs btn-outline" onclick={deactivateCurrent} disabled={$operation.active || busy}>停止环境</button>
+                    <button class="btn btn-xs btn-warning" disabled title="组件正在运行，请先停止环境再安装">安装</button>
+                  {:else}
+                    <button class="btn btn-sm btn-warning" onclick={() => installEnvComponents(env)} disabled={$operation.active || busy}>安装缺失组件</button>
+                  {/if}
+                {:else}
+                  <span class="text-[11px] text-base-content/40">已激活</span>
+                {/if}
+              {:else if installCheck.allInstalled}
+                <button class="btn btn-xs btn-ghost" onclick={() => activateEnvOnly(env)} disabled={$operation.active || busy} title="仅切换当前环境标记，不启动组件">仅激活</button>
+                <button class="btn btn-sm btn-primary" onclick={() => activateEnv(env)} disabled={$operation.active || busy} title="切换标记并启动全部组件">激活并运行</button>
+              {:else}
+                <button class="btn btn-sm btn-warning" onclick={() => installEnvComponents(env)} disabled={$operation.active || busy}>安装缺失组件</button>
+              {/if}
+            </div>
+          </div>
+        </article>
       {/each}
     </div>
   {/if}

@@ -53,10 +53,10 @@ type Service struct {
 	Port     int               // 服务监听端口（provider 注册时提供；0 表示未知）
 
 	// 运行时状态
-	PID   int          // 进程 PID
-	State ServiceState // 当前状态
-	Error error        // 最后一次错误
-	Started time.Time  // 启动时间
+	PID     int          // 进程 PID
+	State   ServiceState // 当前状态
+	Error   error        // 最后一次错误
+	Started time.Time    // 启动时间
 
 	// 依赖关系
 	DependsOn []string // 依赖的服务名列表
@@ -458,10 +458,10 @@ func (e *Engine) inferDependencies(name string) []string {
 
 // containsCI 不区分大小写的字符串包含检查
 func containsCI(s, substr string) bool {
-	return len(s) >= len(substr) && 
-		(s == substr || 
-		 len(s) > 0 && len(substr) > 0 && 
-		 containsLower(s, substr))
+	return len(s) >= len(substr) &&
+		(s == substr ||
+			len(s) > 0 && len(substr) > 0 &&
+				containsLower(s, substr))
 }
 
 func containsLower(s, substr string) bool {
@@ -1017,7 +1017,12 @@ func (e *Engine) checkPortConflict(svc *Service) error {
 			// 检查是否是自己的进程
 			pid := findPIDByPort(port)
 			if pid != svc.PID {
-				return fmt.Errorf("端口 %d 被进程 %d 占用", port, pid)
+				// 报上占用者可执行文件路径：落在 DevStack 自身 programs 目录内
+				// 就是会话残留，否则是外部程序——两者处置完全不同，不能只给个 PID。
+				if exe := process.GetExecutablePath(pid); exe != "" {
+					return fmt.Errorf("端口 %d 被进程 %d 占用（%s）", port, pid, exe)
+				}
+				return fmt.Errorf("端口 %d 被进程 %d 占用（无法读取占用者路径）", port, pid)
 			}
 		}
 	}
@@ -1209,7 +1214,7 @@ func isPortReady(port int) bool {
 
 // findPIDByPort 通过端口查找 PID
 func findPIDByPort(port int) int {
-	// 使用 netstat 查找占用端口的进程
+	// 内核 TCP 表（GetExtendedTcpTable，netstat 兜底）；同端口多监听者时取首个
 	return process.FindPIDByPort(port)
 }
 
